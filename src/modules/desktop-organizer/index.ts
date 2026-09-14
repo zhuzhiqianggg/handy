@@ -2,33 +2,48 @@ import type { ModuleMeta } from '@/core/types';
 import { desktopOrganizerCommands } from './commands';
 
 /**
- * 桌面整理（M2）模块元数据（V12：scan / preview / apply / undo 闭环接入）。
+ * 桌面挂件（原桌面整理 M2）模块元数据。
  *
- * 经 `import.meta.glob`（匹配各模块目录下的 index.ts）自动发现，无需在任何注册表登记。
- * 命令在 `./commands` 声明；面板内页经 `loadView` 惰性加载 `OrganizerView`。
- * macOS 降级为「文件归类」（由 `platform.capabilities.desktopIcons` 驱动，V12 规则
- * 引擎与安全策略一致）。
- *
- * 安全说明：本模块具备**真实文件移动能力**——移动仅经用户「生成预览 → 二次确认 →
- * 应用」链路发生，支持一键撤销；自动化测试只允许在 TEMP 沙箱目录内进行。
+ * **注册策略（原地改名重定向，同 notes → 工作台）**：V12 的「建目录 + 移动文件」
+ * 整理方案被用户否决，新方案为**文件引用型**桌面网格挂件（文件绝不移动，见
+ * `../desktop-grid/`）。本模块沿用 id `desktop-organizer`（命令、路由、启停状态、
+ * 备份兼容均无需迁移），仅重命名为「桌面挂件」并把 `loadView` 重定向到
+ * `../desktop-grid/GridManagerView`：
+ *   - 侧栏 / 命令面板 / 设置中心中「桌面整理」位置展示为「桌面挂件」；
+ *   - 旧 V12 命令（organizer_scan / preview / apply / undo…）保留可用，
+ *     旧前端 `OrganizerView` 就地休眠不删除；
+ *   - 挂件本体是独立透明窗（label `grid-overlay`），由 Rust
+ *     `grid_overlay_show / grid_overlay_hide` 创建与压回桌面层，
+ *     不再走模块 windowSpec 开窗，故 surface 收敛为 panel。
  */
 const desktopOrganizerModule = {
   id: 'desktop-organizer',
-  name: '桌面整理',
-  description: '桌面文件按类型 / 日期归类，可预览与撤销',
+  name: '桌面挂件',
+  description: '桌面网格挂件：盒子内是文件引用，双击打开原文件，绝不移动',
   icon: 'LayoutGrid',
   order: 40,
-  surface: ['panel', 'window'],
+  surface: ['panel'],
   tier: 'free',
-  keywords: ['桌面', '整理', '归类', '文件', 'organize', 'desktop', 'zmzl'],
+  keywords: [
+    '桌面挂件',
+    '挂件',
+    '网格',
+    '桌面整理',
+    '快捷',
+    '引用',
+    'widget',
+    'grid',
+    'desktop',
+    'zmzl',
+    'gj',
+  ],
   platforms: ['windows', 'macos'],
   capabilities: ['desktopFileOrganize'],
   route: 'desktop-organizer',
-  windowSpec: { kind: 'organizer' },
   contributes: {
     commands: desktopOrganizerCommands,
   },
-  loadView: () => import('./OrganizerView'),
+  loadView: () => import('../desktop-grid/GridManagerView'),
 } satisfies ModuleMeta;
 
 export default desktopOrganizerModule;

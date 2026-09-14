@@ -41,6 +41,11 @@ dirs = "5"
 walkdir = "2"
 sysinfo = "0.32"
 
+# 密码存储器（M5）：AES-256-GCM 加密 + Argon2id 密钥派生（纯 Rust 实现）
+aes-gcm = "0.10"
+argon2 = "0.5"
+rand = "0.8"
+
 # 平台限定依赖：仅 Windows
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.58", features = [

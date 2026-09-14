@@ -6,13 +6,14 @@ import { ModuleView } from './components/ModuleView';
 import { SettingsCenter } from './components/SettingsCenter';
 import { useAppStore, type MainView } from '@/stores/useAppStore';
 import { NoteWindow } from '@/modules/notes/NoteWindow';
+import { GridOverlay } from '@/modules/desktop-grid/GridOverlay';
 import { ReminderScheduler } from '@/modules/todos/ReminderScheduler';
 import { useTheme } from '@/hooks/useTheme';
 import { useHotkeyOpen } from '@/hooks/useHotkeyOpen';
 import { applyViewSize, initWindowShell } from '@/lib/windowShell';
 
 /** 可挂载的窗口根类型（与 Rust 侧 WindowKind 对应） */
-export type WindowRoot = 'main' | 'note' | 'settings' | 'organizer';
+export type WindowRoot = 'main' | 'note' | 'settings' | 'organizer' | 'grid-overlay';
 
 export interface AppProps {
   /** 由 main.tsx 依据 ?window= 参数注入 */
@@ -102,6 +103,11 @@ const App: FC<AppProps> = ({ windowRoot = 'main', noteId }) => {
       );
     }
     return <NoteWindow noteId={noteId} />;
+  }
+
+  // 桌面网格挂件透明窗（grid）：全窗即挂件画布，点击穿透/交互切换由 Rust 光标轮询协同
+  if (windowRoot === 'grid-overlay') {
+    return <GridOverlay />;
   }
 
   if (windowRoot !== 'main') {

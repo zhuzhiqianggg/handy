@@ -10,6 +10,19 @@ import type {
   OrganizerUndoReport,
 } from '@/types/organizer';
 import type { BackupReport, ImportOutcome } from '@/types/backup';
+import type {
+  GridBox,
+  GridBoxInput,
+  GridGeometry,
+  GridItem,
+  GridRegion,
+} from '@/types/grid';
+import type {
+  VaultItem,
+  VaultItemInput,
+  VaultItemPatch,
+  VaultStatus,
+} from '@/types/vault';
 
 /**
  * 统一的 invoke 封装。
@@ -113,6 +126,83 @@ export const ipc = {
   /** 导入备份（校验 + 写 pending 标记；重启应用生效） */
   backupImport: (sourceDir: string): Promise<ImportOutcome> =>
     call<ImportOutcome>('backup_import', { sourceDir }),
+
+  // —— 密码存储器（M5 / vault）——
+
+  /** 查询密码库状态（是否已初始化 / 是否已解锁） */
+  vaultStatus: (): Promise<VaultStatus> => call<VaultStatus>('vault_status'),
+  /** 首次设置主密码（已初始化时报错；成功后进入解锁态） */
+  vaultSetup: (masterPassword: string): Promise<VaultStatus> =>
+    call<VaultStatus>('vault_setup', { masterPassword }),
+  /** 解锁（主密码错误返回中文错误） */
+  vaultUnlock: (masterPassword: string): Promise<VaultStatus> =>
+    call<VaultStatus>('vault_unlock', { masterPassword }),
+  /** 锁定（清除后端内存中的密钥） */
+  vaultLock: (): Promise<void> => call<void>('vault_lock'),
+  /** 列出全部条目（逐字段解密；锁定态报错「密码库已锁定」） */
+  vaultList: (): Promise<VaultItem[]> => call<VaultItem[]>('vault_list'),
+  /** 新建条目（明文仅在传输中，落库前由 Rust 侧逐字段加密） */
+  vaultCreate: (input: VaultItemInput): Promise<VaultItem> =>
+    call<VaultItem>('vault_create', { input }),
+  /** 更新条目（仅传入需修改的字段） */
+  vaultUpdate: (itemId: number, patch: VaultItemPatch): Promise<VaultItem> =>
+    call<VaultItem>('vault_update', { itemId, patch }),
+  /** 删除条目 */
+  vaultDelete: (itemId: number): Promise<void> => call<void>('vault_delete', { itemId }),
+
+  // —— 桌面网格挂件（M2 改版：文件引用型，绝不移动文件）——
+
+  /** 盒子列表（含条目计数） */
+  gridBoxList: (): Promise<GridBox[]> => call<GridBox[]>('grid_box_list'),
+  /** 创建（boxId 缺省）或更新盒子（几何 / 名称 / 排序），返回落库后的完整实体 */
+  gridBoxUpsert: (input: GridBoxInput): Promise<GridBox> =>
+    call<GridBox>('grid_box_upsert', {
+      boxId: input.boxId ?? null,
+      name: input.name ?? null,
+      posX: input.posX ?? null,
+      posY: input.posY ?? null,
+      width: input.width ?? null,
+      height: input.height ?? null,
+      sort: input.sort ?? null,
+    }),
+  /** 删除盒子（级联删除其条目引用；文件本体不受影响） */
+  gridBoxDelete: (boxId: number): Promise<void> => call<void>('grid_box_delete', { boxId }),
+  /** 添加条目：仅登记原文件路径引用（displayName 缺省 = 文件名） */
+  gridItemAdd: (boxId: number, filePath: string, displayName?: string): Promise<GridItem> =>
+    call<GridItem>('grid_item_add', { boxId, filePath, displayName: displayName ?? null }),
+  /** 删除条目（仅移除引用） */
+  gridItemDelete: (itemId: number): Promise<void> => call<void>('grid_item_delete', { itemId }),
+  /** 某盒子的条目列表 */
+  gridItemList: (boxId: number): Promise<GridItem[]> => call<GridItem[]>('grid_item_list', { boxId }),
+  /** 读取挂件窗几何（无记录返回 null） */
+  gridGeometryGet: (): Promise<GridGeometry | null> =>
+    call<GridGeometry | null>('grid_geometry_get'),
+  /** 持久化挂件窗几何（窗口 moved / resized 防抖后调用） */
+  gridGeometrySet: (geo: GridGeometry): Promise<void> =>
+    call<void>('grid_geometry_set', { x: geo.x, y: geo.y, width: geo.width, height: geo.height }),
+  /** 交互期显式申请：true = 拖拽/缩放/重命名期间保持可交互；false = 交还光标命中轮询控制 */
+  gridSetInteractive: (interactive: boolean): Promise<void> =>
+    call<void>('grid_set_interactive', { interactive }),
+  /** 上报命中区域（挂件窗内物理像素，Rust 光标轮询用；全量替换） */
+  gridOverlayUpdateRegions: (regions: GridRegion[]): Promise<void> =>
+    call<void>('grid_overlay_update_regions', { regions }),
+  /** 显示（幂等）桌面挂件窗（Rust 侧创建无边框透明窗并压回桌面层） */
+  gridOverlayShow: (): Promise<void> => call<void>('grid_overlay_show'),
+  /** 隐藏桌面挂件窗（不销毁，盒子配置保留） */
+  gridOverlayHide: (): Promise<void> => call<void>('grid_overlay_hide'),
+  /** 打开条目原文件（Rust 侧 shell 插件 open；本地路径不受前端 open 作用域限制） */
+  gridOpenPath: (path: string): Promise<void> => call<void>('grid_open_path', { path }),
+
+  // —— 工作台快捷入口（workstation）——
+
+  /**
+   * 打开网址 / 本地路径（tauri-plugin-shell 的 `open` 命令；Rust 侧已注册该插件，
+   * capabilities 已授予 `shell:allow-open`）。
+   * 注意：`shell:allow-open` 默认作用域仅放行 http(s) / mailto / tel 链接；
+   * 本地路径被默认作用域拒绝时由调用方捕获并向用户提示。
+   */
+  shellOpen: (path: string): Promise<void> =>
+    call<void>('plugin:shell|open', { path, with: null }),
 
   // 待办 / 桌面整理 / 授权 / 备份等命令见 ARCHITECTURE §6，
   // 随对应任务（V09/V12/V13）逐步补入。

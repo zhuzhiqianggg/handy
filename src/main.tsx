@@ -44,6 +44,9 @@ function resolveWindow(search: string): WindowTarget {
       return { windowRoot: 'settings' };
     case 'organizer':
       return { windowRoot: 'organizer' };
+    case 'grid-overlay':
+      // 桌面网格挂件透明窗（Rust `grid_overlay_show` 以 ?window=grid-overlay 创建）
+      return { windowRoot: 'grid-overlay' };
     default:
       return { windowRoot: 'main' };
   }
