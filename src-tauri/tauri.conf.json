@@ -16,7 +16,7 @@
         "label": "main",
         "title": "Handy · 顺手",
         "visible": false,
-        "devtools": true,
+        "devtools": false,
         "width": 900,
         "height": 620,
         "resizable": true,
