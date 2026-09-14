@@ -1,5 +1,0 @@
-killed 36948 started=12:25:23
-killed 37464 started=12:25:10
-killed 37800 started=12:25:19
-uninstall ran, dir-exists=True
-installed-exe mtime: 10:05:06 size=8.6MB

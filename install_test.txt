@@ -1,4 +1,0 @@
-start: 09:55:51
-launched, lastexit=
-INSTALLED-AT: C:\Users\Administrator\AppData\Local\Handy
-exe-size: 8.6 MB
