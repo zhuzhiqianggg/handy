@@ -63,6 +63,18 @@ interface DiffStats {
   similarity: number;
 }
 
+/** 滚动条差异指示标记（以百分比定位在滚动容器内） */
+interface DiffMark {
+  /** 距顶百分比（相对滚动内容高度） */
+  top: number;
+  /** 高度百分比 */
+  height: number;
+  /** 差异类型 */
+  kind: RowKind;
+  /** 对应可见行索引 */
+  rowIndex: number;
+}
+
 /** 渲染保护：超大批量只渲染前 N 行，避免 DOM 爆炸卡死 */
 const MAX_RENDER_ROWS = 2000;
 /** 字符级对比的文本长度上限（jsdiff diffChars 为 O(n·m)，超限降级为行级） */
@@ -498,8 +510,8 @@ function Segments({ segs }: { segs: readonly Seg[] }): React.JSX.Element {
           <span
             key={index}
             className={cn(
-              seg.mark === 'added' && 'rounded bg-emerald-200/80 text-emerald-900',
-              seg.mark === 'removed' && 'rounded bg-red-200/80 text-red-900',
+              seg.mark === 'added' && 'rounded bg-emerald-300 text-emerald-950',
+              seg.mark === 'removed' && 'rounded bg-red-300 text-red-950',
             )}
           >
             {seg.text}
@@ -515,10 +527,12 @@ function DiffCell({
   line,
   kind,
   side,
+  active = false,
 }: {
   line: SideLine | null;
   kind: RowKind;
   side: 'left' | 'right';
+  active?: boolean;
 }): React.JSX.Element {
   if (line === null) {
     return <div className="min-h-[22px] rounded bg-muted/30" aria-hidden="true" />;
@@ -530,8 +544,9 @@ function DiffCell({
     <div
       className={cn(
         'flex min-h-[22px] items-start gap-2 rounded px-2 py-0.5 font-mono text-xs leading-5',
-        isAdded && 'bg-emerald-50',
-        isRemoved && 'bg-red-50',
+        isAdded && 'bg-emerald-100',
+        isRemoved && 'bg-red-100',
+        active && 'ring-2 ring-inset ring-brand',
       )}
     >
       <span className="w-8 shrink-0 select-none text-right text-muted-foreground/70">{line.no}</span>
@@ -596,6 +611,10 @@ export function TextDiff({ initialInput = '' }: CommandProps): React.JSX.Element
   });
   const [mergeMode, setMergeMode] = React.useState<boolean>(false);
   const [resolutions, setResolutions] = React.useState<Record<number, 'left' | 'right'>>({});
+  // 差异扫描辅助状态：列表面板开关 + 当前激活差异索引
+  const [showDiffList, setShowDiffList] = React.useState<boolean>(true);
+  const [activeDiff, setActiveDiff] = React.useState<number>(0);
+  const scrollRef = React.useRef<HTMLDivElement>(null);
 
   const normalizedA = React.useMemo<string>(() => normalizeText(textA, options), [textA, options]);
   const normalizedB = React.useMemo<string>(() => normalizeText(textB, options), [textB, options]);
@@ -674,11 +693,150 @@ export function TextDiff({ initialInput = '' }: CommandProps): React.JSX.Element
     [rows],
   );
 
+  // 差异列表：从可见行派生（仅含非相同行），用于列表面板、当前高亮与键盘导航
+  const diffs = React.useMemo<Array<{ rowIndex: number; kind: RowKind; lineNo: number }>>(() => {
+    const list: Array<{ rowIndex: number; kind: RowKind; lineNo: number }> = [];
+    visibleRows.forEach((row, index) => {
+      if (row.kind === 'same') {
+        return;
+      }
+      const lineNo = row.left?.no ?? row.right?.no ?? 0;
+      list.push({ rowIndex: index, kind: row.kind, lineNo });
+    });
+    return list;
+  }, [visibleRows]);
+
   const swap = React.useCallback((): void => {
     setTextA(textB);
     setTextB(textA);
     setResolutions({});
   }, [textA, textB]);
+
+  // ——— 差异扫描辅助：差异列表 / 当前高亮 / 键盘导航 / 滚动条指示 ———
+  const scrollToRow = React.useCallback((rowIndex: number): void => {
+    [`diff-row-l-${rowIndex}`, `diff-row-r-${rowIndex}`, `diff-row-i-${rowIndex}`].forEach((id) => {
+      const el = document.getElementById(id);
+      if (el !== null) {
+        el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      }
+    });
+  }, []);
+
+  const goToDiff = React.useCallback(
+    (direction: 'next' | 'prev'): void => {
+      if (diffs.length === 0) {
+        return;
+      }
+      const next = direction === 'next'
+        ? Math.min(activeDiff + 1, diffs.length - 1)
+        : Math.max(activeDiff - 1, 0);
+      setActiveDiff(next);
+      const target = diffs[next];
+      if (target !== undefined) {
+        window.setTimeout(() => scrollToRow(target.rowIndex), 0);
+      }
+    },
+    [activeDiff, diffs, scrollToRow],
+  );
+
+  const handleSelectDiff = React.useCallback(
+    (index: number): void => {
+      setActiveDiff(index);
+      const target = diffs[index];
+      if (target !== undefined) {
+        window.setTimeout(() => scrollToRow(target.rowIndex), 0);
+      }
+    },
+    [diffs, scrollToRow],
+  );
+
+  // 滚动条差异指示：测量每个差异行在滚动容器中的百分比位置
+  const [marks, setMarks] = React.useState<DiffMark[]>([]);
+  React.useEffect(() => {
+    const container = scrollRef.current;
+    if (container === null || diffs.length === 0) {
+      setMarks([]);
+      return;
+    }
+    const scrollHeight = container.scrollHeight;
+    const containerRect = container.getBoundingClientRect();
+    if (scrollHeight === 0) {
+      setMarks([]);
+      return;
+    }
+    const prefix = mode === 'split' ? 'diff-row-l-' : 'diff-row-i-';
+    const next: DiffMark[] = [];
+    for (const diff of diffs) {
+      const el = document.getElementById(`${prefix}${diff.rowIndex}`);
+      if (el === null) {
+        continue;
+      }
+      const rect = el.getBoundingClientRect();
+      const offsetTop = rect.top - containerRect.top + container.scrollTop;
+      next.push({
+        top: (offsetTop / scrollHeight) * 100,
+        height: Math.max(1.5, (rect.height / scrollHeight) * 100),
+        kind: diff.kind,
+        rowIndex: diff.rowIndex,
+      });
+    }
+    setMarks(next);
+  }, [diffs, mode, mergeMode, visibleRows]);
+
+  // 差异集合变化后夹紧 activeDiff 索引，避免越界
+  React.useEffect(() => {
+    setActiveDiff((prev) => (diffs.length === 0 ? 0 : Math.min(prev, diffs.length - 1)));
+  }, [diffs]);
+
+  // 键盘导航：↑/k 上一处差异，↓/j 下一处差异（输入框聚焦时不拦截）
+  React.useEffect(() => {
+    const handleKey = (event: KeyboardEvent): void => {
+      const target = event.target as HTMLElement | null;
+      const tag = target?.tagName;
+      if (tag === 'TEXTAREA' || tag === 'INPUT') {
+        return;
+      }
+      if (event.key === 'ArrowDown' || event.key === 'j') {
+        event.preventDefault();
+        goToDiff('next');
+      } else if (event.key === 'ArrowUp' || event.key === 'k') {
+        event.preventDefault();
+        goToDiff('prev');
+      }
+    };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [goToDiff]);
+
+  const handleIndicatorClick = React.useCallback(
+    (event: React.MouseEvent<HTMLDivElement>): void => {
+      if (marks.length === 0) {
+        return;
+      }
+      const rect = event.currentTarget.getBoundingClientRect();
+      const clickY = ((event.clientY - rect.top) / rect.height) * 100;
+      let closest: DiffMark | null = null;
+      let closestDist = Infinity;
+      for (const mark of marks) {
+        const center = mark.top + mark.height / 2;
+        const dist = Math.abs(center - clickY);
+        if (dist < closestDist) {
+          closestDist = dist;
+          closest = mark;
+        }
+      }
+      if (closest === null) {
+        return;
+      }
+      const current = closest;
+      const index = diffs.findIndex((d) => d.rowIndex === current.rowIndex);
+      if (index >= 0) {
+        setActiveDiff(index);
+        window.setTimeout(() => scrollToRow(current.rowIndex), 0);
+      }
+    },
+    [marks, diffs, scrollToRow],
+  );
 
   return (
     <CommandShell
@@ -808,95 +966,118 @@ export function TextDiff({ initialInput = '' }: CommandProps): React.JSX.Element
           <div className="rounded-xl border border-border bg-card p-8 text-center text-sm text-muted-foreground">
             在上方输入两段文本后自动对比
           </div>
-        ) : (
-          <div className="overflow-hidden rounded-xl border border-border bg-card">
-            <div className="flex items-center justify-between gap-2 border-b border-border px-4 py-2">
-              <span className="text-sm font-medium text-foreground">差异</span>
-              <div className="flex items-center gap-2">
-                {rows.length > MAX_RENDER_ROWS ? (
-                  <span className="text-xs text-amber-600">
-                    共 {rows.length} 行，仅渲染前 {MAX_RENDER_ROWS} 行
+        ) : hasDiff ? (
+          <div className="flex gap-3">
+            <div className="relative flex-1 overflow-hidden rounded-xl border border-border bg-card">
+              <div className="flex items-center justify-between gap-2 border-b border-border px-4 py-2">
+                <span className="text-sm font-medium text-foreground">差异</span>
+                <div className="flex items-center gap-2">
+                  {rows.length > MAX_RENDER_ROWS ? (
+                    <span className="text-xs text-amber-600">
+                      共 {rows.length} 行，仅渲染前 {MAX_RENDER_ROWS} 行
+                    </span>
+                  ) : null}
+                  <span className="text-xs text-muted-foreground">
+                    {mode === 'split' ? '左右两栏可独立滚动' : '行内视图'}
                   </span>
-                ) : null}
-                <span className="text-xs text-muted-foreground">
-                  {mode === 'split' ? '左右两栏可独立滚动' : '行内视图'}
-                </span>
+                  <ToggleChip active={showDiffList} onClick={() => setShowDiffList((prev) => !prev)}>
+                    差异列表
+                  </ToggleChip>
+                </div>
               </div>
-            </div>
 
-            {hasDiff ? (
-              <div className="h-[340px] p-2">
+              <div className="relative h-[340px] p-2">
                 {mode === 'split' ? (
                   <div className="grid h-full grid-cols-2 gap-2">
-                    <div className="scrollbar-thin h-full overflow-auto pr-1">
-                      {visibleRows.map((row, index) => (
-                        <div key={`l-${index}`} className="flex flex-col gap-0.5">
-                          <DiffCell
-                            line={row.left}
-                            kind={row.kind}
-                            side="left"
-                          />
-                          {mergeMode && row.kind !== 'same' ? (
-                            <MergeBar
-                              row={row}
-                              index={index}
-                              choice={resolutions[index]}
-                              onChoose={setResolution}
-                            />
-                          ) : null}
-                        </div>
-                      ))}
+                    <div ref={scrollRef} className="scrollbar-thin h-full overflow-auto pr-1">
+                      {visibleRows.map((row, index) => {
+                        const isActive =
+                          diffs.length > 0 && activeDiff < diffs.length && diffs[activeDiff]?.rowIndex === index;
+                        return (
+                          <div key={`l-${index}`} id={`diff-row-l-${index}`} className="flex flex-col gap-0.5">
+                            <DiffCell line={row.left} kind={row.kind} side="left" active={isActive} />
+                            {mergeMode && row.kind !== 'same' ? (
+                              <MergeBar row={row} index={index} choice={resolutions[index]} onChoose={setResolution} />
+                            ) : null}
+                          </div>
+                        );
+                      })}
                     </div>
                     <div className="scrollbar-thin h-full overflow-auto pr-1">
-                      {visibleRows.map((row, index) => (
-                        <div key={`r-${index}`} className="flex flex-col gap-0.5">
-                          <DiffCell
-                            line={row.right}
-                            kind={row.kind}
-                            side="right"
-                          />
-                          {mergeMode && row.kind !== 'same' ? (
-                            <div className="min-h-[22px]" aria-hidden="true" />
-                          ) : null}
-                        </div>
-                      ))}
+                      {visibleRows.map((row, index) => {
+                        const isActive =
+                          diffs.length > 0 && activeDiff < diffs.length && diffs[activeDiff]?.rowIndex === index;
+                        return (
+                          <div key={`r-${index}`} id={`diff-row-r-${index}`} className="flex flex-col gap-0.5">
+                            <DiffCell line={row.right} kind={row.kind} side="right" active={isActive} />
+                            {mergeMode && row.kind !== 'same' ? (
+                              <div className="min-h-[22px]" aria-hidden="true" />
+                            ) : null}
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
                 ) : (
-                  <div className="scrollbar-thin h-full overflow-auto">
-                    {visibleRows.map((row, index) => (
-                      <div key={`i-${index}`} className="flex flex-col gap-0.5">
-                        {row.kind === 'same' ? (
-                          // 相同行只渲染一次（否则左右各一条，内容重复）
-                          <DiffCell line={row.left} kind="same" side="left" />
-                        ) : (
-                          <>
-                            {row.left !== null ? (
-                              <DiffCell line={row.left} kind={row.kind} side="left" />
-                            ) : null}
-                            {row.right !== null ? (
-                              <DiffCell line={row.right} kind={row.kind} side="right" />
-                            ) : null}
-                          </>
-                        )}
-                        {mergeMode && row.kind !== 'same' ? (
-                          <MergeBar
-                            row={row}
-                            index={index}
-                            choice={resolutions[index]}
-                            onChoose={setResolution}
-                          />
-                        ) : null}
-                      </div>
-                    ))}
+                  <div ref={scrollRef} className="scrollbar-thin h-full overflow-auto">
+                    {visibleRows.map((row, index) => {
+                      const isActive =
+                        diffs.length > 0 && activeDiff < diffs.length && diffs[activeDiff]?.rowIndex === index;
+                      return (
+                        <div key={`i-${index}`} id={`diff-row-i-${index}`} className="flex flex-col gap-0.5">
+                          {row.kind === 'same' ? (
+                            // 相同行只渲染一次（否则左右各一条，内容重复）
+                            <DiffCell line={row.left} kind="same" side="left" active={false} />
+                          ) : (
+                            <>
+                              {row.left !== null ? (
+                                <DiffCell line={row.left} kind={row.kind} side="left" active={isActive} />
+                              ) : null}
+                              {row.right !== null ? (
+                                <DiffCell line={row.right} kind={row.kind} side="right" active={isActive} />
+                              ) : null}
+                            </>
+                          )}
+                          {mergeMode && row.kind !== 'same' ? (
+                            <MergeBar row={row} index={index} choice={resolutions[index]} onChoose={setResolution} />
+                          ) : null}
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
+                {marks.length > 0 ? (
+                  <div
+                    className="absolute right-0 top-2 bottom-2 z-10 w-3 cursor-pointer bg-muted/20"
+                    onClick={handleIndicatorClick}
+                    title="点击跳转到差异"
+                  >
+                    {marks.map((mark) => {
+                      const isCurrent =
+                        diffs.length > 0 && activeDiff < diffs.length && diffs[activeDiff]?.rowIndex === mark.rowIndex;
+                      return (
+                        <div
+                          key={mark.rowIndex}
+                          className={cn(
+                            'absolute left-0 right-0 rounded-full',
+                            mark.kind === 'added' ? 'bg-emerald-500' : mark.kind === 'removed' ? 'bg-red-500' : 'bg-amber-500',
+                            isCurrent && 'ring-2 ring-inset ring-brand',
+                          )}
+                          style={{ top: `${mark.top}%`, height: `${mark.height}%` }}
+                        />
+                      );
+                    })}
+                  </div>
+                ) : null}
               </div>
-            ) : (
-              <div className="p-8 text-center text-sm text-muted-foreground">
-                两段文本内容一致，无差异
-              </div>
-            )}
+            </div>
+            {showDiffList && diffs.length > 0 ? (
+              <DiffListPanel diffs={diffs} activeDiff={activeDiff} onSelect={handleSelectDiff} />
+            ) : null}
+          </div>
+        ) : (
+          <div className="rounded-xl border border-border bg-card p-8 text-center text-sm text-muted-foreground">
+            两段文本内容一致，无差异
           </div>
         )}
 
@@ -1015,6 +1196,51 @@ function MergeBar({
       >
         {rightLabel} →
       </button>
+    </div>
+  );
+}
+
+/** 差异列表面板：列出每条差异「第 N 行 · 增/删」，点击跳转到对应行 */
+function DiffListPanel({
+  diffs,
+  activeDiff,
+  onSelect,
+}: {
+  diffs: ReadonlyArray<{ rowIndex: number; kind: RowKind; lineNo: number }>;
+  activeDiff: number;
+  onSelect: (index: number) => void;
+}): React.JSX.Element {
+  return (
+    <div className="w-56 shrink-0 overflow-hidden rounded-xl border border-border bg-card">
+      <div className="border-b border-border px-3 py-2 text-sm font-medium text-foreground">
+        差异列表 ({diffs.length})
+      </div>
+      <div className="scrollbar-thin max-h-[340px] overflow-auto p-1">
+        {diffs.map((diff, index) => {
+          const isCurrent = index === activeDiff;
+          const label = diff.kind === 'added' ? '新增' : diff.kind === 'removed' ? '删除' : '修改';
+          const dot = diff.kind === 'added' ? 'bg-emerald-500' : diff.kind === 'removed' ? 'bg-red-500' : 'bg-amber-500';
+          return (
+            <button
+              key={`${diff.rowIndex}-${index}`}
+              type="button"
+              onClick={() => onSelect(index)}
+              className={cn(
+                'mb-1 w-full rounded-md border px-2 py-1 text-left text-xs transition-colors',
+                isCurrent
+                  ? 'border-brand/40 bg-brand-muted text-brand'
+                  : 'border-border hover:bg-accent hover:text-accent-foreground',
+              )}
+            >
+              <div className="flex items-center gap-1.5">
+                <span className={cn('inline-block h-2 w-2 shrink-0 rounded-full', dot)} />
+                <span className="font-mono">第 {diff.lineNo} 行</span>
+                <span className="ml-auto">{label}</span>
+              </div>
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }

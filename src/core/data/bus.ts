@@ -20,9 +20,6 @@ export const BUS_EVENT_NOTES_CHANGED = 'notes:changed';
 /** 待办集合变更事件（载荷见 todosService.TodoChangedPayload） */
 export const BUS_EVENT_TODOS_CHANGED = 'todos:changed';
 
-/** 剪贴板历史变更事件（载荷见 clipboardService.ClipsChangedPayload，V11 UI 消费） */
-export const BUS_EVENT_CLIPS_CHANGED = 'clips:changed';
-
 /** 事件处理器 */
 export type BusHandler<T> = (payload: T) => void;
 

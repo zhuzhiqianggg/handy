@@ -29,7 +29,6 @@ import { useTheme } from '@/hooks/useTheme';
 import { resolveIcon } from '@/lib/icons';
 import { ipc } from '@/lib/ipc';
 import { isTauri } from '@/platform/detect';
-import { clearClips } from '@/core/data/clipboardService';
 import { exportBackup, importBackup } from '@/lib/backup';
 import type { AppSettings, ThemeMode } from '@/core/types';
 
@@ -306,50 +305,6 @@ function AutoLaunchRow(): React.JSX.Element {
   );
 }
 
-/** 清空剪贴板历史（复用 V10 clip_clear，只删非置顶；两步确认）。 */
-function ClearClipsRow(): React.JSX.Element {
-  const [confirming, setConfirming] = React.useState(false);
-  const [busy, setBusy] = React.useState(false);
-
-  const clear = async (): Promise<void> => {
-    setConfirming(false);
-    setBusy(true);
-    try {
-      const removed = await clearClips();
-      toast.success(`已清空 ${removed} 条剪贴板历史（置顶条目保留）`);
-    } catch (err: unknown) {
-      toast.error(`清空失败：${err instanceof Error ? err.message : String(err)}`);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <Row title="清空剪贴板历史" description="删除全部非置顶记录（不可恢复）">
-      {confirming ? (
-        <div className="flex items-center gap-1.5">
-          <Button
-            size="sm"
-            variant="destructive"
-            className="h-7"
-            onClick={() => void clear()}
-            disabled={busy}
-          >
-            {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-            确认清空
-          </Button>
-          <Button size="sm" variant="ghost" className="h-7" onClick={() => setConfirming(false)}>
-            取消
-          </Button>
-        </div>
-      ) : (
-        <Button size="sm" variant="outline" className="h-7" onClick={() => setConfirming(true)}>
-          清空
-        </Button>
-      )}
-    </Row>
-  );
-}
 
 /**
  * 备份区（V13）：导出（dialog 选目录 → VACUUM INTO 快照 + settings 镜像）/
@@ -396,7 +351,7 @@ function BackupSection(): React.JSX.Element {
   return (
     <div className="flex flex-col py-3">
       <div className="mb-2 rounded-md border border-border bg-muted/30 px-3 py-2 text-[11px] leading-5 text-muted-foreground">
-        备份内容：数据库（便签 / 待办 / 剪贴板历史 / 整理计划）与应用配置。导出位置与导入来源
+        备份内容：数据库（便签 / 待办 / 整理计划）与应用配置。导出位置与导入来源
         均由你在弹出的目录选择框中指定；导入会**覆盖现有数据**，并在重启应用后生效。
       </div>
       <div className="flex items-center gap-2">
@@ -474,7 +429,7 @@ function ModuleToggles(): React.JSX.Element {
  * 设置中心（V13 完整版）。
  *
  * 分区：通用（快捷键录制 / 自启动 / 主题 / 托盘 / 更新）、Pro 提示条、模块开关
- * （Pro 门控灰化）、剪贴板与历史（含清空历史）、备份（导出 / 导入）、
+ * （Pro 门控灰化）、历史记录、备份（导出 / 导入）、
  * 以及各模块经扩展点 `settings.section` 贡献的分区与「关于」。
  */
 export function SettingsCenter(): React.JSX.Element {
@@ -549,11 +504,9 @@ export function SettingsCenter(): React.JSX.Element {
 
         <Separator />
 
-        {/* 剪贴板与历史 */}
+        {/* 历史记录 */}
         <section className="py-2">
-          <h3 className="py-1 text-xs font-medium text-muted-foreground">剪贴板与历史</h3>
-          <BooleanRow title="启用剪贴板历史" description="记录复制内容" field="clipboardHistory" />
-          <BooleanRow title="后台监听剪贴板" description="macOS 首次需授权" field="clipboardWatch" />
+          <h3 className="py-1 text-xs font-medium text-muted-foreground">历史记录</h3>
           <BooleanRow title="记录工具使用历史" description="便于快速回访" field="recordHistory" />
           <NumberRow
             title="工具历史上限"
@@ -562,14 +515,6 @@ export function SettingsCenter(): React.JSX.Element {
             min={10}
             max={500}
           />
-          <NumberRow
-            title="剪贴板上限"
-            description="超出后自动裁剪"
-            field="maxClipboard"
-            min={10}
-            max={1000}
-          />
-          <ClearClipsRow />
         </section>
 
         {/* 备份 */}

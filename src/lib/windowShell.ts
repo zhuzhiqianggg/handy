@@ -45,6 +45,12 @@ const SIZE_EPSILON = 6;
 const PROGRAMMATIC_GUARD_MS = 600;
 /** 最大化状态轮询兜底间隔（无边框窗口下最大化事件不可靠） */
 const STATUS_POLL_MS = 1500;
+/**
+ * 持久化尺寸下限（与 `tauri.conf.json` 的 `minWidth` / `minHeight` 对齐）。
+ * 低于此值视为脏数据 / 折叠值（例如最小化残留的异常尺寸），丢弃且不记为用户自定义。
+ */
+const MIN_W = 640;
+const MIN_H = 440;
 
 /**
  * 各视图的设计基准尺寸（逻辑像素）。
@@ -100,7 +106,14 @@ function loadState(): WindowShellState | null {
       return null;
     }
     const record = parsed as Record<string, unknown>;
-    if (!isPositiveNumber(record.w) || !isPositiveNumber(record.h)) {
+    // 下限校验（V16）：拒绝小于 minWidth / minHeight 的脏数据 / 折叠值，
+    // 返回 null 即视为「未手动调整过」，后续按视图预设尺寸套用。
+    if (
+      !isPositiveNumber(record.w) ||
+      !isPositiveNumber(record.h) ||
+      record.w < MIN_W ||
+      record.h < MIN_H
+    ) {
       return null;
     }
     cachedState = {
@@ -273,6 +286,14 @@ export async function initWindowShell(): Promise<() => void> {
           if (await win.isMaximized()) {
             return;
           }
+          // V16 修复：最小化 / 隐藏态的尺寸回弹（如最小化时的异常尺寸）不得写回持久化，
+          // 否则会把正常尺寸覆盖成"折叠小窗"，并被误标 userResized（锁定预设尺寸）。
+          if (await win.isMinimized()) {
+            return;
+          }
+          if (!(await win.isVisible())) {
+            return;
+          }
           window.clearTimeout(persistTimer);
           persistTimer = window.setTimeout(() => {
             void (async () => {
@@ -281,6 +302,10 @@ export async function initWindowShell(): Promise<() => void> {
                 const size = (await win.innerSize()).toLogical(scale);
                 const w = Math.round(size.width);
                 const h = Math.round(size.height);
+                // 低于下限的异常尺寸（折叠 / 最小化残留）直接丢弃，不写回。
+                if (w < MIN_W || h < MIN_H) {
+                  return;
+                }
                 // 与上次程序化尺寸一致 → 视为系统回弹（如最大化还原），不记为用户自定义
                 if (
                   lastApplied !== null &&
@@ -355,7 +380,13 @@ export async function subscribeStatus(
   };
 }
 
-/** 最小化窗口 */
+/**
+ * 原生最小化窗口。
+ *
+ * ⚠️ **仅供便签等独立小窗使用**。主窗口为托盘优先形态（`skipTaskbar: true`），
+ * 一旦进入原生最小化会"丢失"（无任务栏入口可恢复，且 `show()` 无法还原最小化态）；
+ * 主窗口的「收起」请改用 [`hideToTray`]。
+ */
 export async function minimize(): Promise<void> {
   const win = await getWindow();
   if (win === null) {

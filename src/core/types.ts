@@ -54,13 +54,6 @@ export interface TrayItem {
   onClick: () => void;
 }
 
-/** 剪贴板内容动作（扩展点 `clipboard.transform` 贡献） */
-export interface ClipboardTransform {
-  id: string;
-  label: string;
-  run: (content: string) => void;
-}
-
 /** 内容识别器（扩展点 `detect.matcher` 贡献） */
 export interface Detector {
   id: string;
@@ -111,7 +104,6 @@ export interface ModuleMeta {
     commands?: CommandMeta[];
     settingsSection?: SettingsSection;
     trayItems?: TrayItem[];
-    clipboardTransforms?: ClipboardTransform[];
     detectors?: Detector[];
   };
   /** 面板内页视图的懒加载（未启用模块不加载其代码） */
@@ -163,16 +155,10 @@ export interface AppSettings {
   autoLaunch: boolean;
   autoUpdate: boolean;
   closeToTray: boolean;
-  /** 剪贴板后台监听 */
-  clipboardWatch: boolean;
-  /** 剪贴板历史开关 */
-  clipboardHistory: boolean;
   /** 工具使用历史开关 */
   recordHistory: boolean;
   /** 工具历史上限 */
   maxHistory: number;
-  /** 剪贴板上限 */
-  maxClipboard: number;
   // 已移除 `sensitiveToolIds`：全项目无任何消费点（死字段）。
   // 敏感管控以 `CommandMeta.sensitive` 为唯一事实源（见 core/sensitive.ts）；
   // 若将来需要「用户自定义敏感工具」开关，V13 设置中心再接。

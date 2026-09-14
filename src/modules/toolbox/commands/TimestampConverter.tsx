@@ -203,6 +203,52 @@ function StatCell({ label, value, mono = false }: { label: string; value: string
 }
 
 /**
+ * 顶部当前时间横幅：实时显示当前 Unix 秒 / 毫秒 / 所选时区格式化时间，
+ * 每秒刷新，右侧「复制」按钮复制形如 `秒:{s} 毫秒:{ms} {formatted}` 的文本。
+ * 增量功能，不影响原有快捷按钮。
+ */
+function NowBanner({ timezone, fmt }: { timezone: string; fmt: string }): React.JSX.Element {
+  const [nowMs, setNowMs] = React.useState<number>(Date.now());
+  React.useEffect(() => {
+    const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  const seconds = Math.floor(nowMs / 1000);
+  const formatted = formatInZone(nowMs, timezone, fmt) ?? '';
+
+  const copyNow = React.useCallback(async (): Promise<void> => {
+    const ok = await copyText(`秒:${seconds} 毫秒:${nowMs} ${formatted}`);
+    if (ok) {
+      toast.success('已复制当前时间');
+    } else {
+      toast.error('复制失败');
+    }
+  }, [seconds, nowMs, formatted]);
+
+  return (
+    <div className="flex flex-wrap items-center gap-3 rounded-md bg-muted p-2">
+      <div className="flex flex-1 flex-wrap items-center gap-3 text-xs text-muted-foreground">
+        <span>
+          当前 Unix 秒：<span className="font-mono font-semibold text-foreground">{seconds}</span>
+        </span>
+        <span>
+          毫秒：<span className="font-mono font-semibold text-foreground">{nowMs}</span>
+        </span>
+        <span>
+          本地时间：<span className="font-mono font-semibold text-foreground">{formatted}</span>
+        </span>
+      </div>
+      <Button size="sm" variant="ghost" className="text-xs" onClick={copyNow}>
+        复制
+      </Button>
+    </div>
+  );
+}
+
+/**
  * 时间戳转换（V15 对齐 ops-tools 参考实现）：
  * 双向转换（时间戳 ⇄ 日期）、秒/毫秒单位、相对偏移（+1d/-2h）、
  * 相对时间与星期、6 时区、6 输出格式、批量多行、快捷时间（当前/当天零点/当天结束）、
@@ -215,6 +261,8 @@ export function TimestampConverter({ initialInput = '' }: CommandProps): React.J
   const [text, setText] = React.useState<string>(initialInput);
   const [timezone, setTimezone] = React.useState<string>('Asia/Shanghai');
   const [fmt, setFmt] = React.useState<string>(FORMATS[0] ?? 'YYYY-MM-DD HH:mm:ss');
+  /** 相对偏移控件输入（如 +1h / -2d / +30m / +500ms）。 */
+  const [offsetInput, setOffsetInput] = React.useState<string>('');
 
   const lines = React.useMemo<string[]>(
     () => text.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0),
@@ -274,10 +322,53 @@ export function TimestampConverter({ initialInput = '' }: CommandProps): React.J
   }, []);
 
   const fillNow = React.useCallback((): void => {
+    if (mode === 'datetime') {
+      const formatted = formatInZone(Date.now(), timezone, 'YYYY-MM-DD HH:mm:ss');
+      if (formatted !== null) {
+        // 尊重当前 Tab：日期模式下填入当前日期字符串，不切走模式
+        setText(formatted);
+        return;
+      }
+      // 时区无效时退回 timestamp 填充
+    }
     setMode('timestamp');
     setUnit('seconds');
     setText(String(Math.floor(Date.now() / 1000)));
-  }, []);
+  }, [mode, timezone]);
+
+  /** 应用相对偏移：从当前结果（或批量首行/当前时刻）出发，两种模式均可使用。 */
+  const applyOffset = React.useCallback((): void => {
+    const token = offsetInput.trim();
+    if (!RELATIVE_RE.test(token)) {
+      toast.warning('偏移格式应为 +1h / -2d / +30m / +10s / +500ms');
+      return;
+    }
+    const sign = token[0] === '-' ? -1 : 1;
+    const unitTag = token.match(/(ms|s|m|h|d)$/)?.[0] ?? 's';
+    const value = Number.parseInt(token.slice(1).replace(/(ms|s|m|h|d)$/, ''), 10);
+    const delta =
+      unitTag === 'ms'
+        ? value
+        : unitTag === 's'
+          ? value * 1000
+          : unitTag === 'm'
+            ? value * 60_000
+            : unitTag === 'h'
+              ? value * 3_600_000
+              : value * 86_400_000;
+    const base =
+      single?.ms ??
+      (batch && batch[0]?.valid ? parseLine(batch[0].input, mode, unit) : null) ??
+      Date.now();
+    const newMs = base + sign * delta;
+    if (mode === 'datetime') {
+      setText(formatInZone(newMs, timezone, 'YYYY-MM-DD HH:mm:ss') ?? '');
+    } else {
+      setMode('timestamp');
+      setUnit('seconds');
+      setText(String(Math.floor(newMs / 1000)));
+    }
+  }, [offsetInput, single, batch, mode, unit, timezone]);
 
   const fillTodayStart = React.useCallback((): void => {
     try {
@@ -358,8 +449,11 @@ export function TimestampConverter({ initialInput = '' }: CommandProps): React.J
       favorite={shell.favorite}
       onToggleFavorite={shell.onToggleFavorite}
       copyText={copyTextValue}
-      shortcutHint="支持多行批量；相对偏移如 +1d / -2h（Esc 返回）"
+      shortcutHint="支持多行批量；相对偏移如 +1h / -2d（也可用下方「应用偏移」）；「当前时间」按当前 Tab 填入"
     >
+      {/* 顶部当前时间横幅（默认展示、每秒刷新、可复制） */}
+      <NowBanner timezone={timezone} fmt={fmt} />
+
       {/* V15：两列基准（≥1024px 并排）：左输入 / 选项，右结果，操作条通栏 */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <div className="flex min-w-0 flex-col gap-3">
@@ -516,6 +610,21 @@ export function TimestampConverter({ initialInput = '' }: CommandProps): React.J
           </Button>
           <Button size="sm" variant="secondary" onClick={fillTodayEnd}>
             当天结束
+          </Button>
+          {/* 相对偏移控件：独立、可发现的「应用偏移」输入 */}
+          <input
+            className="h-7 w-32 rounded-md border border-input bg-background px-2 font-mono text-xs text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            placeholder="+1h / -2d / +30m / +500ms"
+            value={offsetInput}
+            onChange={(event) => setOffsetInput(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                applyOffset();
+              }
+            }}
+          />
+          <Button size="sm" variant="secondary" onClick={applyOffset}>
+            应用偏移
           </Button>
           <Button
             size="sm"

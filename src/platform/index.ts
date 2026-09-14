@@ -8,7 +8,6 @@ import type { Platform, PlatformCapabilities } from '@/types/platform';
  */
 
 const UNKNOWN_CAPABILITIES: PlatformCapabilities = {
-  clipboardWatch: false,
   desktopIcons: false,
   desktopFileOrganize: false,
   screenRecording: false,

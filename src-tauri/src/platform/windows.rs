@@ -17,8 +17,6 @@ impl PlatformOps for WindowsOps {
             arch: std::env::consts::ARCH.to_string(),
             os_version: std::env::var("OS").unwrap_or_else(|_| "Windows".to_string()),
             capabilities: PlatformCapabilities {
-                // Windows 可直接轮询剪贴板，无需授权
-                clipboard_watch: true,
                 // 可枚举桌面图标（经 Shell API）
                 desktop_icons: true,
                 desktop_file_organize: true,

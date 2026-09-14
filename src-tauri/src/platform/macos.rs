@@ -19,8 +19,6 @@ impl PlatformOps for MacOsOps {
             arch: std::env::consts::ARCH.to_string(),
             os_version: std::env::var("OSTYPE").unwrap_or_else(|_| "macOS".to_string()),
             capabilities: PlatformCapabilities {
-                // 需「剪贴板/辅助功能」授权，未授权时前端降级为手动读取
-                clipboard_watch: false,
                 // 桌面图标受系统管控，不开放
                 desktop_icons: false,
                 // 降级为「文件归类」

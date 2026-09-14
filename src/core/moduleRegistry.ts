@@ -1,5 +1,4 @@
 import type {
-  ClipboardTransform,
   CommandMeta,
   Detector,
   ModuleMeta,
@@ -47,7 +46,6 @@ export interface ModuleRegistry {
   collect<T>(point: ExtensionPointId): T[];
   settingsSections(): SettingsSection[];
   trayItems(): TrayItem[];
-  clipboardTransforms(): ClipboardTransform[];
   detectors(): Detector[];
 
   // —— 装配 ——
@@ -121,9 +119,6 @@ class Registry implements ModuleRegistry {
     }
     for (const item of contributes?.trayItems ?? []) {
       this.contribute('tray.item', item);
-    }
-    for (const item of contributes?.clipboardTransforms ?? []) {
-      this.contribute('clipboard.transform', item);
     }
     for (const item of contributes?.detectors ?? []) {
       this.contribute('detect.matcher', item);
@@ -236,11 +231,6 @@ class Registry implements ModuleRegistry {
   /** 托盘子项 */
   trayItems(): TrayItem[] {
     return this.collect<TrayItem>('tray.item');
-  }
-
-  /** 剪贴板动作 */
-  clipboardTransforms(): ClipboardTransform[] {
-    return this.collect<ClipboardTransform>('clipboard.transform');
   }
 
   /** 内容识别器 */

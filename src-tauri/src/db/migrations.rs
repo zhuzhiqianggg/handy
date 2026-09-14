@@ -8,8 +8,15 @@ use rusqlite::Connection;
 /// v1 初始表结构（内嵌 `schema.sql`，编译期纳入二进制）。
 pub const V1_SCHEMA: &str = include_str!("schema.sql");
 
-/// 全部迁移：(版本号, SQL)。新增数据结构时在**末尾追加**一项。
-pub const MIGRATIONS: &[(i64, &str)] = &[(1, V1_SCHEMA)];
+/// v2：移除剪贴板历史（M4，用户决定直接移除，避免与系统剪贴板重复）。
+/// 幂等 `DROP TABLE IF EXISTS`，对全新安装（v1 已不含 clip_* 表）无副作用。
+pub const V2_DROP_CLIP: &str = "
+DROP TABLE IF EXISTS clip_fts;
+DROP TABLE IF EXISTS clip_items;
+";
+
+/// 全部迁移：(版本号, SQL)。新增结构在**末尾追加**；移除历史结构可追加 DROP 迁移。
+pub const MIGRATIONS: &[(i64, &str)] = &[(1, V1_SCHEMA), (2, V2_DROP_CLIP)];
 
 /// 当前毫秒时间戳（用于 `applied_at`）。
 pub fn now_ms() -> i64 {

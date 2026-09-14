@@ -28,11 +28,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   autoLaunch: false,
   autoUpdate: true,
   closeToTray: true,
-  clipboardWatch: false,
-  clipboardHistory: true,
   recordHistory: true,
   maxHistory: 50,
-  maxClipboard: 100,
   // 已移除 `sensitiveToolIds`（全项目无消费点）。敏感管控唯一事实源 = `CommandMeta.sensitive`
   // （判定与清洗见 core/sensitive.ts）；如需用户自定义开关，V13 设置中心再接。
   // 空对象 = 全部模块默认启用（map 仅记录显式覆盖的开关）

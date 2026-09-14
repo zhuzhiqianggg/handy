@@ -10,7 +10,7 @@ import type { CommandMeta } from './types';
  * `moduleRegistry.ts`），为避免后人误判「此处存在第二个注册表」而改名。
  *
  * ⚠️ 边界（务必遵守，勿滥用）：
- *   - 仅用于**不属于任何业务模块**的框架命令（打开设置 / 关于 / 清空剪贴板历史 …）；
+ *   - 仅用于**不属于任何业务模块**的框架命令（打开设置 / 关于 …）；
  *   - **业务模块与工具一律走 `import.meta.glob` 自动发现**（见 `moduleRegistry.ts`），
  *     **禁止**在本文件手动登记业务命令 / 工具；
  *   - 新增一条系统命令后，无需改动注册表 / 命令面板，框架初始化时自动并入
@@ -43,20 +43,6 @@ export const SYSTEM_COMMANDS: readonly CommandMeta[] = [
     tier: 'free',
     run: () => {
       toast.message('Handy · 顺手', { description: '跨平台桌面效率套件 · v0.1.0' });
-    },
-  },
-  {
-    id: 'clear-clipboard-history',
-    moduleId: 'system',
-    name: '清空剪贴板历史',
-    description: '清除本机保存的剪贴板历史记录',
-    icon: 'Trash2',
-    aliases: ['clear-clipboard', 'qingkong'],
-    keywords: ['清空', '剪贴板', '历史', 'qkjtb'],
-    tier: 'free',
-    run: async () => {
-      // 剪贴板数据层在 V10 落地；届时改为二次确认 + 调用 clip_clear。
-      toast.message('剪贴板历史', { description: '剪贴板数据层将在 V10 接入，暂无可清空记录。' });
     },
   },
   {

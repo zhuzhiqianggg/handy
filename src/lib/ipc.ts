@@ -1,7 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { diagLog } from '@/lib/diag';
 import type { PlatformInfo } from '@/types/platform';
-import type { ClipItem, ClipInput } from '@/types/clipboard';
 import type {
   OrganizerApplyReport,
   OrganizerPlan,
@@ -82,27 +81,6 @@ export const ipc = {
   openNoteWindow: (noteId: string): Promise<string> =>
     call<string>('open_note_window', { noteId }),
 
-  // —— 剪贴板（M4 / V10）——
-
-  /** 分页读取剪贴板历史（新 → 旧） */
-  clipList: (limit: number, offset: number): Promise<ClipItem[]> =>
-    call<ClipItem[]>('clip_list', { limit, offset }),
-  /** 翻转单条置顶状态 */
-  clipTogglePin: (clipId: string): Promise<void> =>
-    call<void>('clip_toggle_pin', { clipId }),
-  /** 删除单条 */
-  clipDelete: (clipId: string): Promise<void> => call<void>('clip_delete', { clipId }),
-  /** 清空非置顶条目，返回删除条数 */
-  clipClear: (): Promise<number> => call<number>('clip_clear'),
-  /** 批量落库（Rust 侧去重 / 裁剪 / FTS 对账），返回处理条数 */
-  clipAddBatch: (items: ClipInput[]): Promise<number> =>
-    call<number>('clip_add_batch', { items }),
-  /** 读取剪贴板文本兜底（navigator.clipboard.readText 不可用 / 被拒时；空返回 null） */
-  clipboardReadText: (): Promise<string | null> => call<string | null>('clipboard_read_text'),
-  /** 写入剪贴板文本（V11 回贴：历史条目写回系统剪贴板） */
-  clipboardWriteText: (text: string): Promise<void> =>
-    call<void>('clipboard_write_text', { text }),
-
   // —— 桌面整理（M2 / V12）——
 
   /** 枚举桌面条目（dir 缺省 = 用户真实桌面；显式目录仅供测试 / 自定义场景） */
@@ -136,8 +114,8 @@ export const ipc = {
   backupImport: (sourceDir: string): Promise<ImportOutcome> =>
     call<ImportOutcome>('backup_import', { sourceDir }),
 
-  // 待办 / 剪贴板 / 桌面整理 / 授权 / 备份等命令见 ARCHITECTURE §6，
-  // 随对应任务（V09/V10/V12/V13）逐步补入。
+  // 待办 / 桌面整理 / 授权 / 备份等命令见 ARCHITECTURE §6，
+  // 随对应任务（V09/V12/V13）逐步补入。
 } as const;
 
 export type Ipc = typeof ipc;

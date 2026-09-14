@@ -4,16 +4,15 @@ import { Button } from '@/components/ui/button';
 import { toast } from '@/components/ui/toast';
 import { registry } from '@/core/moduleRegistry';
 import { openCommand } from '@/core/navigation';
-import { matchClipContent, SUGGESTED_COMMAND_NAMES, type ClipMatch } from '@/modules/clipboard/matchers';
+import { matchClipContent, SUGGESTED_COMMAND_NAMES, type ClipMatch } from '@/lib/contentMatch';
 import { readClipboardText } from '@/lib/clipboard';
 
 /**
- * 剪贴板智能建议条（V05 骨架 → V11 接入内容识别器）。
+ * 智能建议条（V05 骨架 → V11 接入内容识别器）。
  *
  * 打开命令面板时读取一次剪贴板，若命中识别器（JSON / JWT / URL / 时间戳 / 文件路径），
  * 则提示「一键直达」对应命令，并携带内容作为初始输入。识别逻辑复用
- * `@/modules/clipboard/matchers`（纯函数，与剪贴板历史视图同源；命令映射已核对
- * toolbox 实际注册 id）。
+ * `@/lib/contentMatch`（纯函数；命令映射已核对 toolbox 实际注册 id）。
  *
  * 隐私：仅在面板打开时按需读取一次，不后台轮询；识别失败静默不显示。
  */

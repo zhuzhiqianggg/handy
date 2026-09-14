@@ -1,14 +1,16 @@
 import * as React from 'react';
 import { Maximize2, Minimize2, Minus, X } from 'lucide-react';
 import { isTauri } from '@/platform/detect';
-import { hideToTray, minimize, subscribeStatus, toggleMaximize } from '@/lib/windowShell';
+import { hideToTray, subscribeStatus, toggleMaximize } from '@/lib/windowShell';
 import { cn } from '@/lib/utils';
 
 /**
  * 自定义标题栏（无边框窗口必备：`decorations: false` 时没有原生标题栏）。
  *
  * - 整条 bar 为拖拽区（`data-tauri-drag-region`），可拖动窗口；
- * - 右侧提供 最小化 / 最大化·还原 / 关闭（关闭 = 隐藏到托盘，复用 `app_hide_main`）；
+ * - 右侧提供 最小化 / 最大化·还原 / 关闭。本应用为**托盘优先**形态（`skipTaskbar: true`），
+ *   主窗口**不进原生最小化态**——「最小化」与「关闭」同语义，均 = 隐藏到托盘（复用 `app_hide_main`）；
+ *   原生 `windowShell.minimize()` 仅留给便签等独立窗口；
  * - **仅在 Tauri 宿主内渲染**，浏览器预览不显示（避免干扰冒烟测试与截图）。
  */
 export function TitleBar(): React.JSX.Element | null {
@@ -67,10 +69,12 @@ export function TitleBar(): React.JSX.Element | null {
       <div className="flex shrink-0 items-center">
         <button
           type="button"
-          title="最小化"
-          aria-label="最小化"
+          title="最小化（收起到托盘）"
+          aria-label="最小化（收起到托盘）"
           onClick={() => {
-            void minimize();
+            // V16 修复：托盘优先形态（skipTaskbar:true）下，原生最小化会让窗口"丢失"
+            // 且无任务栏入口可恢复。故「最小化」= 隐藏到托盘（与关闭按钮同语义）。
+            void hideToTray();
           }}
           className={cn(buttonClass)}
         >

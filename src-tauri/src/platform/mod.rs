@@ -19,8 +19,6 @@ compile_error!("Handy · 顺手 目前仅支持 Windows 与 macOS 平台");
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlatformCapabilities {
-    /// 是否可后台监听剪贴板（macOS 需授权）
-    pub clipboard_watch: bool,
     /// 是否可操作桌面「图标」（macOS = false）
     pub desktop_icons: bool,
     /// 是否可做文件归类

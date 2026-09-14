@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "desktop",
-  "description": "Handy 独立窗口（便签 / 剪贴板浮层）能力（最小权限）",
-  "windows": ["note-*", "clip-quick"],
+  "description": "Handy 独立窗口（便签）能力（最小权限）",
+  "windows": ["note-*"],
   "permissions": [
     "core:default",
     "core:window:allow-show",

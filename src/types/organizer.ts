@@ -3,7 +3,7 @@
  *
  * 与 Rust `commands/organizer.rs` 的 serde camelCase 结构一一对应。
  * 独立成文件以避免 `lib/ipc.ts` ↔ `core/data/organizerService.ts` 相互依赖成环
- * （与 `types/clipboard.ts` 同模式）。
+ * （独立成文件以避免 `lib/ipc.ts` ↔ `core/data/organizerService.ts` 相互依赖成环，与本项目其它类型文件同模式）。
  */
 
 /** 整理规则（引擎在 Rust 侧，前端只传参） */

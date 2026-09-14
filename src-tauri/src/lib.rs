@@ -24,7 +24,7 @@ pub fn run() {
         .plugin(tauri_plugin_log::Builder::new().build())
         // —— 配置态持久化（settings.json，非关系型小配置）——
         .plugin(tauri_plugin_store::Builder::default().build())
-        // —— SQLite 数据层（便签/待办/剪贴板/历史）；表结构与迁移见 `db/` ——
+        // —— SQLite 数据层（便签/待办/历史）；表结构与迁移见 `db/` ——
         .plugin(tauri_plugin_sql::Builder::default().build())
         // —— 系统能力插件 ——
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -61,14 +61,6 @@ pub fn run() {
             commands::todos::todos_update,
             commands::todos::todos_delete,
             commands::todos::todos_toggle_done,
-            // —— 剪贴板（M4 / V10）——
-            commands::clip::clip_list,
-            commands::clip::clip_toggle_pin,
-            commands::clip::clip_delete,
-            commands::clip::clip_clear,
-            commands::clip::clip_add_batch,
-            commands::clip::clipboard_read_text,
-            commands::clip::clipboard_write_text,
             // —— 桌面整理（M2 / V12）——
             commands::organizer::organizer_scan_desktop,
             commands::organizer::organizer_preview_plan,
@@ -103,6 +95,12 @@ pub fn run() {
             match db::init(app.handle()) {
                 Ok(path) => println!("[Handy] 数据库就绪：{}", path.display()),
                 Err(err) => eprintln!("[Handy] 数据库初始化失败：{err}"),
+            }
+            // 主窗口启动显示（V16 修复）：`visible:false` 交给逻辑控制显隐，
+            // 首启必须显式 show —— 否则窗口一直隐藏、需手动点托盘才出现（"退出再开不显示"）。
+            // 置于托盘 / 快捷键 / DB 之后，确保托盘兜底与数据层就绪再亮窗。
+            if let Err(err) = window::show_main_palette(app.handle()) {
+                eprintln!("[Handy] 启动显示主窗口失败：{err}");
             }
             // 无头测试通道：HANDY_AUTOTOOL=<commandId> 或 module:<moduleId>，
             // 延迟 4s 后发给主窗口（等前端监听就绪），用于自动化诊断/回归，无此变量时零开销。

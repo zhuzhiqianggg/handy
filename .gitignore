@@ -19,6 +19,11 @@ src-tauri/gen/
 .tmp-*
 _tmp_*
 
+# 根目录下的验证 / 诊断残留（构建日志、CDP 抓取、tsc 输出等，均不入库）
+/*.txt
+/*.log
+/*_*.log
+
 # 日志
 *.log
 npm-debug.log*

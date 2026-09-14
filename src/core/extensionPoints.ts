@@ -1,5 +1,4 @@
 import type {
-  ClipboardTransform,
   CommandMeta,
   Detector,
   SettingsSection,
@@ -17,8 +16,7 @@ export type ExtensionPointId =
   | 'command' // 命令 / 工具（M1 及各模块）
   | 'settings.section' // 设置中心分区
   | 'tray.item' // 托盘 / 菜单栏项
-  | 'clipboard.transform' // 剪贴板内容动作（转便签 / 转待办 / 格式化…）
-  | 'detect.matcher' // 剪贴板内容识别器（JSON / JWT / 时间戳 / URL…）
+  | 'detect.matcher' // 内容识别器（JSON / JWT / 时间戳 / URL…）
   | 'palette.provider' // 命令面板结果提供者（工具 / 最近 / 收藏，未来接入应用 / 文件）
   | 'module.activation'; // 模块激活
 
@@ -48,7 +46,6 @@ export interface ExtensionMap {
   command: CommandMeta;
   'settings.section': SettingsSection;
   'tray.item': TrayItem;
-  'clipboard.transform': ClipboardTransform;
   'detect.matcher': Detector;
   'palette.provider': PaletteProvider;
   'module.activation': ModuleActivation;
@@ -62,7 +59,6 @@ export const EXTENSION_POINTS: readonly ExtensionPointId[] = [
   'command',
   'settings.section',
   'tray.item',
-  'clipboard.transform',
   'detect.matcher',
   'palette.provider',
   'module.activation',

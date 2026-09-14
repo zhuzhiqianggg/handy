@@ -6,8 +6,6 @@ export type TrayKind = 'tray' | 'menubar';
 
 /** 平台能力清单（用于前端做降级展示 / 授权引导） */
 export interface PlatformCapabilities {
-  /** 是否可后台监听剪贴板（macOS 需授权） */
-  clipboardWatch: boolean;
   /** 是否可操作桌面「图标」（macOS = false） */
   desktopIcons: boolean;
   /** 是否可做文件归类 */

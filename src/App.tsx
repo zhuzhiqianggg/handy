@@ -7,13 +7,12 @@ import { SettingsCenter } from './components/SettingsCenter';
 import { useAppStore, type MainView } from '@/stores/useAppStore';
 import { NoteWindow } from '@/modules/notes/NoteWindow';
 import { ReminderScheduler } from '@/modules/todos/ReminderScheduler';
-import { useClipboardWatch } from '@/hooks/useClipboardWatch';
 import { useTheme } from '@/hooks/useTheme';
 import { useHotkeyOpen } from '@/hooks/useHotkeyOpen';
 import { applyViewSize, initWindowShell } from '@/lib/windowShell';
 
 /** 可挂载的窗口根类型（与 Rust 侧 WindowKind 对应） */
-export type WindowRoot = 'main' | 'note' | 'settings' | 'clip-quick' | 'organizer';
+export type WindowRoot = 'main' | 'note' | 'settings' | 'organizer';
 
 export interface AppProps {
   /** 由 main.tsx 依据 ?window= 参数注入 */
@@ -43,11 +42,11 @@ function renderView(view: MainView) {
  * 主应用组件。
  *
  * - 主窗口（`main`）：命令面板 / 模块内页 / 设置中心 的视图分发；
- * - 其他窗口根（便签 / 设置窗 / 剪贴板浮层 / 桌面整理）在 V08/V12/V13 接入，本批占位。
+ * - 其他窗口根（便签 / 设置窗 / 桌面整理）在 V08/V12/V13 接入，本批占位。
  *
  * **Hook 顺序**：所有 Hook 必须在任何 early-return 之前调用（rules-of-hooks）。
  * `windowRoot` 在单个窗口生命周期内恒定，下面两个 early-return 不会实际造成调用次序
- * 漂移，但为消除隐患，`useClipboardWatch` 仍上移至顶部、以参数控制是否启用。
+ * 漂移。
  */
 const App: FC<AppProps> = ({ windowRoot = 'main', noteId }) => {
   // 应用主题（light / dark / system）
@@ -60,10 +59,6 @@ const App: FC<AppProps> = ({ windowRoot = 'main', noteId }) => {
   useHotkeyOpen(handleHotkeyOpen);
 
   const view = useAppStore((state) => state.view);
-
-  // 剪贴板后台监听（V10）：仅主窗口轮询，便签/其它窗口传 false 不监听。
-  // 位置固定在 early-return 之前，保持 Hook 调用顺序稳定（rules-of-hooks）。
-  useClipboardWatch(windowRoot === 'main');
 
   // 窗口骨架启动装配（V15）：恢复上次尺寸 + 挂 resized 监听做持久化。仅主窗口。
   useEffect(() => {
@@ -122,8 +117,7 @@ const App: FC<AppProps> = ({ windowRoot = 'main', noteId }) => {
     );
   }
 
-  // 主窗口：提醒调度器无 UI 挂载（60s 扫描，过期 >1h 不补发，见 ReminderScheduler）；
-  // 剪贴板后台监听已在顶部挂载（见 useClipboardWatch 调用）。
+  // 主窗口：提醒调度器无 UI 挂载（60s 扫描，过期 >1h 不补发，见 ReminderScheduler）。
   return (
     <>
       <ReminderScheduler />

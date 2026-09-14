@@ -38,29 +38,6 @@ CREATE TABLE IF NOT EXISTS todos (
 CREATE INDEX IF NOT EXISTS idx_todos_note ON todos(note_id);
 CREATE INDEX IF NOT EXISTS idx_todos_due ON todos(due_at);
 
--- 剪贴板历史（默认保留最近 N 条，条数由设置控制；sensitive 不落库）
-CREATE TABLE IF NOT EXISTS clip_items (
-  id          TEXT PRIMARY KEY,
-  kind        TEXT NOT NULL DEFAULT 'text',
-  content     TEXT NOT NULL DEFAULT '',
-  thumb       TEXT,
-  source_app  TEXT,
-  pinned      INTEGER NOT NULL DEFAULT 0,
-  sensitive   INTEGER NOT NULL DEFAULT 0,
-  created_at  INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_clip_created ON clip_items(created_at DESC);
--- 去重：同 kind + 同内容只保留一行（写入时 ON CONFLICT 更新 created_at）
-CREATE UNIQUE INDEX IF NOT EXISTS idx_clip_content ON clip_items(kind, content);
-
--- 全文检索（剪贴板 / 笔记内容，FTS5；libsqlite3-sys bundled 已启用 FTS5）
-CREATE VIRTUAL TABLE IF NOT EXISTS clip_fts USING fts5(
-  content,
-  ref_id UNINDEXED,
-  kind UNINDEXED,
-  tokenize = 'unicode61'
-);
-
 -- 工具使用历史（沿用 v1 语义，迁移到 SQLite）
 CREATE TABLE IF NOT EXISTS usage_history (
   id          TEXT PRIMARY KEY,

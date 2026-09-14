@@ -20,7 +20,6 @@ export function fallbackPlatformInfo(): PlatformInfo {
     arch: 'unknown',
     osVersion: '',
     capabilities: {
-      clipboardWatch: false,
       desktopIcons: false,
       desktopFileOrganize: false,
       screenRecording: false,

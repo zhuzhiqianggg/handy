@@ -1,7 +1,7 @@
 import { detectContent, type DetectKind } from '@/lib/detect';
 
 /**
- * 剪贴板条目内容识别（V11）。
+ * 内容识别与「内容类型 → 工具箱命令」直达映射（原 clipboard 模块，现提取为共享工具）。
  *
  * 复用 `@/lib/detect` 的内置识别启发式（JSON / JWT / URL / 时间戳 / Base64），
  * 并把**直达命令映射**修正为本仓库实际注册的命令 id（已核对
@@ -13,11 +13,10 @@ import { detectContent, type DetectKind } from '@/lib/detect';
  *   - 时间戳    → `timestamp`（时间戳转换）
  *   - 文件路径  → 无直达工具，仅作类型徽章展示
  *
- * 全部为**纯函数**（无副作用、无 IO、无 React 依赖），便于独立测试
- * （QA 可用 esbuild + node 直接运行正/负例）。
+ * 全部为**纯函数**（无副作用、无 IO、无 React 依赖），便于独立测试。
  */
 
-/** 剪贴板条目的内容形态（用于列表图标 / 展示分支） */
+/** 内容形态（用于列表图标 / 展示分支） */
 export type ClipContentKind = 'text' | 'file-path' | 'image';
 
 /** 识别结果类型 */
@@ -73,7 +72,7 @@ export function isFilePath(text: string): boolean {
 }
 
 /**
- * 判定条目内容形态。
+ * 判定内容形态。
  * 优先采用存储的 `kind`（未来图片类），否则按内容启发式判定文件路径，兜底文本。
  */
 export function classifyClip(content: string, kind = 'text'): ClipContentKind {

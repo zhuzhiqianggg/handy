@@ -15,8 +15,15 @@ fn main_window(app: &AppHandle) -> Result<WebviewWindow, String> {
 }
 
 /// 显示并聚焦主面板（命令面板形态）。
+///
+/// 主窗口若处于**最小化**态（历史遗留 `minimize()` 调用 / 系统级最小化），仅
+/// `show()`（Windows ≈ `ShowWindow(SW_SHOW)`）**不会**把它还原为正常态，需先 `unminimize()`。
+/// 见 V16 修复：托盘"唤不回"根因。
 pub fn show_main_palette(app: &AppHandle) -> Result<(), String> {
     let win = main_window(app)?;
+    if win.is_minimized().unwrap_or(false) {
+        let _ = win.unminimize();
+    }
     win.show().map_err(|e| format!("显示主窗口失败：{e}"))?;
     win.set_focus().map_err(|e| format!("聚焦主窗口失败：{e}"))?;
     Ok(())
@@ -28,9 +35,20 @@ pub fn hide_main_palette(app: &AppHandle) -> Result<(), String> {
     win.hide().map_err(|e| format!("隐藏主窗口失败：{e}"))
 }
 
-/// 切换主面板显隐（供全局快捷键使用）。
+/// 切换主面板显隐（托盘左键 / 全局快捷键）。
+///
+/// 三态机（V16 修复）：**最小化 → 还原并聚焦；可见 → 隐藏到托盘；隐藏 → 显示并聚焦**。
+/// 之所以单列「最小化」态：Windows 下最小化窗口仍保留 `WS_VISIBLE`，旧实现仅凭
+/// `is_visible()` 二分判定会把最小化窗口当作"可见"而误执行 `hide()`，
+/// 导致点托盘反而更唤不回（V16 修复前根因）。
 pub fn toggle_main_palette(app: &AppHandle) -> Result<(), String> {
     let win = main_window(app)?;
+    // 1) 最小化 → 还原并聚焦
+    if win.is_minimized().unwrap_or(false) {
+        let _ = win.unminimize();
+        return win.set_focus().map_err(|e| format!("聚焦主窗口失败：{e}"));
+    }
+    // 2) 可见 → 隐藏；3) 隐藏 → 显示
     let visible = win
         .is_visible()
         .map_err(|e| format!("读取主窗口可见状态失败：{e}"))?;

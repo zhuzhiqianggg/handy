@@ -42,8 +42,6 @@ function resolveWindow(search: string): WindowTarget {
   switch (raw) {
     case 'settings':
       return { windowRoot: 'settings' };
-    case 'clip-quick':
-      return { windowRoot: 'clip-quick' };
     case 'organizer':
       return { windowRoot: 'organizer' };
     default:
