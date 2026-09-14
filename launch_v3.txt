@@ -1,0 +1,6 @@
+GONE
+[2026-09-13][14:21:28][sqlx::query][DEBUG] summary="PRAGMA foreign_keys = ON; ?? db.statement="\n\nPRAGMA foreign_keys = ON; \n" rows_affected=0 rows_returned=0 elapsed=45.3?s elapsed_secs=4.53e-5
+[2026-09-13][14:21:47][sqlx::query][DEBUG] summary="PRAGMA foreign_keys = ON; ?? db.statement="\n\nPRAGMA foreign_keys = ON; \n" rows_affected=0 rows_returned=0 elapsed=85.1?s elapsed_secs=8.51e-5
+[2026-09-14][01:56:14][sqlx::query][DEBUG] summary="PRAGMA foreign_keys = ON; ?? db.statement="\n\nPRAGMA foreign_keys = ON; \n" rows_affected=0 rows_returned=0 elapsed=114.7?s elapsed_secs=0.0001147
+[2026-09-14][01:58:56][sqlx::query][DEBUG] summary="PRAGMA foreign_keys = ON; ?? db.statement="\n\nPRAGMA foreign_keys = ON; \n" rows_affected=0 rows_returned=0 elapsed=62.9?s elapsed_secs=6.29e-5
+[2026-09-14][02:06:06][sqlx::query][DEBUG] summary="PRAGMA foreign_keys = ON; ?? db.statement="\n\nPRAGMA foreign_keys = ON; \n" rows_affected=0 rows_returned=0 elapsed=65.1?s elapsed_secs=6.51e-5

@@ -1,0 +1,2 @@
+zombie still locked - will be deletable after reboot
+final: mtime=15:41:12 size=8.7MB

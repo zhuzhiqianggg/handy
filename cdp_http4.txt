@@ -1,0 +1,2 @@
+TIMEOUT
+ERR ECONNRESET socket hang up

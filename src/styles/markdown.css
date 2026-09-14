@@ -1,0 +1,246 @@
+/**
+ * Markdown 预览区样式（`.md-preview` 作用域）。
+ *
+ * 项目未接入 `@tailwindcss/typography`，故自建一套轻量排版：
+ *   - 浅色基线，`.dark` 下走深色变体（与 index.css 的设计令牌同源）；
+ *   - **绝不撑破容器**：代码块横向滚动、长单词 / URL 强制换行、图片限宽，
+ *     否则一个长 URL 就能把 280px 宽的便签窗口撑变形。
+ */
+
+.md-preview {
+  color: hsl(var(--foreground));
+  font-size: 0.875rem;
+  line-height: 1.75;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* ---------- 标题 ---------- */
+.md-preview > :first-child {
+  margin-top: 0;
+}
+
+.md-preview > :last-child {
+  margin-bottom: 0;
+}
+
+.md-preview h1,
+.md-preview h2,
+.md-preview h3,
+.md-preview h4,
+.md-preview h5,
+.md-preview h6 {
+  margin: 1.1em 0 0.5em;
+  font-weight: 650;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.md-preview h1 {
+  font-size: 1.45em;
+  padding-bottom: 0.25em;
+  border-bottom: 1px solid hsl(var(--border));
+}
+
+.md-preview h2 {
+  font-size: 1.28em;
+  padding-bottom: 0.22em;
+  border-bottom: 1px solid hsl(var(--border));
+}
+
+.md-preview h3 {
+  font-size: 1.14em;
+}
+
+.md-preview h4 {
+  font-size: 1em;
+}
+
+.md-preview h5 {
+  font-size: 0.92em;
+}
+
+.md-preview h6 {
+  font-size: 0.86em;
+  opacity: 0.75;
+}
+
+/* ---------- 段落 / 行内 ---------- */
+.md-preview p {
+  margin: 0.6em 0;
+}
+
+.md-preview strong {
+  font-weight: 650;
+}
+
+.md-preview em {
+  font-style: italic;
+}
+
+.md-preview del {
+  text-decoration: line-through;
+  opacity: 0.7;
+}
+
+.md-preview a {
+  color: hsl(var(--primary));
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+}
+
+.md-preview a:hover {
+  border-bottom-color: currentColor;
+}
+
+.md-preview hr {
+  margin: 1em 0;
+  border: 0;
+  border-top: 1px solid hsl(var(--border));
+}
+
+/* ---------- 列表 ---------- */
+.md-preview ul,
+.md-preview ol {
+  margin: 0.55em 0;
+  padding-left: 1.4em;
+}
+
+.md-preview ul {
+  list-style: disc;
+}
+
+.md-preview ol {
+  list-style: decimal;
+}
+
+.md-preview ul ul {
+  list-style: circle;
+}
+
+.md-preview ul ul ul {
+  list-style: square;
+}
+
+.md-preview ol ol {
+  list-style: lower-alpha;
+}
+
+.md-preview li {
+  margin: 0.18em 0;
+}
+
+.md-preview li > ul,
+.md-preview li > ol {
+  margin: 0.18em 0;
+}
+
+/* GFM 任务列表：复选框只作展示，禁用交互（避免误改源文本语义） */
+.md-preview li input[type='checkbox'] {
+  margin-right: 0.4em;
+  vertical-align: -0.1em;
+  pointer-events: none;
+  accent-color: hsl(var(--primary));
+}
+
+.md-preview li:has(> input[type='checkbox']) {
+  list-style: none;
+  margin-left: -1.2em;
+}
+
+/* ---------- 引用 ---------- */
+.md-preview blockquote {
+  margin: 0.7em 0;
+  padding: 0.15em 0.85em;
+  border-left: 3px solid hsl(var(--border));
+  background: hsl(var(--muted) / 0.55);
+  border-radius: 0 4px 4px 0;
+  color: hsl(var(--muted-foreground));
+}
+
+.md-preview blockquote > :first-child {
+  margin-top: 0;
+}
+
+.md-preview blockquote > :last-child {
+  margin-bottom: 0;
+}
+
+/* ---------- 代码 ---------- */
+.md-preview code {
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+  font-size: 0.86em;
+  padding: 0.12em 0.36em;
+  border-radius: 4px;
+  background: hsl(var(--muted));
+  overflow-wrap: anywhere;
+}
+
+.md-preview pre {
+  margin: 0.7em 0;
+  padding: 0.7em 0.8em;
+  border-radius: 6px;
+  background: hsl(222 20% 16%);
+  color: hsl(210 20% 92%);
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.md-preview pre code {
+  display: block;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 0.82em;
+  line-height: 1.6;
+  white-space: pre;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+.dark .md-preview pre {
+  background: hsl(222 24% 9%);
+}
+
+/* ---------- 图片 ---------- */
+.md-preview img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0.6em 0;
+  border-radius: 6px;
+}
+
+/* ---------- 表格 ---------- */
+.md-preview table {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  margin: 0.7em 0;
+  border-collapse: collapse;
+  font-size: 0.92em;
+  overflow-x: auto;
+}
+
+.md-preview th,
+.md-preview td {
+  padding: 0.34em 0.62em;
+  border: 1px solid hsl(var(--border));
+  text-align: left;
+  vertical-align: top;
+}
+
+.md-preview th {
+  background: hsl(var(--muted));
+  font-weight: 600;
+}
+
+.md-preview tbody tr:nth-child(even) {
+  background: hsl(var(--muted) / 0.4);
+}
+
+/* ---------- 空占位 ---------- */
+.md-preview-empty {
+  color: hsl(var(--muted-foreground));
+  opacity: 0.6;
+}

@@ -1,0 +1,127 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/**
+ * 设计令牌（浅色扁平基线）。
+ * MVP 保证浅色；深色通过 .dark 类预留（见 TASKS §2.7 / AQ8）。
+ */
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222 20% 15%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 222 20% 15%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 20% 15%;
+
+    --primary: 205 90% 48%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 210 20% 96%;
+    --secondary-foreground: 222 20% 20%;
+
+    --muted: 210 20% 96%;
+    --muted-foreground: 215 12% 45%;
+
+    --accent: 205 90% 96%;
+    --accent-foreground: 205 90% 32%;
+
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+
+    /* 低对比分割线，扁平优先 */
+    --border: 214 16% 90%;
+    --input: 214 16% 90%;
+    --ring: 205 90% 48%;
+
+    /* 单一品牌强调色（与 primary 同源，供 brand-* 使用） */
+    --brand: 205 90% 48%;
+    --brand-foreground: 0 0% 100%;
+    --brand-muted: 205 90% 96%;
+
+    --radius: 0.625rem;
+  }
+
+  .dark {
+    --background: 222 20% 12%;
+    --foreground: 210 20% 94%;
+
+    --card: 222 18% 15%;
+    --card-foreground: 210 20% 94%;
+
+    --popover: 222 18% 15%;
+    --popover-foreground: 210 20% 94%;
+
+    --primary: 205 85% 55%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 222 16% 22%;
+    --secondary-foreground: 210 20% 92%;
+
+    --muted: 222 16% 22%;
+    --muted-foreground: 215 14% 65%;
+
+    --accent: 205 40% 24%;
+    --accent-foreground: 205 90% 88%;
+
+    --destructive: 0 62% 50%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 222 14% 26%;
+    --input: 222 14% 26%;
+    --ring: 205 85% 55%;
+
+    --brand: 205 85% 55%;
+    --brand-foreground: 0 0% 100%;
+    --brand-muted: 205 40% 24%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-background font-sans text-foreground antialiased;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* 桌面应用禁用整页文本选择拖拽感，输入区按需恢复 */
+  button,
+  [role='button'] {
+    user-select: none;
+  }
+}
+
+@layer utilities {
+  /* 面板内滚动区域使用细滚动条，保持扁平观感 */
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--border)) transparent;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background-color: hsl(var(--border));
+    border-radius: 9999px;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background-color: transparent;
+  }
+}

@@ -1,0 +1,2 @@
+handy.exe has-new-cmd=True
+handy.exe.zombie has-new-cmd=True

@@ -1,0 +1,3 @@
+msi  4.4 MB  Handy_0.1.0_x64_en-US.msi
+nsis  3.4 MB  Handy_0.1.0_x64-setup.exe
+main-exe  8.6 MB  handy.exe

@@ -1,0 +1,5 @@
+installed: 3AFDC9C9DE096CA4
+new-build: F92E6B52DF7DEEFF
+SAME=False
+09-14 15:45 uninstall.exe
+09-14 10:05 handy.exe
