@@ -120,7 +120,12 @@ function start(): void {
     .then(() => {
       // 贴条常驻：设置里开着就自动贴回桌面顶部（重启后依然可见，无需每次手点）
       if (target.windowRoot === 'main' && useAppStore.getState().settings.barPinned) {
-        void ipc.barShow().catch(() => undefined);
+        // bar_show 默认置顶；用户关过置顶就按设置纠正回来（贴条显隐 / 置顶两个开关互不干扰）
+        const onTop = useAppStore.getState().settings.barOnTop;
+        void ipc
+          .barShow()
+          .then(() => ipc.barSetPinned(onTop))
+          .catch(() => undefined);
       }
       // 主窗口置顶：默认关，设置里开着才应用（否则会盖住系统弹框与其它软件）
       if (target.windowRoot === 'main' && useAppStore.getState().settings.mainPinned) {
@@ -137,8 +142,14 @@ function start(): void {
   if (target.windowRoot === 'main') {
     useAppStore.subscribe((state, prev) => {
       if (state.settings.barPinned !== prev.settings.barPinned) {
-        const task = state.settings.barPinned ? ipc.barShow() : ipc.barHide();
+        const task = state.settings.barPinned
+          ? ipc.barShow().then(() => ipc.barSetPinned(state.settings.barOnTop))
+          : ipc.barHide();
         void task.catch(() => undefined);
+      }
+      // 贴条置顶（与「贴条开着没有」独立的第二个开关）：设置中心改了就立刻作用到窗口
+      if (state.settings.barOnTop !== prev.settings.barOnTop) {
+        void ipc.barSetPinned(state.settings.barOnTop).catch(() => undefined);
       }
       // 置顶默认关：开着才让主窗口浮在最上层（否则会盖住系统弹框 / 其它软件）
       if (state.settings.mainPinned !== prev.settings.mainPinned) {

@@ -9,7 +9,8 @@ import {
   setAlwaysOnTop,
 } from '@/core/data/notesService';
 import { isTauri } from '@/platform/detect';
-import { MarkdownEditor, type EditorMode } from '@/components/MarkdownEditor';
+import { MarkdownHelp } from '@/components/MarkdownHelp';
+import { RichMarkdown } from '@/components/RichMarkdown';
 
 /**
  * 便签独立窗口视图（V08）。
@@ -22,40 +23,20 @@ import { MarkdownEditor, type EditorMode } from '@/components/MarkdownEditor';
  *   - 跨窗口同步：远端变更（其他窗口编辑/删除同一条）非聚焦时跟随刷新。
  *
  * 状态来源：`useNotesStore`（本窗口独立实例，hydrate 拉全量 + 总线订阅增量）。
+ *
+ * # V21：去掉编辑器工具栏，改成随时渲染
+ *
+ * 用户反馈「桌面 markdown 编辑都也不需要头工具栏，也需要随时渲染的方案」。
+ * 原先这里挂的是 `MarkdownEditor`（工具栏 + 编辑/分屏/预览三视图 + 模式记忆），
+ * 在只有一张便签大小的窗口里，工具栏把正文挤得所剩无几，而「预览」还要用户自己切。
+ * 现在直接换成 `RichMarkdown`：**没有工具栏、没有模式、敲完即渲染**，
+ * 语法与用法说明挪到标题栏的 `?` 里（`MarkdownHelp`）。
  */
 
 /** 正文落库防抖（毫秒，≥500ms） */
 const BODY_SAVE_DEBOUNCE_MS = 600;
 /** 几何落库防抖（拖动/缩放停稳后写入） */
 const GEOMETRY_SAVE_DEBOUNCE_MS = 500;
-/** 编辑器视图模式偏好（localStorage） */
-const NOTE_MODE_STORAGE_KEY = 'handy.note.mode.v1';
-
-/**
- * 读取上次使用的编辑器视图模式。
- * localStorage 在隐私模式 / 禁用存储时会抛异常，故全部包 try-catch 兜底。
- * @returns 视图模式，非法值回落 `'edit'`
- */
-function readStoredMode(): EditorMode {
-  try {
-    const raw: string | null = window.localStorage.getItem(NOTE_MODE_STORAGE_KEY);
-    return raw === 'edit' || raw === 'split' || raw === 'preview' ? raw : 'edit';
-  } catch {
-    return 'edit';
-  }
-}
-
-/**
- * 写入编辑器视图模式偏好（失败静默，不影响编辑）。
- * @param mode 视图模式
- */
-function writeStoredMode(mode: EditorMode): void {
-  try {
-    window.localStorage.setItem(NOTE_MODE_STORAGE_KEY, mode);
-  } catch {
-    /* 存储不可用时忽略 */
-  }
-}
 
 export interface NoteWindowProps {
   /** 便签 id（由 main.tsx 从 `?window=note-<id>` 解析注入） */
@@ -87,8 +68,6 @@ export function NoteWindow({ noteId }: NoteWindowProps): React.JSX.Element {
   const [body, setBody] = useState('');
   /** 正文编辑器是否聚焦（聚焦期间不跟随远端变更，避免打字被覆盖） */
   const editingRef = useRef(false);
-  /** 编辑器视图模式（编辑 / 分屏 / 预览），下次打开便签沿用 */
-  const [editorMode, setEditorMode] = useState<EditorMode>(() => readStoredMode());
 
   // 启动装配（幂等）
   useEffect(() => {
@@ -201,12 +180,6 @@ export function NoteWindow({ noteId }: NoteWindowProps): React.JSX.Element {
     void useNotesStore.getState().updateNote(noteId, { color }).catch(() => undefined);
   }, [noteId]);
 
-  /** 视图模式变更：更新内存 + 持久化偏好 */
-  const handleModeChange = useCallback((mode: EditorMode): void => {
-    setEditorMode(mode);
-    writeStoredMode(mode);
-  }, []);
-
   // —— 加载中 ——
   if (!loaded) {
     return (
@@ -249,6 +222,7 @@ export function NoteWindow({ noteId }: NoteWindowProps): React.JSX.Element {
         <span data-tauri-drag-region className="min-w-0 flex-1 truncate text-xs font-medium opacity-60">
           {note.title || '便签'}
         </span>
+        <MarkdownHelp align="right" />
         <PinButton pinned={note.pinned} onClick={handleTogglePin} />
         <button
           type="button"
@@ -260,8 +234,8 @@ export function NoteWindow({ noteId }: NoteWindowProps): React.JSX.Element {
         </button>
       </header>
 
-      {/* 正文：Markdown 编辑器（工具栏 + 三视图 + 自动格式化） */}
-      <MarkdownEditor
+      {/* 正文：无所见即所得编辑区（无工具栏 / 无模式，敲完即渲染并自动保存） */}
+      <RichMarkdown
         value={body}
         onChange={setBody}
         onFocus={() => {
@@ -270,11 +244,9 @@ export function NoteWindow({ noteId }: NoteWindowProps): React.JSX.Element {
         onBlur={() => {
           editingRef.current = false;
         }}
-        placeholder="记点什么…支持 Markdown"
-        defaultMode={editorMode}
-        onModeChange={handleModeChange}
-        showStatusBar={false}
-        className="min-h-0 flex-1"
+        placeholder="记点什么…支持 Markdown（```shell 回车即代码块，右上角「?」看语法）"
+        className="min-h-0 flex-1 px-2.5 py-2 text-xs"
+        ariaLabel="便签正文"
       />
 
       {/* 底部：取色器 + 字数 */}

@@ -112,6 +112,7 @@ pub fn run() {
             commands::bar::bar_show,
             commands::bar::bar_hide,
             commands::bar::bar_set_height,
+            commands::bar::bar_set_pinned,
             commands::bar::bar_open_workstation,
             // —— 设置中心 / 备份（M7 / V13）——
             commands::app::hotkey_update,

@@ -15,7 +15,12 @@
  * - **标准 5 段**：`分 时 日 月 周`；
  * - **Quartz 6 / 7 段**：`秒 分 时 日 月 周 [年]`（第 1 段是秒，别搞混）；
  * - 通配 `*`、`?`（Quartz，等价于「不指定」）、列表 `a,b,c`、范围 `a-b`、
- *   步长（「星号 + 斜杠 n」或「a-b + 斜杠 n」）、别名月份 `JAN` / 星期 `MON`；
+ *   步长（`*` 斜杠 n，或 `a-b` 斜杠 n，或 `N` 斜杠 n）；
+ *   其中 **`N/step` 按 Quartz 口径**理解为「从 N 起、每 step 一次、直到该字段上限」——
+ *   所以 `0/30 * * * * ?` 真的是「每 30 秒」，而不是「只有第 0 秒」。
+ *   （Vixie 老实现对 `N/step` 只取 N 一个值，两种口径在真实世界都存在；
+ *   本工具选 Quartz 口径并在界面上把展开后的取值列出来，避免用户猜。）
+ * - 别名月份 `JAN`-`DEC` / 星期 `SUN`-`SAT`；
  * - Quartz 扩展：`L`（当月最后一天）、`15W`（离 15 号最近的工作日）、
  *   `1#2`（当月第 2 个周一）、`5L`（当月最后一个周五）；
  * - 宏：`@yearly` `@annually` `@monthly` `@weekly` `@daily` `@midnight` `@hourly`。
@@ -43,6 +48,8 @@ interface FieldSpec {
   nameOf?: (value: number) => string;
   /** 是否支持 Quartz 的 L / W / # 扩展 */
   quartzy?: boolean;
+  /** 取值范围的人类可读说明（界面上的「怎么写」提示） */
+  hint: string;
 }
 
 /** 单字段解析结果 */
@@ -109,17 +116,68 @@ const SPEC_DOW: FieldSpec = {
   aliases: DOW_ALIASES,
   nameOf: (value: number): string => WEEKDAY_CN[value % 7] ?? String(value),
   quartzy: true,
+  hint: '0-7（0 和 7 都是周日）或 SUN-SAT；Quartz 可用 L / 5L / 1#2',
 };
 
 const SPECS: readonly FieldSpec[] = [
-  { key: 'second', label: '秒', unit: '秒', min: 0, max: 59 },
-  { key: 'minute', label: '分', unit: '分', min: 0, max: 59 },
-  { key: 'hour', label: '时', unit: '时', min: 0, max: 23 },
-  { key: 'dayOfMonth', label: '日', unit: '日', min: 1, max: 31, quartzy: true },
-  { key: 'month', label: '月', unit: '月', min: 1, max: 12, aliases: MONTH_ALIASES, nameOf: (v: number): string => MONTH_CN[v - 1] ?? String(v) },
+  { key: 'second', label: '秒', unit: '秒', min: 0, max: 59, hint: '0-59（仅 Quartz 6/7 段）' },
+  { key: 'minute', label: '分', unit: '分', min: 0, max: 59, hint: '0-59；*/5 = 每 5 分钟' },
+  { key: 'hour', label: '时', unit: '时', min: 0, max: 23, hint: '0-23；*/2 = 每 2 小时' },
+  {
+    key: 'dayOfMonth',
+    label: '日',
+    unit: '日',
+    min: 1,
+    max: 31,
+    quartzy: true,
+    hint: '1-31；Quartz 可用 L（最后一天）/ 15W',
+  },
+  {
+    key: 'month',
+    label: '月',
+    unit: '月',
+    min: 1,
+    max: 12,
+    aliases: MONTH_ALIASES,
+    nameOf: (v: number): string => MONTH_CN[v - 1] ?? String(v),
+    hint: '1-12 或 JAN-DEC',
+  },
   SPEC_DOW,
-  { key: 'year', label: '年', unit: '年', min: 1970, max: 2199 },
+  { key: 'year', label: '年', unit: '年', min: 1970, max: 2199, hint: '1970-2199（仅 Quartz 7 段）' },
 ];
+
+/** 界面用的段规格（只暴露界面需要的字段，`FieldSpec` 本身保持内部实现细节） */
+export interface CronFieldSpec {
+  key: CronFieldKey;
+  label: string;
+  unit: string;
+  min: number;
+  max: number;
+  /** 取值范围 / 写法的可读提示 */
+  hint: string;
+}
+
+/**
+ * 按段数取出各段的「界面规格」（标签 / 取值范围 / 提示）。
+ *
+ * 给界面用的：`CronDescriptor` 要按段数渲染一排**与表达式逐段对齐**的输入框，
+ * 而不是把「分 时 日 月 周」当一行装饰性文字挂在下面。
+ *
+ * @param segmentCount 表达式段数（5 / 6 / 7）
+ * @returns 各段规格；段数非法时返回 null（此时界面只让用户编原始表达式）
+ */
+export function fieldLayout(segmentCount: number): readonly CronFieldSpec[] | null {
+  if (segmentCount === 5) {
+    return SPECS.filter((spec) => spec.key !== 'second' && spec.key !== 'year');
+  }
+  if (segmentCount === 6) {
+    return SPECS.filter((spec) => spec.key !== 'year');
+  }
+  if (segmentCount === 7) {
+    return SPECS;
+  }
+  return null;
+}
 
 /** 宏 → 标准表达式 */
 const MACROS: Record<string, string> = {
@@ -275,6 +333,8 @@ function compileField(spec: FieldSpec, raw: string): CompiledField {
     // —— 范围 / 单值 ——
     let from: number;
     let to: number;
+    /** base 是「光秃秃一个数」（既不是 `*` 也不是 `a-b`）—— 决定 `N/step` 怎么展开 */
+    let bareSingle = false;
     if (base === '*') {
       from = spec.min;
       to = spec.max;
@@ -298,10 +358,17 @@ function compileField(spec: FieldSpec, raw: string): CompiledField {
         }
         from = value;
         to = value;
+        bareSingle = true;
       }
     }
     if (from < spec.min || to > spec.max) {
       return fail(`「${base}」超出取值范围 ${spec.min}-${spec.max}`);
+    }
+    // `N/step`（如 Quartz 的 `0/10` 秒）语义是「从 N 起、每 step 一次、直到字段上限」，
+    // 不是「只有 N 这一下」—— 这正是 `0/30 * * * * ?` 敢叫「每 30 秒」的原因。
+    // 单值 + 步长时把范围右端撑到 max；`a-b/step` 保持原区间不动。
+    if (bareSingle && step !== null) {
+      to = spec.max;
     }
 
     const stride = step ?? 1;
@@ -319,6 +386,9 @@ function compileField(spec: FieldSpec, raw: string): CompiledField {
       single = null;
     } else if (base === '*') {
       texts.push(`每 ${step} ${spec.unit}`);
+      single = null;
+    } else if (bareSingle) {
+      texts.push(`从 ${from} 起每 ${step} ${spec.unit}`);
       single = null;
     } else {
       texts.push(`${from}-${to} 每 ${step} ${spec.unit}`);
@@ -541,19 +611,14 @@ export function analyzeCron(input: string, from: number = Date.now()): CronAnaly
   }
 
   const parts = raw.split(/\s+/);
-  let specs: FieldSpec[];
-  if (parts.length === 5) {
-    specs = SPECS.filter((spec) => spec.key !== 'second' && spec.key !== 'year');
-  } else if (parts.length === 6) {
-    specs = SPECS.filter((spec) => spec.key !== 'year');
-  } else if (parts.length === 7) {
-    specs = [...SPECS];
-  } else {
+  const layout: readonly CronFieldSpec[] | null = fieldLayout(parts.length);
+  if (layout === null) {
     return {
       ...empty,
       error: `段数不对：需要 5 段（分 时 日 月 周）、6 段（秒 分 时 日 月 周）或 7 段（末尾再加年），当前 ${parts.length} 段`,
     };
   }
+  const specs: readonly CronFieldSpec[] = layout;
 
   const compiled: Partial<Record<CronFieldKey, CompiledField>> = {};
   const results: CronFieldResult[] = [];
@@ -677,28 +742,47 @@ export interface CronPreset {
   group: string;
 }
 
-/** 运维 / 开发真正的日常写法 */
+/**
+ * 运维 / 开发真正的日常写法。
+ *
+ * V21 补齐：用户反馈「缺少 `*` 斜杠 5 这样的吗？最小到分钟吗、如果每 5 分钟呢？注意齐全点」——
+ * 于是「高频」组按 2/3/5/6/10/15/20/30 分钟铺全（这几个才是真实业务里点得最多的），
+ * 「进阶」组补上秒级（Quartz 6 段）与多日 / 季度写法。
+ */
 export const CRON_PRESETS: readonly CronPreset[] = [
   { group: '高频', label: '每分钟', expr: '* * * * *', note: '调试期临时用，生产慎用' },
+  { group: '高频', label: '每 2 分钟', expr: '*/2 * * * *', note: '' },
+  { group: '高频', label: '每 3 分钟', expr: '*/3 * * * *', note: '' },
   { group: '高频', label: '每 5 分钟', expr: '*/5 * * * *', note: '最常用的轮询间隔' },
+  { group: '高频', label: '每 6 分钟', expr: '*/6 * * * *', note: '' },
   { group: '高频', label: '每 10 分钟', expr: '*/10 * * * *', note: '' },
+  { group: '高频', label: '每 15 分钟', expr: '*/15 * * * *', note: '' },
+  { group: '高频', label: '每 20 分钟', expr: '*/20 * * * *', note: '' },
   { group: '高频', label: '每 30 分钟', expr: '*/30 * * * *', note: '' },
-  { group: '高频', label: '每小时整点', expr: '0 * * * *', note: '' },
+  { group: '高频', label: '每小时整点', expr: '0 * * * *', note: '等同于 @hourly' },
   { group: '每天', label: '每天 00:00', expr: '0 0 * * *', note: '等同于 @daily' },
-  { group: '每天', label: '每天 08:30', expr: '30 8 * * *', note: '上班前跑一次' },
   { group: '每天', label: '每天 02:00', expr: '0 2 * * *', note: '低峰期备份 / 清理' },
+  { group: '每天', label: '每天 08:30', expr: '30 8 * * *', note: '上班前跑一次' },
   { group: '每天', label: '工作日 09:00', expr: '0 9 * * 1-5', note: '报表 / 提醒' },
+  { group: '每天', label: '每天 12:00 与 18:00', expr: '0 12,18 * * *', note: '一天两次' },
   { group: '每天', label: '每 2 小时', expr: '0 */2 * * *', note: '' },
+  { group: '每天', label: '每 6 小时', expr: '0 */6 * * *', note: '' },
+  { group: '每天', label: '每 12 小时', expr: '0 */12 * * *', note: '' },
   { group: '每周', label: '每周一 01:00', expr: '0 1 * * 1', note: '' },
   { group: '每周', label: '每周日 23:00', expr: '0 23 * * 0', note: '' },
   { group: '每周', label: '周一至周五每小时', expr: '0 * * * 1-5', note: '' },
+  { group: '每周', label: '周末 09:00', expr: '0 9 * * 0,6', note: '' },
   { group: '每月', label: '每月 1 日 00:00', expr: '0 0 1 * *', note: '等同于 @monthly' },
+  { group: '每月', label: '每月 1 日与 15 日', expr: '0 0 1,15 * *', note: '' },
   { group: '每月', label: '每月最后一天 23:59', expr: '59 23 L * *', note: 'Quartz 语法，标准 cron 不支持 L' },
   { group: '每月', label: '每季度首日', expr: '0 0 1 1,4,7,10 *', note: '' },
   { group: '每月', label: '每年 1 月 1 日', expr: '0 0 1 1 *', note: '等同于 @yearly' },
   { group: '进阶', label: '每 15 分钟（9-18 点）', expr: '*/15 9-18 * * *', note: '限定业务时段' },
+  { group: '进阶', label: '每 5 分钟（仅工作日）', expr: '*/5 * * * 1-5', note: '日 / 周同时限定取「或」，这里只限周所以是「且」语义' },
   { group: '进阶', label: '第 2 个周一 10:00', expr: '0 10 ? * 1#2', note: 'Quartz 语法，用于双周会议' },
-  { group: '进阶', label: 'Quartz 每 30 秒', expr: '0/30 * * * * ?', note: '6 段：第 1 段是秒' },
+  { group: '进阶', label: 'Quartz 每 30 秒', expr: '0/30 * * * * ?', note: '6 段：第 1 段是秒，最小粒度 1 秒' },
+  { group: '进阶', label: 'Quartz 每 10 秒', expr: '0/10 * * * * ?', note: '6 段：高位日志 / 探活用' },
+  { group: '进阶', label: 'Quartz 每 5 秒', expr: '0/5 * * * * ?', note: '6 段；再密就别用 cron 了' },
 ];
 
 // ————————————————————————————————————————————————————————————————
@@ -706,27 +790,47 @@ export const CRON_PRESETS: readonly CronPreset[] = [
 // ————————————————————————————————————————————————————————————————
 
 /** 生成器模式 */
-export type CronBuildMode = 'minutes' | 'hours' | 'daily' | 'weekly' | 'monthly' | 'weekdays';
+export type CronBuildMode =
+  | 'seconds'
+  | 'minutes'
+  | 'hours'
+  | 'daily'
+  | 'weekly'
+  | 'weeklyRange'
+  | 'monthly'
+  | 'dayList'
+  | 'weekdays'
+  | 'lastDay';
 
 /** 生成器参数 */
 export interface CronBuildInput {
   mode: CronBuildMode;
-  /** 间隔（分钟 / 小时模式） */
+  /** 间隔（秒 / 分钟 / 小时模式） */
   every: number;
   hour: number;
   minute: number;
-  /** 星期（0-6，weekly 模式） */
+  /** 星期（0-6，weekly / weeklyRange 模式） */
   weekday: number;
-  /** 日期（1-31，monthly 模式） */
+  /** 星期区间的结束日（weeklyRange 模式） */
+  weekdayTo: number;
+  /** 日期（1-31，monthly / dayList 模式） */
   day: number;
+  /** 多个日期（dayList 模式） */
+  days: number[];
 }
 
 /** 由「人话参数」生成表达式 */
 export function buildCron(input: CronBuildInput): string {
-  const { mode, every, hour, minute, weekday, day } = input;
+  const { mode, every, hour, minute, weekday, weekdayTo, day, days } = input;
   const m = Math.max(0, Math.min(59, Math.trunc(minute)));
   const h = Math.max(0, Math.min(23, Math.trunc(hour)));
+  const clampDow = (value: number): number => Math.max(0, Math.min(6, Math.trunc(value)));
   switch (mode) {
+    case 'seconds': {
+      // Quartz 6 段：第 1 段是秒，所以最小粒度能到 1 秒（标准 5 段只能到分钟）
+      const n = Math.max(1, Math.min(59, Math.trunc(every)));
+      return n === 1 ? '* * * * * ?' : `0/${n} * * * * ?`;
+    }
     case 'minutes': {
       const n = Math.max(1, Math.min(59, Math.trunc(every)));
       return n === 1 ? '* * * * *' : `*/${n} * * * *`;
@@ -738,9 +842,21 @@ export function buildCron(input: CronBuildInput): string {
     case 'daily':
       return `${m} ${h} * * *`;
     case 'weekly':
-      return `${m} ${h} * * ${Math.max(0, Math.min(6, Math.trunc(weekday)))}`;
+      return `${m} ${h} * * ${clampDow(weekday)}`;
+    case 'weeklyRange':
+      return `${m} ${h} * * ${clampDow(weekday)}-${clampDow(weekdayTo)}`;
     case 'monthly':
       return `${m} ${h} ${Math.max(1, Math.min(31, Math.trunc(day)))} * *`;
+    case 'lastDay':
+      // Quartz：L = 当月最后一天；日与周互斥，周位要写 ?
+      return `${m} ${h} L * ?`;
+    case 'dayList': {
+      // 多日期（`1,15`）：去重排序，空数组兜底成「day」那一格
+      const list = [...new Set((days.length > 0 ? days : [day]).map((item) => Math.max(1, Math.min(31, Math.trunc(item)))))].sort(
+        (a, b) => a - b,
+      );
+      return `${m} ${h} ${list.join(',')} * *`;
+    }
     case 'weekdays':
     default:
       return `${m} ${h} * * 1-5`;

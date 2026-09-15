@@ -184,14 +184,39 @@ function compile(lang: string): { re: RegExp; classes: string[] } | null {
   return built;
 }
 
-/** 把一段代码切成带颜色的片段 */
-function highlight(code: string, lang: string): React.ReactNode[] {
-  const engine = compile(lang);
+/** 语言别名归一；空串 = 纯文本 */
+export function normalizeLang(lang: string): string {
+  const key = lang.trim().toLowerCase();
+  return key.length === 0 ? '' : (ALIAS[key] ?? key);
+}
+
+/** 该语言是否内置高亮规则（未知语言按纯文本渲染，不算错） */
+export function isSupportedLang(lang: string): boolean {
+  const key = normalizeLang(lang);
+  return key !== '' && LANGS[key] !== undefined;
+}
+
+/** 一个带颜色的代码片段 */
+export interface CodeToken {
+  text: string;
+  /** 空串 = 不着色 */
+  cls: string;
+}
+
+/**
+ * 把代码切成带颜色的片段（纯函数、无 React 依赖）。
+ *
+ * 抽出这一层是为了让 `CodeBlock`（React 渲染）与便签编辑器里的富文本代码块
+ * （要在 `contentEditable` 里重建 innerHTML，只能用 **HTML 字符串**）
+ * 共用同一套词法规则 —— 两边颜色因此永远一致，改一处两边都生效。
+ */
+export function tokenizeCode(code: string, lang: string): CodeToken[] {
+  const engine = compile(normalizeLang(lang));
   if (engine === null) {
-    return [code];
+    return code === '' ? [] : [{ text: code, cls: '' }];
   }
   const { re, classes } = engine;
-  const nodes: React.ReactNode[] = [];
+  const tokens: CodeToken[] = [];
   let cursor = 0;
   let guard = 0;
   re.lastIndex = 0;
@@ -207,21 +232,58 @@ function highlight(code: string, lang: string): React.ReactNode[] {
       continue;
     }
     if (match.index > cursor) {
-      nodes.push(code.slice(cursor, match.index));
+      tokens.push({ text: code.slice(cursor, match.index), cls: '' });
     }
     const groupIndex = match.slice(1).findIndex((value) => value !== undefined);
-    const cls = classes[groupIndex] ?? '';
-    nodes.push(
-      <span key={`${match.index}-${guard}`} className={cls}>
-        {match[0]}
-      </span>,
-    );
+    tokens.push({ text: match[0], cls: classes[groupIndex] ?? '' });
     cursor = match.index + match[0].length;
   }
   if (cursor < code.length) {
-    nodes.push(code.slice(cursor));
+    tokens.push({ text: code.slice(cursor), cls: '' });
   }
-  return nodes;
+  return tokens;
+}
+
+/** 代码文本 → HTML 安全的字符（只转义会破坏结构的三个字符，引号无需转） */
+function escapeCode(text: string): string {
+  return text.replace(/[&<>]/g, (char: string): string => {
+    if (char === '&') {
+      return '&amp;';
+    }
+    if (char === '<') {
+      return '&lt;';
+    }
+    return '&gt;';
+  });
+}
+
+/**
+ * 代码 → 带 `<span class="…">` 的 HTML 字符串。
+ *
+ * 便签编辑器要「就地高亮」代码块，而 `contentEditable` 里没法塞 React 节点，
+ * 只能重建 `innerHTML` —— 这就是那个入口。文本一律先转义，不存在注入面。
+ */
+export function highlightCodeHtml(code: string, lang: string): string {
+  return tokenizeCode(code, lang)
+    .map((token: CodeToken): string =>
+      token.cls === ''
+        ? escapeCode(token.text)
+        : `<span class="${token.cls}">${escapeCode(token.text)}</span>`,
+    )
+    .join('');
+}
+
+/** 把一段代码切成带颜色的 React 片段 */
+function highlight(code: string, lang: string): React.ReactNode[] {
+  return tokenizeCode(code, lang).map((token: CodeToken, index: number): React.ReactNode =>
+    token.cls === '' ? (
+      token.text
+    ) : (
+      <span key={index} className={token.cls}>
+        {token.text}
+      </span>
+    ),
+  );
 }
 
 export interface CodeBlockProps {
@@ -238,13 +300,10 @@ export interface CodeBlockProps {
  * 其余按纯文本渲染，不会报错也不会变色。
  */
 export function CodeBlock({ code, lang = '', className }: CodeBlockProps): React.JSX.Element {
-  const normalized = React.useMemo(() => {
-    const key = lang.trim().toLowerCase();
-    return key.length === 0 ? '' : (ALIAS[key] ?? key);
-  }, [lang]);
+  const normalized = React.useMemo(() => normalizeLang(lang), [lang]);
 
   const nodes = React.useMemo(() => highlight(code.replace(/\s+$/, ''), normalized), [code, normalized]);
-  const supported = normalized !== '' && LANGS[normalized] !== undefined;
+  const supported = isSupportedLang(normalized);
 
   return (
     <div className={cn('my-2 overflow-hidden rounded-lg border border-border bg-muted/40', className)}>

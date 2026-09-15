@@ -43,8 +43,8 @@ const META_KEY_GEOMETRY: &str = "overlay_geometry";
 /// 光标轮询间隔（毫秒）。足够快以赶上拖放落点，又远低于 CPU 可感知开销。
 const POLL_INTERVAL_MS: u64 = 60;
 
-/// 每隔多少个轮询周期把挂件窗重新压回 Z 序最底（其它窗口激活后挂件可能上浮）。
-const BOTTOM_REASSERT_TICKS: u64 = 100;
+/// 每隔多少个轮询周期检查一次 Z 序（错位才重排，见 [`reassert_attach`]）。
+const REASSERT_TICKS: u64 = 33;
 
 /// 前端上报的盒子命中区域（挂件窗客户区内**物理像素**）。
 #[derive(Debug, Clone, Deserialize)]
@@ -507,44 +507,66 @@ fn default_geometry(app: &AppHandle) -> (f64, f64, f64, f64) {
 }
 
 // ————————————————————————————————————————————————————————————————
-// 桌面层挂载（V20 关键修复）
+// 桌面层挂载（V21 重做 —— 三次踩坑的最终答案）
 //
-// # 为什么原来的 `SetWindowPos(HWND_BOTTOM)` 看不见
+// # 走过的两条错路
 //
-// `HWND_BOTTOM` 是「整个 Z 序的最底」——**包括桌面窗口（Progman）之下**。
-// 也就是说窗口被塞到了壁纸的后面，用户看到的是「格子建了、数据也建了，
-// 但桌面上什么都没有」（用户原话：「一直在自己的页面上创建，根本没有影响桌面」）。
+// 1. **V19 = `SetWindowPos(HWND_BOTTOM)`**：`HWND_BOTTOM` 是「整个 Z 序的最底」，
+//    **包括桌面窗口（Progman）之下** —— 窗口被塞到壁纸后面，用户看到的是
+//    「格子建了、数据也建了，但桌面上什么都没有」。
+// 2. **V20 = `SetParent(Progman)`**：把挂件窗变成桌面的**子窗口**。位置对了，
+//    但踩了三个新坑：
+//      - 子窗口不参与 DWM 的 per-pixel alpha 合成 → **透明失效**，整块灰底；
+//      - `SetParent` 会触发窗口重建 → **点一下闪一下**；
+//      - 父子关系随 Explorer 重启失效 → 「看运气才能看到」。
 //
-// # 正确做法：把挂件窗做成**桌面窗口的子窗口**
+// # 最终做法：顶层窗口 + 「插到桌面窗口正上方」
 //
-// 找到 Progman（或持有 `SHELLDLL_DefView` 的 WorkerW），`SetParent` 过去，
-// 它就真正长在桌面上：随桌面显示/隐藏、不会盖住任何应用窗口、
-// 也不会被切到壁纸背面。这同时是「桌面整理」该有的语义。
+// `SetWindowPos(hwnd, host, SWP_NOACTIVATE)` 的第二个参数语义是
+// 「把 hwnd 放到 host **之上**」，host 取 Progman（或持有 `SHELLDLL_DefView`
+// 的 WorkerW）。于是 Z 序变成：
 //
-// 兜底：找不到桌面宿主 / SetParent 失败 → 退回旧的 Bottom 模式（仍能操作，
-// 但可能不可见），并把失败原因原样报给前端，不做静默吞错。
+// ```text
+//   …… 其它应用窗口 ……
+//   ┌──────────────┐
+//   │ grid-overlay │   ← 我们（透明区域穿透，桌面图标仍可见可点）
+//   ├──────────────┤
+//   │   Progman    │   ← 桌面 + 系统图标
+//   └──────────────┘
+// ```
+//
+// 三个好处：
+//   - 窗口仍是**顶层窗口** → 透明 / 模糊 / 圆角全部正常；
+//   - 不重建窗口 → 不再闪烁；Explorer 重启后由轮询线程重新定位；
+//   - 应用窗口天然盖住它 → 不会打扰正常工作，回到桌面又立刻看到挂件。
+//
+// 另外给窗口加 `WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW`：点击挂件时**不抢焦点**，
+// 也不会因为被激活而浮到别的窗口上面去。
+//
+// 兜底：找不到桌面宿主 → 退到 [`AttachMode::Normal`]（不做任何 Z 序调整，
+// 窗口照旧可见可用），并把原因原样报给前端，不做静默吞错。
 // ————————————————————————————————————————————————————————————————
 
-/// 挂件窗基准层。
+/// 挂件窗与桌面的相对关系。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttachMode {
-    /// 贴到桌面（默认）：作为桌面窗口的子窗口，真正画在桌面上。
+    /// 贴到桌面（默认）：Z 序上紧贴在桌面窗口之上、其它应用窗口之下。
     Desktop,
-    /// Z 序压到最底（旧方案，保留作兼容 / 排查用）。
-    Bottom,
+    /// 普通窗口：不调整 Z 序（排查 / 兼容用，序列化仍写作 `"bottom"`）。
+    Normal,
 }
 
 impl AttachMode {
     fn as_str(self) -> &'static str {
         match self {
             Self::Desktop => "desktop",
-            Self::Bottom => "bottom",
+            Self::Normal => "bottom",
         }
     }
 
     fn parse(value: &str) -> Self {
         if value == "bottom" {
-            Self::Bottom
+            Self::Normal
         } else {
             Self::Desktop
         }
@@ -552,7 +574,7 @@ impl AttachMode {
 
     fn from_u8(value: u8) -> Self {
         if value == 1 {
-            Self::Bottom
+            Self::Normal
         } else {
             Self::Desktop
         }
@@ -567,7 +589,7 @@ impl AttachMode {
     fn as_u8(self) -> u8 {
         match self {
             Self::Desktop => 0,
-            Self::Bottom => 1,
+            Self::Normal => 1,
         }
     }
 }
@@ -732,67 +754,86 @@ fn desktop_icons_visible() -> bool {
     true
 }
 
+/// 取挂件窗自身的 Win32 句柄。
+#[cfg(target_os = "windows")]
+fn overlay_hwnd(win: &WebviewWindow) -> Result<HWND, String> {
+    win.hwnd()
+        .map(|raw| HWND(raw.0 as _))
+        .map_err(|err| format!("获取挂件窗句柄失败：{err}"))
+}
+
+/// 让挂件窗「不抢焦点、不进 Alt+Tab」。
+///
+/// 贴着桌面的顶层窗口如果可激活，用户一点它就会被提到其它应用窗口之上，
+/// 挂件随即变成「挡住工作」的干扰项。`WS_EX_NOACTIVATE` 从根上避免这件事。
+#[cfg(target_os = "windows")]
+fn make_unfocusable(hwnd: HWND) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    };
+    // SAFETY: 有效 HWND；只读改写本窗口的扩展样式位。
+    unsafe {
+        let current = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let next = current
+            | (WS_EX_NOACTIVATE.0 as isize)
+            | (WS_EX_TOOLWINDOW.0 as isize);
+        if next != current {
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, next);
+        }
+    }
+}
+
+/// 把挂件窗插到「桌面窗口正上方」。
+#[cfg(target_os = "windows")]
+fn place_above_desktop(hwnd: HWND) -> Result<(), String> {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetWindowPos, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    };
+    let Some(host) = desktop_host() else {
+        return Err("未找到桌面窗口（Progman / WorkerW）".to_string());
+    };
+    // SAFETY: host 为系统桌面窗口有效句柄；hwnd 为本进程窗口有效句柄。
+    // 第二个参数的语义是「把 hwnd 放到 host 之上」——正是我们要的分层。
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            host,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        )
+        .map_err(|err| format!("把挂件窗贴到桌面层失败：{err}"))
+    }
+}
+
 /// 按基准层把挂件窗放到位。
 ///
-/// - `Desktop`：`SetParent` 到桌面宿主；父窗口找不到 / 挂载失败**自动退回 `Bottom`**
-///   并把原因返回（前端提示用户改基准层，而不是让用户面对一个「看不见的窗」）；
-/// - `Bottom`：解除父子关系后压到 Z 序最底（旧行为）。
+/// - `Desktop`：插到桌面窗口正上方；找不到桌面宿主**退回 `Normal`** 并把原因返回
+///   （前端据此提示用户，而不是让用户面对一个「看不见的窗」）；
+/// - `Normal`：不做任何 Z 序调整（普通顶层窗口）。
 fn apply_attach(win: &WebviewWindow, mode: AttachMode) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        use windows::Win32::Foundation::HWND;
-        use windows::Win32::UI::WindowsAndMessaging::{
-            SetParent, SetWindowPos, HWND_BOTTOM, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-        };
-        let raw = win
-            .hwnd()
-            .map_err(|err| format!("获取挂件窗句柄失败：{err}"))?;
-        let hwnd = HWND(raw.0 as _);
-
-        let push_bottom = |handle: HWND| -> Result<(), String> {
-            unsafe {
-                SetWindowPos(
-                    handle,
-                    HWND_BOTTOM,
-                    0,
-                    0,
-                    0,
-                    0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-                )
-                .map_err(|err| format!("挂件窗层级复位失败：{err}"))
-            }
-        };
+        let hwnd = overlay_hwnd(win)?;
+        // 无论哪种模式，挂件都不该抢焦点
+        make_unfocusable(hwnd);
 
         if mode == AttachMode::Desktop {
-            match desktop_host() {
-                Some(host) => {
-                    // SAFETY: host 为系统桌面窗口有效句柄；hwnd 为本进程窗口有效句柄。
-                    if let Err(err) = unsafe { SetParent(hwnd, host) } {
-                        push_bottom(hwnd)?;
-                        return Err(format!(
-                            "贴到桌面层失败（已退回最底层）：{err}"
-                        ));
-                    }
-                    // 挂到桌面后仍要落在桌面自己的子窗口最底（图标视图之下）
-                    push_bottom(hwnd)?;
+            return match place_above_desktop(hwnd) {
+                Ok(()) => {
                     ATTACH_MODE.store(AttachMode::Desktop.as_u8(), Ordering::Relaxed);
-                    return Ok(());
+                    Ok(())
                 }
-                None => {
-                    push_bottom(hwnd)?;
-                    ATTACH_MODE.store(AttachMode::Bottom.as_u8(), Ordering::Relaxed);
-                    return Err("未找到桌面窗口（Progman / WorkerW），已退回最底层".to_string());
+                Err(err) => {
+                    ATTACH_MODE.store(AttachMode::Normal.as_u8(), Ordering::Relaxed);
+                    Err(format!("{err}，挂件已按普通窗口显示"))
                 }
-            }
+            };
         }
 
-        // Bottom：先解除父子关系（可能此前挂在桌面上；父句柄传 NULL = 回到桌面级）
-        unsafe {
-            let _ = SetParent(hwnd, null_hwnd());
-        }
-        push_bottom(hwnd)?;
-        ATTACH_MODE.store(AttachMode::Bottom.as_u8(), Ordering::Relaxed);
+        ATTACH_MODE.store(AttachMode::Normal.as_u8(), Ordering::Relaxed);
         Ok(())
     }
     #[cfg(not(target_os = "windows"))]
@@ -802,29 +843,30 @@ fn apply_attach(win: &WebviewWindow, mode: AttachMode) -> Result<(), String> {
     }
 }
 
-/// 周期复位（不重建父子关系，只把 Z 序压回所属层的最底，避免闪烁）。
+/// 周期复位：**只在 Z 序真的错位时**才重排。
+///
+/// 每次都无脑 `SetWindowPos` 会让窗口反复重绘 —— 那正是 V20「点一下闪一下」的
+/// 观感来源之一。这里用 `GetWindow(hwnd, GW_HWNDNEXT)`（紧贴在我下面的是谁）
+/// 判断：桌面窗口就在正下方 = 层级正确，直接返回。
 fn reassert_attach(win: &WebviewWindow) {
     #[cfg(target_os = "windows")]
     {
-        use windows::Win32::Foundation::HWND;
-        use windows::Win32::UI::WindowsAndMessaging::{
-            SetWindowPos, HWND_BOTTOM, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-        };
-        if let Ok(raw) = win.hwnd() {
-            let hwnd = HWND(raw.0 as _);
-            // SAFETY: 有效 HWND，仅调整 Z 序。
-            unsafe {
-                let _ = SetWindowPos(
-                    hwnd,
-                    HWND_BOTTOM,
-                    0,
-                    0,
-                    0,
-                    0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-                );
-            }
+        use windows::Win32::UI::WindowsAndMessaging::{GetWindow, GW_HWNDNEXT};
+        if AttachMode::current() != AttachMode::Desktop {
+            return;
         }
+        let Ok(hwnd) = overlay_hwnd(win) else {
+            return;
+        };
+        let Some(host) = desktop_host() else {
+            return;
+        };
+        // SAFETY: 有效 HWND，仅查询 Z 序。
+        let below = unsafe { GetWindow(hwnd, GW_HWNDNEXT) }.unwrap_or_else(|_| null_hwnd());
+        if below == host {
+            return;
+        }
+        let _ = place_above_desktop(hwnd);
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -1012,8 +1054,8 @@ fn ensure_poller(app: AppHandle) {
                     continue;
                 }
                 tick += 1;
-                // 周期性压回所属层的最底：应用窗口激活后挂件可能上浮
-                if tick % BOTTOM_REASSERT_TICKS == 0 {
+                // 周期性校验层级（错位才重排）：Explorer 重启 / 别的窗口插队后自愈
+                if tick % REASSERT_TICKS == 0 {
                     reassert_attach(&win);
                 }
                 let want_interactive =
@@ -1034,10 +1076,10 @@ fn ensure_poller(app: AppHandle) {
 /// 创建（幂等复用）并显示挂件窗。
 fn show_overlay(app: &AppHandle) -> Result<(), String> {
     let mode = read_attach_mode(app);
-    // 已存在 → 显示 + 按基准层归位（同 note 窗的幂等约定，不开第二个）
+    // 已存在 → 先归位再显示：避免「先以旧层级画一帧、再跳位」的闪动
     if let Some(existing) = app.get_webview_window(GRID_LABEL) {
-        let _ = existing.show();
         let attach = apply_attach(&existing, mode);
+        let _ = existing.show();
         ensure_poller(app.clone());
         return attach;
     }
@@ -1063,7 +1105,8 @@ fn show_overlay(app: &AppHandle) -> Result<(), String> {
         .minimizable(false)
         .always_on_top(false)
         .skip_taskbar(true)
-        .visible(true)
+        // 先隐藏：等层级摆好再显示，用户看不到「跳一下」的过程
+        .visible(false)
         .inner_size(width, height)
         .position(x, y)
         .build()
@@ -1073,6 +1116,7 @@ fn show_overlay(app: &AppHandle) -> Result<(), String> {
     let _ = win.set_ignore_cursor_events(true);
     // 按基准层归位（默认「贴到桌面」；失败时窗口仍在，把原因透给前端）
     let attach = apply_attach(&win, mode);
+    let _ = win.show();
     ensure_poller(app.clone());
     attach
 }

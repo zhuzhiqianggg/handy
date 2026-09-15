@@ -60,4 +60,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   mainPinned: false,
   // 快捷入口默认只显示「常用」这几项，不把 30+ 个系统面板一股脑铺满界面
   quickActionIds: [...DEFAULT_QUICK_ACTION_IDS],
+  // 贴条默认始终置顶；不想被它一直压着时可从贴条上的图钉按钮关掉
+  barOnTop: true,
+  // 纪念日默认空：属于用户私有数据，不预置任何条目
+  anniversaries: [],
 };

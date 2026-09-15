@@ -484,6 +484,11 @@ export function SettingsCenter(): React.JSX.Element {
             field="barPinned"
           />
           <BooleanRow
+            title="贴条始终置顶"
+            description="关闭后贴条退化成普通窗口：被其它窗口盖住，切回桌面又能看见（贴条上的图钉按钮同此开关）"
+            field="barOnTop"
+          />
+          <BooleanRow
             title="主窗口始终置顶"
             description="开启后 Handy 会浮在所有窗口之上；默认关闭，避免挡住系统弹框与其它软件"
             field="mainPinned"

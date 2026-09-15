@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { highlightCodeHtml, isSupportedLang, normalizeLang } from '@/components/CodeBlock';
 import { renderMarkdown } from '@/lib/markdown';
 import { cn } from '@/lib/utils';
 import '@/styles/markdown.css';
@@ -57,6 +58,27 @@ import '@/styles/markdown.css';
  *
  * 已知取舍：在**列表项内部**敲 `> ` / `# ` 这类块级标记不会转换（列表项不是
  * 顶层块，直接替换会破坏 `<ul>` 结构），会原样保留为文本。
+ *
+ * # V21 增强：代码块能多行、能高亮、带语言
+ *
+ * 用户反馈「``` 只有一行输入不能换行等，也没有语法高亮等」。三处根因与对策：
+ *
+ * 1. **只有一行** —— 浏览器在 `<pre>` 里按回车默认会**跑出代码块**（另起一个
+ *    `<div>`），于是代码块永远只有一行。现在回车改为**手工插入 `\n` 文本节点**
+ *    留在块内；在「末行本来就是空行」时按回车才跳出（与三引号收尾的习惯一致），
+ *    `Esc` 也随时可跳出。
+ * 2. **没有语言** —— 围栏规则从只认裸 ``` ``` ``` 扩展为 ```` ```lang ````，
+ *    语言记在 `pre.dataset.lang`；顺手支持「先起块、再敲 `shell` 回车」的写法
+ *    （仅当该词是**内置高亮语言**时才认，避免把一行 `ls` 吃掉）。
+ * 3. **没有高亮** —— 复用 `CodeBlock` 的同一套词法规则，把 `pre > code` 的内容
+ *    重建为带颜色的 `<span>`。重建会动 DOM、可能丢光标，因此：
+ *    - 只在内容**真的变了**时重建（`hlKey` 比对，避免无谓抖动）；
+ *    - 重建前后按**可见字符偏移**保存 / 还原光标；
+ *    - 光标落在边界（块首 / 块尾）时插一颗 `ZWSP` 哨兵再落光标 ——
+ *      沿用行内转换那套「哨兵断样式继承」的老办法，避免接着敲的字继续染成
+ *      上一个 token 的颜色。
+ *
+ * 输入期高亮走 400ms 空转去抖：连续敲字时不动 DOM，停一拍颜色就上。
  */
 
 export interface RichMarkdownProps {
@@ -78,9 +100,27 @@ export interface RichMarkdownProps {
   onEnter?: () => void;
   /** 失焦（宿主可借此立即落库，不必等防抖） */
   onBlur?: () => void;
+  /** 聚焦（宿主可据此暂停「远端内容覆盖本地草稿」，避免打字被打断） */
+  onFocus?: () => void;
   /** 无障碍标签 */
   ariaLabel?: string;
 }
+
+/**
+ * 代码块高亮去抖（毫秒）。
+ *
+ * 连续敲字期间不动 DOM（改 DOM 就可能动光标），停一拍再把颜色补上 ——
+ * 视觉上仍是「随时渲染」，但把光标抖动的风险压到最低。
+ */
+const HIGHLIGHT_DEBOUNCE_MS = 400;
+
+/**
+ * 每个 `pre` 最近一次高亮对应的内容指纹。
+ *
+ * 用 `WeakMap` 而不是 `dataset`：指纹里含整段代码，写进 DOM 属性会让每次
+ * 高亮都触发一次属性序列化。内容没变就不重建 DOM，是「光标不乱跳」的前提。
+ */
+const highlightedKeys = new WeakMap<HTMLElement, string>();
 
 /** 行内即时转换规则（顺序敏感：`**` 必须早于 `*`，否则会被单星号规则截胡） */
 const INLINE_RULES: ReadonlyArray<{ re: RegExp; tag: string }> = [
@@ -102,7 +142,8 @@ interface BlockRule {
 
 const BLOCK_RULES: readonly BlockRule[] = [
   { re: /^(#{1,6})\s$/, kind: 'h' },
-  { re: /^```$/, kind: 'pre' },
+  // 围栏代码块：裸 ``` ``` ``` 与带语言的 ```` ```shell ```` 都认；语言由捕获组带出
+  { re: /^```([A-Za-z0-9+#._-]*)$/, kind: 'pre' },
   { re: /^>\s$/, kind: 'quote' },
   { re: /^\[[ xX]?\]\s$/, kind: 'task' },
   { re: /^[-*+]\s$/, kind: 'ul' },
@@ -253,6 +294,109 @@ function withCaretSeed(tag: string): HTMLElement {
   return el;
 }
 
+/**
+ * 取围栏代码块的语言标识。
+ *
+ * 两个来源：编辑期写进 `pre.dataset.lang` 的，以及 marked 渲染出来的
+ * `<code class="language-shell">`。二者取其一，都没有就是「无语言围栏」。
+ */
+function fenceLangOf(pre: HTMLElement, codeEl: HTMLElement): string {
+  const fromDataset: string = normalizeLang(pre.dataset.lang ?? '');
+  if (fromDataset !== '') {
+    return fromDataset;
+  }
+  const matched: RegExpExecArray | null = /(?:^|\s)language-([A-Za-z0-9+#._-]+)/.exec(codeEl.className);
+  return normalizeLang(matched?.[1] ?? '');
+}
+
+/** 确保 `pre` 里有 `code` 子元素（marked 会产出，手工建块时也建了；这里只兜底） */
+function ensureCodeChild(pre: HTMLElement): HTMLElement {
+  const existing: HTMLElement | null = pre.querySelector('code');
+  if (existing !== null) {
+    return existing;
+  }
+  const code: HTMLElement = document.createElement('code');
+  while (pre.firstChild !== null) {
+    code.appendChild(pre.firstChild);
+  }
+  pre.appendChild(code);
+  return code;
+}
+
+/**
+ * 光标在 `scope` 内的**可见字符偏移**（零宽锚点不计入）。
+ *
+ * 高亮要重建 innerHTML，重建前只能用偏移量记住光标位置，重建后再换算回来。
+ * @returns 光标不在 `scope` 内时返回 null（此时无需还原，随便重建）
+ */
+function caretOffsetIn(scope: HTMLElement): number | null {
+  const selection: Selection | null = window.getSelection();
+  if (!selection || selection.rangeCount === 0) {
+    return null;
+  }
+  const range: Range = selection.getRangeAt(0);
+  if (!scope.contains(range.startContainer)) {
+    return null;
+  }
+  const probe: Range = document.createRange();
+  probe.selectNodeContents(scope);
+  probe.setEnd(range.startContainer, range.startOffset);
+  return stripZwsp(probe.toString()).length;
+}
+
+/**
+ * 把光标放回 `scope` 内的第 `offset` 个可见字符处（高亮重建后调用）。
+ *
+ * 边界情况（偏移 0 或等于总长）不能直接落在已有文本节点里 —— 浏览器会按
+ * 「紧邻前一个行内元素」延续样式，接着敲的字就染成上一个 token 的颜色。
+ * 这两种情况一律插一颗 `ZWSP` 哨兵再落光标（与 `convertInline` 同一套办法）。
+ */
+function restoreCaretIn(scope: HTMLElement, offset: number): void {
+  const selection: Selection | null = window.getSelection();
+  if (!selection) {
+    return;
+  }
+  const place = (node: Node, at: number): void => {
+    const range: Range = document.createRange();
+    range.setStart(node, at);
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  };
+
+  if (offset <= 0) {
+    const head: Text = document.createTextNode(ZWSP);
+    scope.insertBefore(head, scope.firstChild);
+    place(head, 1);
+    return;
+  }
+
+  const walker: TreeWalker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT);
+  let remaining: number = offset;
+  let node: Node | null = walker.nextNode();
+  let last: Text | null = null;
+  while (node) {
+    const text: Text = node as Text;
+    const length: number = (text.nodeValue ?? '').length;
+    last = text;
+    if (remaining <= length) {
+      place(text, remaining);
+      return;
+    }
+    remaining -= length;
+    node = walker.nextNode();
+  }
+
+  // 跑到末尾（或 scope 里一个文本节点都没有）：补哨兵
+  const tail: Text = document.createTextNode(ZWSP);
+  if (last === null) {
+    scope.appendChild(tail);
+  } else {
+    last.after(tail);
+  }
+  place(tail, 1);
+}
+
 /** 行内序列化：把富文本节点还原成 markdown 行内语法 */
 function serializeInline(node: Node): string {
   if (node.nodeType === Node.TEXT_NODE) {
@@ -395,10 +539,12 @@ function serializeBlocks(root: HTMLElement): string {
       return;
     }
 
-    // 代码块
+    // 代码块（保留语言标识，尾部空行剥掉，避免每次序列化都多出一行）
     if (tag === 'pre') {
-      const code: string = stripZwsp(el.textContent ?? '').replace(/\n$/, '');
-      lines.push('```');
+      const codeEl: HTMLElement = ensureCodeChild(el);
+      const lang: string = fenceLangOf(el, codeEl);
+      const code: string = stripZwsp(codeEl.textContent ?? '').replace(/\n+$/, '');
+      lines.push(`\`\`\`${lang}`);
       lines.push(code);
       lines.push('```');
       return;
@@ -445,6 +591,7 @@ export function RichMarkdown({
   singleLine = false,
   onEnter,
   onBlur,
+  onFocus,
   ariaLabel,
 }: RichMarkdownProps): React.JSX.Element {
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -464,7 +611,66 @@ export function RichMarkdown({
     onChange(next);
   }, [onChange]);
 
-  /** 首次挂载：灌入初值 */
+  // ————————————————————————————————————————————————————————————
+  // 围栏代码块：就地高亮
+  //
+  // 放在这两个 effect 之前是有意的：「挂载灌初值」与「外部换值」都要顺手把既有
+  // 代码块上色，若把高亮器声明在它们后面，闭包里就是 TDZ（TS 也会直接报错）。
+  // ————————————————————————————————————————————————————————————
+
+  /**
+   * 就地高亮所有围栏代码块。
+   *
+   * 内容指纹没变就直接跳过 —— 这是「不抖」的关键：光标还原再准，也比不上
+   * 根本不动 DOM。真要重建时，先按可见字符偏移记住光标，重建后再换算回去。
+   */
+  const applyHighlight = useCallback((): void => {
+    const root = rootRef.current;
+    if (!root) {
+      return;
+    }
+    const pres: HTMLElement[] = Array.from(root.querySelectorAll<HTMLElement>('pre'));
+    pres.forEach((pre: HTMLElement): void => {
+      const codeEl: HTMLElement = ensureCodeChild(pre);
+      const raw: string = stripZwsp(codeEl.textContent ?? '');
+      const lang: string = fenceLangOf(pre, codeEl);
+      const key = `${lang}\u0000${raw}`;
+      if (highlightedKeys.get(pre) === key) {
+        return;
+      }
+      highlightedKeys.set(pre, key);
+      if (!isSupportedLang(lang) || raw.trim() === '') {
+        return;
+      }
+      const offset: number | null = caretOffsetIn(pre);
+      codeEl.innerHTML = highlightCodeHtml(raw, lang);
+      if (offset !== null) {
+        restoreCaretIn(codeEl, offset);
+      }
+    });
+  }, []);
+
+  /** 高亮去抖句柄（输入期用；失焦 / 换值 / 挂载时立刻跑） */
+  const highlightTimerRef = useRef<number | undefined>(undefined);
+  const scheduleHighlight = useCallback((): void => {
+    if (highlightTimerRef.current !== undefined) {
+      window.clearTimeout(highlightTimerRef.current);
+    }
+    highlightTimerRef.current = window.setTimeout(() => {
+      highlightTimerRef.current = undefined;
+      applyHighlight();
+    }, HIGHLIGHT_DEBOUNCE_MS);
+  }, [applyHighlight]);
+  useEffect(
+    () => () => {
+      if (highlightTimerRef.current !== undefined) {
+        window.clearTimeout(highlightTimerRef.current);
+      }
+    },
+    [],
+  );
+
+  /** 首次挂载：灌入初值（并立刻给既有代码块上色） */
   useEffect(() => {
     const root = rootRef.current;
     if (!root) {
@@ -472,6 +678,7 @@ export function RichMarkdown({
     }
     root.innerHTML = renderMarkdown(value);
     setEmpty(isVisuallyEmpty(root));
+    applyHighlight();
     // 仅初始化执行一次：后续同步由 value 变更的 effect 负责
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -490,7 +697,8 @@ export function RichMarkdown({
     }
     root.innerHTML = renderMarkdown(value);
     setEmpty(isVisuallyEmpty(root));
-  }, [value]);
+    applyHighlight();
+  }, [value, applyHighlight]);
 
   /**
    * 摘掉「空格式壳」。
@@ -545,6 +753,94 @@ export function RichMarkdown({
     }
     placeCaretAtEnd(target);
   }, []);
+
+  // ————————————————————————————————————————————————————————————
+  // 围栏代码块：换行 / 认语言 / 跳出
+  // ————————————————————————————————————————————————————————————
+
+  /** 光标所在的直接块（`root` 的孩子）；不在编辑器里返回 null */
+  const blockAtCaret = useCallback((): HTMLElement | null => {
+    const root = rootRef.current;
+    const selection: Selection | null = window.getSelection();
+    if (!root || !selection || selection.rangeCount === 0) {
+      return null;
+    }
+    return directBlockOf(root, selection.getRangeAt(0).startContainer);
+  }, []);
+
+  /** 光标所在的围栏代码块（不在代码块里返回 null） */
+  const preAtCaret = useCallback((): HTMLElement | null => {
+    const block: HTMLElement | null = blockAtCaret();
+    if (!block) {
+      return null;
+    }
+    return block.tagName.toLowerCase() === 'pre' ? block : null;
+  }, [blockAtCaret]);
+
+  /**
+   * 在光标处插入一个**真实换行**。
+   *
+   * 不用 `<br>`、也不用 `execCommand('insertLineBreak')` —— 前者在
+   * `textContent` 里不产出 `\n`，序列化后代码块就还是「一行的」。
+   * 这里直接落一个含 `\n` 的文本节点，markdown 与渲染两侧都一致。
+   */
+  const insertNewlineInPre = useCallback((): void => {
+    const selection: Selection | null = window.getSelection();
+    if (!selection || selection.rangeCount === 0) {
+      return;
+    }
+    const range: Range = selection.getRangeAt(0);
+    range.deleteContents();
+    const newline: Text = document.createTextNode('\n');
+    range.insertNode(newline);
+    const after: Range = document.createRange();
+    after.setStart(newline, 1);
+    after.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(after);
+  }, []);
+
+  /** 跳出代码块：块后另起一个空段落并把光标落过去 */
+  const exitPre = useCallback(
+    (pre: HTMLElement): void => {
+      const paragraph: HTMLElement = document.createElement('div');
+      paragraph.appendChild(document.createElement('br'));
+      pre.after(paragraph);
+      placeCaretAtEnd(paragraph);
+      emit();
+    },
+    [emit],
+  );
+
+  /**
+   * 代码块里按回车的三种去向：
+   *   ① 首行是**内置高亮语言名** → 认成围栏语言并清空内容（```` ```sh ⏎ ```` 的写法）；
+   *   ② 末行本来就是空行 → 收尾跳出（三引号写法的直觉）；
+   *   ③ 其余情况 → 插一个真实换行，留在代码块里继续写。
+   */
+  const handlePreEnter = useCallback(
+    (pre: HTMLElement, shift: boolean): void => {
+      const codeEl: HTMLElement = ensureCodeChild(pre);
+      const text: string = stripZwsp(codeEl.textContent ?? '');
+      const token: string = text.trim();
+      if (!shift && text.indexOf('\n') < 0 && isSupportedLang(token)) {
+        pre.dataset.lang = normalizeLang(token);
+        codeEl.textContent = ZWSP;
+        placeCaretAtEnd(codeEl);
+        emit();
+        return;
+      }
+      const lastBreak: number = text.lastIndexOf('\n');
+      if (!shift && lastBreak >= 0 && text.slice(lastBreak + 1).trim() === '') {
+        codeEl.textContent = text.replace(/\n+$/, '');
+        exitPre(pre);
+        return;
+      }
+      insertNewlineInPre();
+      emit();
+    },
+    [emit, exitPre, insertNewlineInPre],
+  );
 
   /** 行内即时转换：把光标前刚闭合的标记换成格式化元素 */
   const convertInline = useCallback((): boolean => {
@@ -627,7 +923,12 @@ export function RichMarkdown({
         caretTarget = replacement;
         break;
       case 'pre': {
+        // 语言从围栏行的捕获组带出（```shell / ```python …），无语言则为空串
+        const fenceLang: string = normalizeLang(rule.re.exec(marker)?.[1] ?? '');
         replacement = document.createElement('pre');
+        if (fenceLang !== '') {
+          replacement.dataset.lang = fenceLang;
+        }
         const code: HTMLElement = withCaretSeed('code');
         replacement.appendChild(code);
         caretTarget = code;
@@ -667,11 +968,16 @@ export function RichMarkdown({
 
   /** 输入事件：先清空壳，再尝试两类转换，最后同步内容出去 */
   const handleInput = useCallback((): void => {
-    pruneEmptyFormatting();
-    // 块级优先（`# ` 之类），失败再试行内（`**x**` 之类）
-    convertBlock() || convertInline();
+    // 代码块内部一律按裸文本处理：不做行内 / 块级转换，
+    // 否则一段代码只要恰好长得像标记（例如整块就是一个 `- `）就会被「吃掉」。
+    if (preAtCaret() === null) {
+      pruneEmptyFormatting();
+      // 块级优先（`# ` 之类），失败再试行内（`**x**` 之类）
+      convertBlock() || convertInline();
+    }
     emit();
-  }, [convertBlock, convertInline, emit, pruneEmptyFormatting]);
+    scheduleHighlight();
+  }, [convertBlock, convertInline, emit, preAtCaret, pruneEmptyFormatting, scheduleHighlight]);
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>): void => {
@@ -680,6 +986,31 @@ export function RichMarkdown({
         onEnter?.();
         return;
       }
+
+      // —— 围栏代码块内的按键：换行 / 认语言 / 跳出 / 撤销围栏 ——
+      const pre: HTMLElement | null = preAtCaret();
+      if (pre !== null) {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          handlePreEnter(pre, event.shiftKey);
+        } else if (event.key === 'Escape') {
+          event.preventDefault();
+          exitPre(pre);
+        } else if (
+          event.key === 'Backspace' &&
+          stripZwsp(ensureCodeChild(pre).textContent ?? '') === ''
+        ) {
+          // 空代码块里退格 = 撤掉这个围栏，还原成普通段落（否则空块删不掉）
+          event.preventDefault();
+          const paragraph: HTMLElement = document.createElement('div');
+          paragraph.appendChild(document.createElement('br'));
+          pre.replaceWith(paragraph);
+          placeCaretAtEnd(paragraph);
+          emit();
+        }
+        return;
+      }
+
       // 空任务项 / 空列表项回车：跳出列表（避免空标记一直续下去）
       if (event.key === 'Enter' && !event.shiftKey) {
         const root = rootRef.current;
@@ -705,7 +1036,7 @@ export function RichMarkdown({
         }
       }
     },
-    [emit, onEnter, singleLine],
+    [emit, exitPre, handlePreEnter, onEnter, preAtCaret, singleLine],
   );
 
   /** 粘贴：只取纯文本（避免粘进外部 HTML 把结构冲烂），多行仍然合法 */
@@ -716,8 +1047,9 @@ export function RichMarkdown({
       const safe: string = singleLine ? text.replace(/\s*\n+\s*/g, ' ') : text;
       document.execCommand('insertText', false, safe);
       emit();
+      scheduleHighlight();
     },
-    [emit, singleLine],
+    [emit, scheduleHighlight, singleLine],
   );
 
   return (
@@ -733,7 +1065,14 @@ export function RichMarkdown({
         onInput={handleInput}
         onKeyDown={handleKeyDown}
         onPaste={handlePaste}
+        onFocus={() => onFocus?.()}
         onBlur={() => {
+          // 失焦即把待补的高亮补上（省得离开后代码还是黑的）
+          if (highlightTimerRef.current !== undefined) {
+            window.clearTimeout(highlightTimerRef.current);
+            highlightTimerRef.current = undefined;
+          }
+          applyHighlight();
           emit();
           onBlur?.();
         }}

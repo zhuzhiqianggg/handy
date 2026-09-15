@@ -1,5 +1,15 @@
 import * as React from 'react';
-import { BookOpen, Check, FlaskConical, Regex, Replace, Sparkles, X } from 'lucide-react';
+import {
+  BookOpen,
+  Check,
+  ChevronRight,
+  FlaskConical,
+  Regex,
+  Replace,
+  Search,
+  Sparkles,
+  X,
+} from 'lucide-react';
 import { CommandShell } from '@/components/CommandShell';
 import { CopyButton } from '@/components/CopyButton';
 import { Input } from '@/components/ui/input';
@@ -49,6 +59,10 @@ interface RegexToolState {
   showLibrary: boolean;
   tab: PanelTab;
   selected: string;
+  /** 当前展开的正则库条目（`组/名称`）；同一时刻只展开一条，列表才不会变成一堵墙 */
+  expandedKey: string;
+  /** 正则库搜索词（名称 / 表达式 / 说明 / 分类 都能命中） */
+  libQuery: string;
 }
 
 const INITIAL_STATE: RegexToolState = {
@@ -59,6 +73,8 @@ const INITIAL_STATE: RegexToolState = {
   showLibrary: true,
   tab: 'matches',
   selected: '',
+  expandedKey: '',
+  libQuery: '',
 };
 
 /** 计算某个偏移量落在第几行 */
@@ -206,6 +222,17 @@ export function RegexTester({ initialInput = '' }: CommandProps): React.JSX.Elem
     [state.selected],
   );
 
+  /** 正则库筛选：分类 / 名称 / 表达式 / 说明 任一命中即保留 */
+  const libraryFiltered = React.useMemo<readonly RegexExample[]>(() => {
+    const query = state.libQuery.trim().toLowerCase();
+    if (query === '') {
+      return REGEX_LIBRARY;
+    }
+    return REGEX_LIBRARY.filter((item) =>
+      `${item.group} ${item.label} ${item.pattern} ${item.description}`.toLowerCase().includes(query),
+    );
+  }, [state.libQuery]);
+
   const useExample = (item: RegexExample, withText: boolean): void => {
     patch({
       pattern: item.pattern,
@@ -239,7 +266,7 @@ export function RegexTester({ initialInput = '' }: CommandProps): React.JSX.Elem
       favorite={shell.favorite}
       onToggleFavorite={shell.onToggleFavorite}
       copyText={matchSummary}
-      shortcutHint="从左侧「正则库」挑一条即可开测；「连示例文本」会把配套日志样本一起填好"
+      shortcutHint="点正则库整行展开详情，双击直接连示例文本一起填；也可以在上方搜索框按用途找"
     >
       <div className="flex flex-col gap-4">
         {/* ——— 表达式 + flags ——— */}
@@ -282,71 +309,146 @@ export function RegexTester({ initialInput = '' }: CommandProps): React.JSX.Elem
           </div>
         </div>
 
-        {/* ——— 正则库 ——— */}
+        {/* ——— 正则库：整行可点展开（V21） ———
+            用户反馈：「建议整个行都可以点击展开，而不是跑到后面找一个小小的展开按钮」。
+            于是这里改成手风琴：**整行就是按钮**，点哪儿都能展开/收起；填入按钮收进
+            展开后的面板里（大目标、语义清楚），30 条正则的列表也因此清爽多了。
+            额外加了搜索框（30 条靠肉眼扫太费劲）与双击直达（双击整行 = 连示例文本一起填）。 */}
         <div className="rounded-xl border border-border bg-card">
-          <div className="flex items-center gap-2 border-b border-border px-4 py-2">
+          <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2">
             <BookOpen className="h-3.5 w-3.5 text-muted-foreground" />
             <span className="text-sm font-medium text-foreground">正则库</span>
             <span className="text-[11px] text-muted-foreground">
-              {REGEX_LIBRARY.length} 条实战正则 · 点「连示例文本」带配套日志样本
+              {REGEX_LIBRARY.length} 条 · 点整行展开，双击直接连示例文本一起填
             </span>
+            <div className="relative ml-auto">
+              <Search className="pointer-events-none absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
+              <input
+                value={state.libQuery}
+                spellCheck={false}
+                onChange={(event) => patch({ libQuery: event.target.value })}
+                placeholder="搜名称 / 表达式 / 用途…"
+                className="h-6 w-44 rounded-md border border-input bg-transparent pl-6 pr-2 text-[11px] text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                aria-label="搜索正则库"
+              />
+              {state.libQuery !== '' ? (
+                <button
+                  type="button"
+                  onClick={() => patch({ libQuery: '' })}
+                  title="清空搜索"
+                  className="absolute right-1 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted-foreground transition hover:text-foreground"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              ) : null}
+            </div>
             <button
               type="button"
               onClick={() => patch({ showLibrary: !state.showLibrary })}
-              className="ml-auto rounded-md px-2 py-0.5 text-[11px] text-muted-foreground transition hover:bg-accent hover:text-foreground"
+              className="rounded-md px-2 py-0.5 text-[11px] text-muted-foreground transition hover:bg-accent hover:text-foreground"
             >
               {state.showLibrary ? '收起' : '展开'}
             </button>
           </div>
           {state.showLibrary ? (
-            <div className="scrollbar-thin max-h-[320px] overflow-y-auto p-3">
+            <div className="scrollbar-thin max-h-[340px] overflow-y-auto p-3">
+              {libraryFiltered.length === 0 ? (
+                <p className="py-6 text-center text-xs text-muted-foreground">
+                  没有匹配「{state.libQuery}」的条目
+                </p>
+              ) : null}
               {REGEX_GROUPS.map((group) => {
-                const list = REGEX_LIBRARY.filter((item) => item.group === group);
+                const list = libraryFiltered.filter((item) => item.group === group);
                 if (list.length === 0) {
                   return null;
                 }
                 return (
                   <div key={group} className="mb-3 last:mb-0">
-                    <p className="mb-1.5 text-[11px] font-medium text-muted-foreground">{group}</p>
+                    <p className="mb-1.5 text-[11px] font-medium text-muted-foreground">
+                      {group}
+                      <span className="ml-1 text-muted-foreground/60">{list.length}</span>
+                    </p>
                     <div className="flex flex-col gap-1">
                       {list.map((item) => {
                         const key = `${item.group}/${item.label}`;
                         const active = state.selected === key;
+                        const expanded = state.expandedKey === key;
                         return (
                           <div
                             key={key}
                             className={cn(
-                              'flex flex-wrap items-center gap-2 rounded-lg border px-2.5 py-1.5 transition',
-                              active ? 'border-brand/50 bg-brand-muted/50' : 'border-border hover:bg-accent/40',
+                              'overflow-hidden rounded-lg border transition',
+                              active
+                                ? 'border-brand/50 bg-brand-muted/40'
+                                : 'border-border hover:border-brand/30',
                             )}
                           >
-                            <span className="text-xs font-medium text-foreground">{item.label}</span>
-                            <code
-                              className="max-w-[420px] truncate rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground"
-                              title={item.pattern}
+                            {/* 整行可点：展开 / 收起详情 */}
+                            <button
+                              type="button"
+                              onClick={() => patch({ expandedKey: expanded ? '' : key })}
+                              onDoubleClick={() => useExample(item, true)}
+                              aria-expanded={expanded}
+                              title="点一下展开详情与「填入」按钮；双击直接连示例文本一起填"
+                              className="flex w-full items-center gap-2 px-2.5 py-2 text-left transition hover:bg-accent/40"
                             >
-                              {item.pattern}
-                            </code>
-                            <div className="ml-auto flex items-center gap-1">
-                              <button
-                                type="button"
-                                onClick={() => useExample(item, false)}
-                                className="rounded-md border border-border px-2 py-0.5 text-[11px] text-muted-foreground transition hover:bg-accent hover:text-foreground"
+                              <ChevronRight
+                                className={cn(
+                                  'h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform',
+                                  expanded && 'rotate-90',
+                                )}
+                              />
+                              <span className="shrink-0 text-xs font-medium text-foreground">
+                                {item.label}
+                              </span>
+                              <code
+                                className="min-w-0 flex-1 truncate text-left font-mono text-[10px] text-muted-foreground"
+                                title={item.pattern}
                               >
-                                用此正则
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => useExample(item, true)}
-                                className="inline-flex items-center gap-1 rounded-md bg-brand px-2 py-0.5 text-[11px] text-white transition hover:opacity-90"
-                              >
-                                <Sparkles className="h-3 w-3" />
-                                连示例文本
-                              </button>
-                            </div>
-                            <p className="w-full text-[11px] leading-relaxed text-muted-foreground">
-                              {item.description}
-                            </p>
+                                {item.pattern}
+                              </code>
+                              {active ? (
+                                <span className="shrink-0 rounded bg-brand/15 px-1.5 text-[9px] text-brand">
+                                  当前
+                                </span>
+                              ) : null}
+                            </button>
+
+                            {expanded ? (
+                              <div className="border-t border-border/70 bg-background/40 px-2.5 py-2">
+                                <p className="text-[11px] leading-relaxed text-muted-foreground">
+                                  {item.description}
+                                </p>
+                                {item.cases !== undefined && item.cases.length > 0 ? (
+                                  <p className="mt-1 text-[10px] text-muted-foreground/70">
+                                    带 {item.cases.length} 条断言用例，填入后可在「用例验证」页签自证
+                                  </p>
+                                ) : null}
+                                <pre className="scrollbar-thin mt-2 max-h-24 overflow-auto whitespace-pre-wrap break-all rounded-md bg-muted px-2 py-1.5 font-mono text-[10px] text-foreground">
+                                  {item.pattern}
+                                </pre>
+                                <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => useExample(item, true)}
+                                    className="inline-flex items-center gap-1 rounded-md bg-brand px-2.5 py-1 text-[11px] text-white transition hover:opacity-90"
+                                  >
+                                    <Sparkles className="h-3 w-3" />
+                                    连示例文本一起填
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => useExample(item, false)}
+                                    className="rounded-md border border-border px-2.5 py-1 text-[11px] text-muted-foreground transition hover:bg-accent hover:text-foreground"
+                                  >
+                                    只填正则
+                                  </button>
+                                  <span className="ml-auto text-[10px] text-muted-foreground/70">
+                                    flags：{item.flags || '无'}
+                                  </span>
+                                </div>
+                              </div>
+                            ) : null}
                           </div>
                         );
                       })}
@@ -566,8 +668,8 @@ export function RegexTester({ initialInput = '' }: CommandProps): React.JSX.Elem
             {state.tab === 'cases' ? (
               selectedEntry === null || selectedEntry.cases === undefined ? (
                 <p className="py-6 text-center text-xs text-muted-foreground">
-                  从正则库里点「用此正则」选中带用例的条目（手机号 / IPv4 / 日期 / SemVer / 端口 / 灾难性回溯），
-                  这里会逐条验证它「该命中的命中、该拒绝的拒绝」。
+                  从正则库展开带用例的条目（手机号 / IPv4 / 日期 / SemVer / 端口 / 灾难性回溯）
+                  并点「连示例文本一起填」，这里会逐条验证它「该命中的命中、该拒绝的拒绝」。
                 </p>
               ) : (
                 <div className="flex flex-col gap-1.5">

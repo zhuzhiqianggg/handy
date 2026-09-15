@@ -147,6 +147,22 @@ pub async fn bar_set_height(app: AppHandle, height: f64) -> Result<(), String> {
     Ok(())
 }
 
+/// 切换贴条置顶（V21）。
+///
+/// 贴条默认置顶（`always_on_top`），但一直压在所有窗口之上很碍事 ——
+/// 用户要的是「想看时抬眼就能看到，不想看时别老挡着」。
+/// 于是把置顶做成**可切换**：关掉后贴条退化成普通窗口，被其它窗口盖住、
+/// 切回桌面时又露出来；开关状态存在 `settings.barOnTop`，
+/// 由贴条自己在挂载时调用本命令纠正（`show_bar` 仍默认置顶）。
+#[tauri::command]
+pub async fn bar_set_pinned(app: AppHandle, pinned: bool) -> Result<(), String> {
+    let Some(win) = app.get_webview_window(BAR_LABEL) else {
+        return Ok(()); // 窗口没开着：只落设置，下次开窗由前端应用
+    };
+    win.set_always_on_top(pinned)
+        .map_err(|err| format!("切换贴条置顶失败：{err}"))
+}
+
 /// 从贴条唤出主窗口并切到「工作台」模块。
 ///
 /// 视图状态是**每个窗口各持一份**的（见 ARCHITECTURE ADR-8），贴条无法直接改主窗口的

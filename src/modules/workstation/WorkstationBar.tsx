@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronDown, ChevronUp, LayoutDashboard, Plus, X } from 'lucide-react';
+import { ChevronDown, ChevronUp, LayoutDashboard, Pin, PinOff, Plus, X } from 'lucide-react';
 import { ipc } from '@/lib/ipc';
+import { readSettings } from '@/lib/store';
+import { toast } from '@/components/ui/toast';
 import { cn } from '@/lib/utils';
 import { useTodosStore } from '@/stores/useTodosStore';
 import { useAppStore } from '@/stores/useAppStore';
@@ -294,6 +296,49 @@ export function WorkstationBar(): React.JSX.Element {
     void ipc.barHide().catch(() => undefined);
   }, []);
 
+  /**
+   * 贴条置顶开关（V21，用户反馈 #5）。
+   *
+   * 「这个贴条可以置顶也可以不置顶，加个图标控制，不然一直置顶当界面也很烦的」——
+   * 置顶与「贴条开着没有」是两件事：开着但一直被压在别的窗口之上会挡视线，
+   * 关掉后贴条退化成普通窗口，被盖住、切回桌面又露出来。
+   *
+   * 状态存 `settings.barOnTop`；因为 `show_bar` 建窗时默认置顶，所以本窗挂载
+   * 以及每次显隐之后都要按设置纠正一次（主窗口显隐路径见 `main.tsx`）。
+   */
+  const barOnTop = useAppStore((state) => state.settings.barOnTop);
+  useEffect(() => {
+    void ipc.barSetPinned(useAppStore.getState().settings.barOnTop).catch(() => undefined);
+  }, []);
+
+  /**
+   * 贴条与主窗口**各持一份 store** —— 设置中心里改了「贴条始终置顶」，本窗口不会
+   * 收到通知，图钉图标就会与实际状态对不上。窗口重新获得焦点时从配置文件补读一次，
+   * 顺带把置顶状态纠正到真实值（这是最省的跨窗口同步，不必为此再造一条事件总线）。
+   */
+  useEffect(() => {
+    const resync = (): void => {
+      void readSettings()
+        .then((settings) => {
+          useAppStore.setState((prev) => ({ settings: { ...prev.settings, ...settings } }));
+          void ipc.barSetPinned(settings.barOnTop).catch(() => undefined);
+        })
+        .catch(() => undefined);
+    };
+    window.addEventListener('focus', resync);
+    return () => window.removeEventListener('focus', resync);
+  }, []);
+
+  const toggleOnTop = useCallback((): void => {
+    const next = !useAppStore.getState().settings.barOnTop;
+    void useAppStore.getState().updateSettings({ barOnTop: next }).catch(() => undefined);
+    void ipc.barSetPinned(next).catch((error: unknown) => {
+      toast.error('切换贴条置顶失败', {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    });
+  }, []);
+
   /** D. 时间 + 计数 + 今日进度（同时是拖拽区） */
   const clockBlock = (
     <div className="flex shrink-0 items-center gap-2" data-tauri-drag-region>
@@ -345,6 +390,24 @@ export function WorkstationBar(): React.JSX.Element {
         className="rounded-md bg-white/10 p-1 transition hover:bg-white/20"
       >
         {expanded ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+      </button>
+      <button
+        type="button"
+        onClick={toggleOnTop}
+        title={
+          barOnTop
+            ? '取消置顶：贴条不再压在所有窗口上（被盖住，回桌面可见）'
+            : '置顶贴条：让它始终浮在最上层'
+        }
+        aria-pressed={barOnTop}
+        className={cn(
+          'rounded-md p-1 transition',
+          barOnTop
+            ? 'bg-white/20 text-white hover:bg-white/30'
+            : 'text-neutral-400 hover:bg-white/20 hover:text-white',
+        )}
+      >
+        {barOnTop ? <Pin className="h-3.5 w-3.5" fill="currentColor" /> : <PinOff className="h-3.5 w-3.5" />}
       </button>
       <button
         type="button"

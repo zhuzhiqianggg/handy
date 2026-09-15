@@ -1,9 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Eye, FilePlus2, MonitorUp, NotebookPen, PenLine, Trash2 } from 'lucide-react';
+import { FilePlus2, MonitorUp, NotebookPen, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { MarkdownHelp } from '@/components/MarkdownHelp';
 import { RichMarkdown } from '@/components/RichMarkdown';
-import { MarkdownWithCode } from '@/components/MarkdownWithCode';
 import { toast } from '@/components/ui/toast';
 import { useNotesStore } from '@/stores/useNotesStore';
 import { openNoteWindow } from '@/core/data/notesService';
@@ -25,9 +25,12 @@ import { cn } from '@/lib/utils';
  *   3. **贴到桌面**：列表项**右键**即可把该便签丢成桌面悬浮窗（复用 V08 的 note 窗，
  *      `?window=note-<id>` 路由一直在，只是之前没有入口）。
  *
- * 编辑态仍是「所见即所得」的 `RichMarkdown`（敲 `**重点**` 当场变粗体），
- * 预览态才做代码高亮 —— 因为高亮要在编辑框里做会不断打断光标，
- * 分成两个页签既简单又不折腾用户。数据仍是 `notes` 表，零迁移。
+ * 编辑态就是**唯一**形态：所见即所得的 `RichMarkdown`（敲 `**重点**` 当场变粗体，
+ * 围栏代码块按语言上色）。V21 之前这里还有「编辑 / 预览」两个页签，用户反馈
+ * 「不需要头工具栏，也需要随时渲染的方案」—— 页签于是被撤掉：渲染本来就在敲的
+ * 那一刻发生，再让人切一次页签纯属多余。
+ *
+ * 「怎么写」的入口交给标题栏那个 `?`（`MarkdownHelp`），不再占用头部空间。
  */
 
 /** 自动落库防抖（毫秒） */
@@ -66,8 +69,6 @@ export function NotesPanel(): React.JSX.Element {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [title, setTitle] = useState('');
   const [body, setBody] = useState('');
-  /** 编辑（所见即所得）/ 预览（代码高亮） */
-  const [mode, setMode] = useState<'edit' | 'preview'>('edit');
   const [menu, setMenu] = useState<ContextMenuState | null>(null);
 
   // 右键菜单：点任意处关闭
@@ -208,33 +209,7 @@ export function NotesPanel(): React.JSX.Element {
           Markdown · 边写边渲染 · 右键可贴到桌面
         </span>
         <div className="ml-auto flex items-center gap-1">
-          {/* 编辑 / 预览 切换：预览态做代码高亮 */}
-          <div className="flex items-center rounded-lg border border-border p-0.5">
-            {(
-              [
-                { value: 'edit', label: '编辑', icon: PenLine },
-                { value: 'preview', label: '预览', icon: Eye },
-              ] as const
-            ).map((item) => {
-              const Icon = item.icon;
-              return (
-                <button
-                  key={item.value}
-                  type="button"
-                  onClick={() => setMode(item.value)}
-                  className={cn(
-                    'inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] transition',
-                    mode === item.value
-                      ? 'bg-brand-muted font-medium text-brand'
-                      : 'text-muted-foreground hover:text-foreground',
-                  )}
-                >
-                  <Icon className="h-3 w-3" />
-                  {item.label}
-                </button>
-              );
-            })}
-          </div>
+          <MarkdownHelp />
           <Button size="sm" className="h-7 px-2.5 text-xs" onClick={handleCreate}>
             <FilePlus2 className="h-3.5 w-3.5" />
             新建
@@ -333,28 +308,20 @@ export function NotesPanel(): React.JSX.Element {
               aria-label="便签标题"
             />
             <div className="min-h-[280px] flex-1 overflow-hidden rounded-lg border border-border bg-background">
-              {mode === 'edit' ? (
-                <RichMarkdown
-                  value={body}
-                  onChange={(next: string) => {
-                    setBody(next);
-                    schedule(activeId, title, next);
-                  }}
-                  onBlur={flush}
-                  placeholder="直接写就行：**重点** 会变粗体、- 开头变列表、# 开头变标题；粘贴 ```shell 代码块后切到「预览」看高亮。"
-                  className="min-h-[280px] px-3 py-2 text-sm"
-                  ariaLabel="便签正文"
-                />
-              ) : (
-                <div className="scrollbar-thin h-full max-h-[420px] overflow-auto px-3 py-2">
-                  <MarkdownWithCode source={body} fallback="（这条便签还是空的）" />
-                </div>
-              )}
+              <RichMarkdown
+                value={body}
+                onChange={(next: string) => {
+                  setBody(next);
+                  schedule(activeId, title, next);
+                }}
+                onBlur={flush}
+                placeholder="直接写就行：**重点** 变粗体、- 开头变列表、# 开头变标题；敲 ```shell 回车就能粘代码并自动高亮。点右上角「?」看全部语法。"
+                className="min-h-[280px] px-3 py-2 text-sm"
+                ariaLabel="便签正文"
+              />
             </div>
             <p className="text-[11px] text-muted-foreground">
-              {mode === 'edit'
-                ? '编辑态：语法敲完立刻渲染（不需要点预览）。'
-                : '预览态：```shell / ```python / ```json 等围栏代码块会按语言高亮。'}
+              语法敲完立刻渲染并自动保存；代码块里回车换行，末行空着再回车（或按 Esc）跳出。
             </p>
           </div>
         </div>

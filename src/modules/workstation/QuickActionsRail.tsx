@@ -1,4 +1,5 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Activity,
   AppWindow,
@@ -64,20 +65,22 @@ import { cn } from '@/lib/utils';
 import type { SysAction } from '@/types/sys';
 
 /**
- * 工作台「快捷入口」竖排图标栏。
+ * 工作台「快捷入口」图标栏。
  *
- * # 用户反馈（V20）
+ * # 用户反馈（V21 第二轮）
  *
- * 「快捷入口应该要放在一个随手可以点击到的地方这样才叫快捷，你现在这个要拉到最下面才能点击；
- *   最好对应 window 的功能图标，直接图标贴在工作台的左边或者右边，竖排大图标，
- *   鼠标上去显示说明。」
+ * 「快捷图标 tip 跑到界面外面去了不能显示全了，而且快捷图标多了竖行显示不全都丢失了，
+ *   可以自适应或者流布局根据多少自动展开显示还是怎么规划更好。」
  *
- * 于是从「底部一整块卡片」改成**右侧竖排图标栏**：
- *   - 图标 **44×44**、单手可点，鼠标悬停浮出「名称 + 一句话说明」；
- *   - 分两段：**应用内跳转**（工作台 / 工具箱 / 密码库 / 桌面整理）+ **系统面板**（用户自选）；
- *   - 每个系统动作都有对应的 lucide 图标（终端 / 网卡 / 服务 / 证书 / 打印机……），
- *     不再是清一色的扳手；
- *   - 「自定义」从右侧滑出全量清单，勾选即保存（`settings.quickActionIds`）。
+ * 两处都改了根因，而不是加个 `overflow: visible` 糊过去：
+ *
+ * 1. **tip 溢出** —— 原来的气泡是按钮里的 `absolute left-full`，而栏本身会被
+ *    窗口/滚动容器裁剪，气泡一长就只剩半截。现在改成 **React Portal 挂到 `body`**
+ *    + `position: fixed` 按按钮矩形定位，且默认往**左**弹（栏在最右侧），
+ *    左边放不下才翻到右边 —— 无论栏怎么滚动、窗口多窄都完整可见。
+ * 2. **图标太多显示不全** —— 竖排一列在 768p 屏上最多放 9 个，第 10 个就被切掉了。
+ *    现在图标区**按可用高度自动分列**（1–3 列，列优先排布，顺序仍然是从上往下读），
+ *    仍放不下时该区可滚动，底部「设置 / 自定义」两个按钮永远钉在栏底。
  *
  * 安全边界不变：前端只传动作 **id**，可执行目标与参数硬编码在 Rust 白名单表
  * （`src-tauri/src/commands/sys.rs`），不存在命令注入面。
@@ -144,18 +147,64 @@ const APP_SHORTCUTS: ReadonlyArray<{ moduleId: string; name: string; description
   { moduleId: 'desktop-organizer', name: '桌面整理', description: '一键整理桌面 · 布局备份还原', icon: AppWindow },
 ];
 
-/** 悬停浮出的说明气泡 */
-function RailTip({ name, description, elevated }: { name: string; description: string; elevated?: boolean }): React.JSX.Element {
-  return (
-    <span className="pointer-events-none absolute left-full top-1/2 z-50 ml-2 hidden w-56 -translate-y-1/2 rounded-lg bg-neutral-900/95 px-2.5 py-1.5 text-left shadow-xl ring-1 ring-white/10 group-hover:block">
+/** 栏内单个图标按钮的固定边长（与 `h-11 w-11` 一致） */
+const RAIL_ITEM = 44;
+/** 栏内间距（与 `gap-1.5` 一致） */
+const RAIL_GAP = 6;
+/** 最多分几列（再多就把内容区挤没了） */
+const RAIL_MAX_COLS = 3;
+
+/** 悬停气泡的内容与锚点 */
+interface TipState {
+  name: string;
+  description: string;
+  elevated: boolean;
+  /** 触发按钮的视口矩形（`getBoundingClientRect`） */
+  rect: DOMRect;
+}
+
+/**
+ * 悬停说明气泡 —— 用 Portal 挂到 body，彻底摆脱父级 `overflow` 裁剪。
+ *
+ * 定位策略：优先弹在按钮**左侧**（栏贴着窗口右边），左边空间不足时翻到右侧；
+ * 垂直方向以按钮中线对齐，并夹在视口内（8px 边距），确保长文案也完整可读。
+ */
+function TipPortal({ tip }: { tip: TipState | null }): React.JSX.Element | null {
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+  if (!mounted || tip === null || typeof document === 'undefined') {
+    return null;
+  }
+
+  const WIDTH = 240;
+  const MARGIN = 8;
+  const gap = 10;
+  // 左侧优先；放不下翻右侧；两侧都放不下就贴到视口内最靠左的位置
+  const preferLeft = tip.rect.left - gap - WIDTH >= MARGIN;
+  const left = preferLeft
+    ? tip.rect.left - gap - WIDTH
+    : Math.min(tip.rect.right + gap, window.innerWidth - WIDTH - MARGIN);
+  const rawTop = tip.rect.top + tip.rect.height / 2;
+  // 估算高度上限（两行文案 + 标题），用于把气泡夹在视口内
+  const top = Math.min(Math.max(rawTop, 56), window.innerHeight - 56);
+
+  return createPortal(
+    <div
+      role="tooltip"
+      style={{ left, top, width: WIDTH }}
+      className="pointer-events-none fixed z-[9999] -translate-y-1/2 rounded-lg bg-neutral-900/95 px-2.5 py-1.5 text-left shadow-xl ring-1 ring-white/10"
+    >
       <span className="flex items-center gap-1.5">
-        <span className="text-[11px] font-medium text-neutral-50">{name}</span>
-        {elevated === true ? (
+        <span className="text-[11px] font-medium text-neutral-50">{tip.name}</span>
+        {tip.elevated ? (
           <span className="rounded bg-amber-400/20 px-1 text-[9px] text-amber-200">管理员</span>
         ) : null}
       </span>
-      <span className="mt-0.5 block text-[10px] leading-snug text-neutral-300">{description}</span>
-    </span>
+      <span className="mt-0.5 block text-[10px] leading-snug text-neutral-300">{tip.description}</span>
+    </div>,
+    document.body,
   );
 }
 
@@ -168,6 +217,8 @@ function RailButton({
   running,
   active,
   onClick,
+  onTip,
+  onTipEnd,
 }: {
   icon: LucideIcon;
   name: string;
@@ -176,15 +227,32 @@ function RailButton({
   running?: boolean;
   active?: boolean;
   onClick: () => void;
+  onTip: (tip: TipState) => void;
+  onTipEnd: () => void;
 }): React.JSX.Element {
+  const ref = useRef<HTMLButtonElement | null>(null);
+
+  const show = (): void => {
+    const node = ref.current;
+    if (node === null) {
+      return;
+    }
+    onTip({ name, description, elevated: elevated === true, rect: node.getBoundingClientRect() });
+  };
+
   return (
     <button
+      ref={ref}
       type="button"
       onClick={onClick}
       disabled={running}
       title={`${name} — ${description}`}
+      onMouseEnter={show}
+      onFocus={show}
+      onMouseLeave={onTipEnd}
+      onBlur={onTipEnd}
       className={cn(
-        'group relative flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border transition',
+        'flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border transition',
         active
           ? 'border-brand/50 bg-brand-muted text-brand'
           : 'border-transparent text-muted-foreground hover:border-brand/40 hover:bg-brand-muted/60 hover:text-brand',
@@ -195,7 +263,6 @@ function RailButton({
       {elevated === true ? (
         <span className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-amber-400" />
       ) : null}
-      <RailTip name={name} description={description} elevated={elevated} />
     </button>
   );
 }
@@ -206,6 +273,9 @@ export function QuickActionsRail(): React.JSX.Element {
   const [notice, setNotice] = useState<string | null>(null);
   const [runningId, setRunningId] = useState<string | null>(null);
   const [customizing, setCustomizing] = useState(false);
+  const [tip, setTip] = useState<TipState | null>(null);
+  /** 图标区每列能放几个（0 = 还没量到，按 1 列渲染） */
+  const [perCol, setPerCol] = useState(0);
 
   const selectedIds = useAppStore((state) => state.settings.quickActionIds);
   const updateSettings = useAppStore((state) => state.updateSettings);
@@ -254,6 +324,33 @@ export function QuickActionsRail(): React.JSX.Element {
       .filter((action): action is SysAction => action !== undefined);
   }, [actions, selectedIds]);
 
+  /**
+   * 图标区自适应分列。
+   *
+   * 用 ResizeObserver 盯住图标区的可用高度，算出「每列能放几个」，再据此把图标
+   * **列优先**切块（从上往下读，读完一列再读下一列）。列数上限 [`RAIL_MAX_COLS`]，
+   * 还放不下时靠该区自身滚动兜底 —— 总之不会有图标「消失」。
+   */
+  const listRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const node = listRef.current;
+    if (node === null) {
+      return undefined;
+    }
+    const compute = (): void => {
+      const height = node.clientHeight;
+      if (height <= 0) {
+        return;
+      }
+      const count = Math.max(1, Math.floor((height + RAIL_GAP) / (RAIL_ITEM + RAIL_GAP)));
+      setPerCol((prev) => (prev === count ? prev : count));
+    };
+    compute();
+    const observer = new ResizeObserver(compute);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [loading, pinned.length]);
+
   const toggle = (id: string): void => {
     const next = selectedIds.includes(id)
       ? selectedIds.filter((item) => item !== id)
@@ -283,96 +380,172 @@ export function QuickActionsRail(): React.JSX.Element {
   const isModuleActive = (moduleId: string): boolean =>
     view.kind === 'module' && view.moduleId === moduleId;
 
-  return (
-    <aside className="relative flex w-[68px] shrink-0 flex-col items-center gap-1.5 self-start rounded-2xl border border-border bg-card py-3 shadow-panel">
-      {/* —— 应用内跳转 —— */}
-      {APP_SHORTCUTS.map((item) => (
-        <RailButton
-          key={item.moduleId}
-          icon={item.icon}
-          name={item.name}
-          description={item.description}
-          active={isModuleActive(item.moduleId)}
-          onClick={() => openModule(item.moduleId)}
-        />
-      ))}
+  /** 待排布的按钮节点（应用内跳转在前，系统动作在后，顺序即用户的自定义顺序） */
+  const items = useMemo<React.JSX.Element[]>(() => {
+    const nodes: React.JSX.Element[] = APP_SHORTCUTS.map((item) => (
+      <RailButton
+        key={`app-${item.moduleId}`}
+        icon={item.icon}
+        name={item.name}
+        description={item.description}
+        active={isModuleActive(item.moduleId)}
+        onClick={() => openModule(item.moduleId)}
+        onTip={setTip}
+        onTipEnd={() => setTip(null)}
+      />
+    ));
 
-      <span className="my-1 h-px w-8 shrink-0 bg-border" />
-
-      {/* —— 系统面板（用户自选） —— */}
-      {loading ? (
-        <span className="flex h-11 w-11 items-center justify-center text-muted-foreground">
+    if (loading) {
+      nodes.push(
+        <span key="loading" className="flex h-11 w-11 items-center justify-center text-muted-foreground">
           <Loader2 className="h-4 w-4 animate-spin" />
-        </span>
-      ) : (
-        pinned.map((action) => (
+        </span>,
+      );
+    } else {
+      for (const action of pinned) {
+        nodes.push(
           <RailButton
-            key={action.id}
+            key={`act-${action.id}`}
             icon={ACTION_ICONS[action.id] ?? Wrench}
             name={action.name}
             description={action.description}
             elevated={action.elevated}
             running={runningId === action.id}
             onClick={() => run(action)}
-          />
-        ))
-      )}
+            onTip={setTip}
+            onTipEnd={() => setTip(null)}
+          />,
+        );
+      }
+    }
 
-      {pinned.length === 0 && !loading ? (
-        <button
-          type="button"
+    if (pinned.length === 0 && !loading) {
+      nodes.push(
+        <RailButton
+          key="empty"
+          icon={Wrench}
+          name="还没有快捷入口"
+          description="点这里从 50+ 个系统面板里挑常用的（终端 / 网络 / 服务 / 证书…）"
           onClick={() => setCustomizing(true)}
-          title="还没选快捷入口，点这里挑几个"
-          className="group relative flex h-11 w-11 items-center justify-center rounded-xl border border-dashed border-border text-muted-foreground transition hover:border-brand/40 hover:text-brand"
-        >
-          <Wrench className="h-5 w-5" />
-          <RailTip name="还没有快捷入口" description="点这里从 50+ 个系统面板里挑常用的（终端 / 网络 / 服务 / 证书…）" />
-        </button>
-      ) : null}
+          onTip={setTip}
+          onTipEnd={() => setTip(null)}
+        />,
+      );
+    }
 
-      {notice !== null ? (
-        <span
+    if (notice !== null) {
+      nodes.push(
+        <button
+          key="notice"
+          type="button"
           title={notice}
-          className="mt-1 flex h-6 w-11 items-center justify-center rounded-md bg-amber-100 text-[9px] leading-tight text-amber-800"
+          onClick={load}
+          className="flex h-11 w-11 items-center justify-center rounded-xl bg-amber-100 text-[9px] leading-tight text-amber-800"
         >
           需桌面版
-        </span>
-      ) : null}
+        </button>,
+      );
+    }
+    return nodes;
+    // isModuleActive 依赖 view，run/toggle 每次渲染重建；这里只关心列表内容变化
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pinned, loading, runningId, notice, view, load]);
 
-      <span className="my-1 h-px w-8 shrink-0 bg-border" />
+  /** 列优先切块：读的时候从上往下，读完一列再读下一列 */
+  const columns = useMemo<React.JSX.Element[][]>(() => {
+    const size = Math.max(1, perCol);
+    const out: React.JSX.Element[][] = [];
+    for (let i = 0; i < items.length; i += size) {
+      out.push(items.slice(i, i + size));
+    }
+    return out;
+  }, [items, perCol]);
 
-      <RailButton
-        icon={Settings}
-        name="设置中心"
-        description="快捷键 · 主题 · 开机启动 · 备份还原"
-        active={view.kind === 'settings'}
-        onClick={() => openSettings()}
-      />
+  const overflow = perCol > 0 && columns.length > RAIL_MAX_COLS;
 
-      {/* —— 自定义（底部固定） —— */}
-      <button
-        type="button"
-        onClick={() => setCustomizing((prev) => !prev)}
-        title="自定义快捷入口"
+  return (
+    // `relative` 是自定义面板 `absolute right-full` 的定位上下文 —— 少了它，面板会
+    // 以视口为参照滑到屏幕左侧外面去（整块看不见）。
+    <aside className="relative flex h-full shrink-0 flex-col items-center gap-1.5 self-stretch rounded-2xl border border-border bg-card py-3 shadow-panel">
+      {/* —— 图标区：自适应分列 + 溢出滚动 —— */}
+      <div
+        ref={listRef}
         className={cn(
-          'group relative mt-auto flex h-11 w-11 items-center justify-center rounded-xl border transition',
-          customizing
-            ? 'border-brand/50 bg-brand-muted text-brand'
-            : 'border-transparent text-muted-foreground hover:bg-accent hover:text-foreground',
+          'flex min-h-0 flex-1 items-start gap-1.5 overflow-y-auto px-1.5',
+          overflow ? 'scrollbar-thin' : 'overflow-x-hidden',
         )}
       >
-        <Settings2 className="h-5 w-5" />
-        <RailTip name="自定义快捷入口" description="从全量系统面板里勾选常用项，选择立即保存" />
-      </button>
+        {columns.slice(0, overflow ? RAIL_MAX_COLS : columns.length).map((column, index) => (
+          <div key={index} className="flex flex-col gap-1.5">
+            {column}
+          </div>
+        ))}
+        {overflow ? (
+          <div className="flex flex-col gap-1.5">
+            <button
+              type="button"
+              onClick={() => setCustomizing(true)}
+              title={`还有 ${items.length - RAIL_MAX_COLS * perCol} 个快捷入口没显示，点这里精简或调整`}
+              onMouseEnter={(event) =>
+                setTip({
+                  name: '还有更多快捷入口',
+                  description: `栏内放不下全部 ${items.length} 个，点这里打开自定义面板精简；也可以把窗口拉高。`,
+                  elevated: false,
+                  rect: event.currentTarget.getBoundingClientRect(),
+                })
+              }
+              onMouseLeave={() => setTip(null)}
+              className="flex h-11 w-11 items-center justify-center rounded-xl border border-dashed border-border text-[10px] text-muted-foreground transition hover:border-brand/40 hover:text-brand"
+            >
+              +{items.length - RAIL_MAX_COLS * perCol}
+            </button>
+          </div>
+        ) : null}
+      </div>
 
-      {/* —— 自定义面板（从栏右侧滑出） —— */}
+      <span className="h-px w-8 shrink-0 bg-border" />
+
+      {/* —— 常驻底部：设置 / 自定义（永远钉在栏底，不随滚动藏起来）—— */}
+      <div className="flex shrink-0 flex-col gap-1.5 px-1.5">
+        <RailButton
+          icon={Settings}
+          name="设置中心"
+          description="快捷键 · 主题 · 开机启动 · 备份还原"
+          active={view.kind === 'settings'}
+          onClick={() => openSettings()}
+          onTip={setTip}
+          onTipEnd={() => setTip(null)}
+        />
+        <button
+          type="button"
+          onClick={() => setCustomizing((prev) => !prev)}
+          title="自定义快捷入口"
+          onMouseEnter={(event) =>
+            setTip({
+              name: '自定义快捷入口',
+              description: '从全量系统面板里勾选常用项，选择立即保存',
+              elevated: false,
+              rect: event.currentTarget.getBoundingClientRect(),
+            })
+          }
+          onMouseLeave={() => setTip(null)}
+          className={cn(
+            'flex h-11 w-11 items-center justify-center rounded-xl border transition',
+            customizing
+              ? 'border-brand/50 bg-brand-muted text-brand'
+              : 'border-transparent text-muted-foreground hover:bg-accent hover:text-foreground',
+          )}
+        >
+          <Settings2 className="h-5 w-5" />
+        </button>
+      </div>
+
+      {/* —— 自定义面板（往左滑出；不再被栏宽裁剪）—— */}
       {customizing ? (
-        <div className="absolute right-full top-0 z-40 mr-2 w-[420px] overflow-hidden rounded-2xl border border-border bg-card shadow-xl">
+        <div className="absolute right-full top-0 z-40 mr-2 w-[min(420px,calc(100vw-120px))] overflow-hidden rounded-2xl border border-border bg-card shadow-xl">
           <div className="flex items-center gap-2 border-b border-border px-3 py-2">
             <span className="text-sm font-medium text-foreground">自定义快捷入口</span>
-            <span className="text-[11px] text-muted-foreground">
-              已选 {pinned.length} 项 · 勾选即保存
-            </span>
+            <span className="text-[11px] text-muted-foreground">已选 {pinned.length} 项 · 勾选即保存</span>
             <div className="ml-auto flex items-center gap-1">
               <button
                 type="button"
@@ -442,6 +615,9 @@ export function QuickActionsRail(): React.JSX.Element {
           </div>
         </div>
       ) : null}
+
+      {/* 悬停气泡：Portal 到 body，不受栏的 overflow 裁剪 */}
+      <TipPortal tip={tip} />
     </aside>
   );
 }

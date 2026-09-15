@@ -353,4 +353,7 @@
 
 .md-preview.wysiwyg pre code {
   color: inherit;
+  /* 编辑态软换行：便签窗通常不大，长命令硬撑出横向滚动条反而更难写 */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }

@@ -191,4 +191,36 @@ export interface AppSettings {
    * 服务端动作表若删除了某个 id，前端会自动忽略不存在的项（不做破坏性清理）。
    */
   quickActionIds: string[];
+  /**
+   * 顶部贴条是否**始终置顶**（V21，默认 `true`）。
+   *
+   * 与 `barPinned`（贴条开着没有）是两个维度：贴条开着但不想让它一直压在
+   * 所有窗口上头时，把这一项关掉，贴条退化成普通窗口（被别的窗口盖住、
+   * 回到桌面又能看见）。贴条上的图钉按钮直接切换本字段。
+   */
+  barOnTop: boolean;
+  /**
+   * 用户自定义纪念日（生日 / 结婚纪念日 / 任何值得记一笔的日子）。
+   *
+   * 只存在本机配置里，不进数据库 —— 它是「个人日历标注」而非业务数据，
+   * 跟着 `settings.json` 一起被备份 / 还原即可。
+   */
+  anniversaries: Anniversary[];
+}
+
+/** 纪念日（生日 / 纪念日等自定日期） */
+export interface Anniversary {
+  /** 稳定 id（前端生成，用于增删） */
+  id: string;
+  /** 名称，如「妈妈生日」 */
+  label: string;
+  /** 日期：`YYYY-MM-DD`（含年份，可据此算「第几年」） */
+  date: string;
+  /**
+   * 是否每年重复。`true` = 只按「月-日」匹配（生日 / 纪念日）；
+   * `false` = 只在指定那一天命中（一次性事项）。
+   */
+  yearly: boolean;
+  /** 类型（决定日历上的图标与配色） */
+  kind: 'birthday' | 'anniversary' | 'other';
 }

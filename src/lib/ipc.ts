@@ -249,6 +249,14 @@ export const ipc = {
    * 折叠 / 展开由前端量出内容高度后回报，Rust 侧只做区间钳制。
    */
   barSetHeight: (height: number): Promise<void> => call<void>('bar_set_height', { height }),
+  /**
+   * 切换贴条是否**始终置顶**（`settings.barOnTop`）。
+   *
+   * 与 `barPinned`（贴条开着没有）是两个维度：贴条开着但一直压在所有窗口上很碍事，
+   * 关掉后贴条退化成普通窗口 —— 被别的窗口盖住，切回桌面又能看见。
+   * 窗口没开着时只落设置，下次开窗由前端重新应用。
+   */
+  barSetPinned: (pinned: boolean): Promise<void> => call<void>('bar_set_pinned', { pinned }),
   /** 唤出主窗口并切到工作台模块（贴条上的「打开工作台」） */
   barOpenWorkstation: (): Promise<void> => call<void>('bar_open_workstation'),
 
