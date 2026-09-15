@@ -23,7 +23,7 @@
 | 参考项目 | `D:\_Projects\ops\ops-tools`（网页版）——**只读借鉴，禁止修改** |
 | 构建脚本 | `scripts/rust-env.sh`（注入 MSVC 环境，Rust 构建必用）、`scripts/dev-static.cjs`（浏览器冒烟静态服务）、`scripts/smoke-richmarkdown.js`（所见即所得编辑器逐字符回归驱动） |
 
-## 3. 状态快照（2026-09-15 · V23 后）
+## 3. 状态快照（2026-09-16 凌晨 · V23 后）
 
 - Phase 1（MVP）功能全部交付；**Windows 安装包已产出（V23 重新打包：nsis 3.7 MB / msi 4.7 MB / handy.exe 9.3 MB）**；待用户装机验收 GUI 行为。
 - git：V22 批次 = `d49857c`（13 文件，+2614/−286）；前序 V21 = `685b8a7`（31 文件，+3524/−522）、`4b4ffa5`（V20 文档回填）、**`f96a374` = V20**（9 条反馈：工具箱重做/桌面真挂载/贴条折叠/示例条基建）、`cf3c61a`/`e09d25b`（V19 文档）、**`64e3008` = V19**、`be1dc58`（V18 文档）、`862d5bf` = V18、`b3b46a8`（文档归位）、`ff6ebb2`（release 关 devtools）。（**V23 批次提交见当日日志**）
@@ -63,6 +63,9 @@
     写警告文案时用了 `` `L` 最后一天 `` 和 `**加粗**`，模板字符串里的反引号直接把解析器搞崩
     （报 `error TS1005: ',' expected`，而且报错位置离真正的问题很远）。源码里的中文文案一律用
     「」或普通引号，别写 markdown 记号。
+  - **跨零点批次以 `Get-Date` 为准，别信会话里注入的「当前时间」**（V23 踩到）：注入值写着
+    09-15 17:51，本机实际是 09-16 00:44（+08:00），差点把日志归档到前一天的日期文件里。
+    拿不准就 `Get-Date` 落盘看一眼。
   - **`TaskStop` 只杀 shell，不杀它的 cargo/rustc 子进程**（V21 踩到）：被停掉的 `tauri build` 会留下
     cargo + rustc 继续跑完，占着 `src-tauri/target` 的文件锁 → 新起的打包只会打印
     `Blocking waiting for file lock on build directory`，然后**两个进程各自跑完一遍打包**（白等几分钟，
