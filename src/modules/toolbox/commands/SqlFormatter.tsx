@@ -133,6 +133,46 @@ export function SqlFormatter({ initialInput = '' }: CommandProps): React.JSX.Ele
       onToggleFavorite={shell.onToggleFavorite}
       copyText={output}
       shortcutHint="主子句自动换行缩进；可切换关键字大写"
+      samples={[
+        {
+          label: '单表查询',
+          description: '最基础的 SELECT / WHERE / ORDER BY，看主子句如何分行',
+          apply: () =>
+            setInput('select id, name, email from users where status = 1 and age > 18 order by created_at desc limit 20'),
+        },
+        {
+          label: '多表 JOIN',
+          description: 'JOIN / ON / GROUP BY / HAVING 全齐，验证缩进与关键字大写',
+          apply: () =>
+            setInput(
+              'select u.id, u.name, count(o.id) as order_count, sum(o.amount) as total from users u left join orders o on o.user_id = u.id where o.created_at >= "2026-01-01" group by u.id, u.name having count(o.id) > 3 order by total desc',
+            ),
+        },
+        {
+          label: '子查询 + 慢 SQL',
+          description: '运维常贴的一整条慢查询（含子查询与 IN），最考验格式化效果',
+          apply: () =>
+            setInput(
+              'select t.host, t.query_time, t.sql_text from (select host, max(query_time) as query_time, sql_text from slow_log where query_time > 1 group by host, sql_text) t where t.sql_text like "%orders%" order by t.query_time desc limit 50',
+            ),
+        },
+        {
+          label: 'INSERT 批量写入',
+          description: 'INSERT INTO … VALUES 的换行与格式保持',
+          apply: () =>
+            setInput(
+              "insert into audit_log (id, action, actor, created_at) values (1, 'login', 'zhuzhiqiang', now()), (2, 'export', 'zhuzhiqiang', now())",
+            ),
+        },
+        {
+          label: 'UNION ALL 合并',
+          description: '检验 UNION ALL 不被 UNION 抢先匹配（历史上容易踩的坑）',
+          apply: () =>
+            setInput(
+              'select id, kind from online_hosts union all select id, kind from offline_hosts union select id, kind from archived_hosts',
+            ),
+        },
+      ]}
     >
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <div className="flex min-w-0 flex-col gap-3">

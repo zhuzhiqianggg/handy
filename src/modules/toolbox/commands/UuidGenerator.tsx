@@ -47,19 +47,35 @@ function formatUuid(id: string, uppercase: boolean, dashes: boolean): string {
  */
 export function UuidGenerator({ initialInput = '' }: CommandProps): React.JSX.Element {
   const shell = useCommandShell(COMMAND_ID);
-  const initialCount = Number.parseInt(initialInput, 10);
-  const [count, setCount] = React.useState<number>(
-    Number.isFinite(initialCount) && initialCount > 0 ? Math.min(initialCount, 1000) : 5,
-  );
+  /** 初始数量：命令行传参优先，非法则 5 */
+  const initialCount = React.useMemo(() => {
+    const parsed = Number.parseInt(initialInput, 10);
+    return Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, 1000) : 5;
+  }, [initialInput]);
+
+  const [count, setCount] = React.useState<number>(initialCount);
   const [uppercase, setUppercase] = React.useState<boolean>(false);
   const [dashes, setDashes] = React.useState<boolean>(true);
-  const [uuids, setUuids] = React.useState<string[]>([]);
+  /**
+   * 冷启动即出结果（V20）：打开工具先摆上 `initialCount` 条 UUID。
+   * 空表 + 一个「生成」按钮等于白白让用户多点一次 —— 示例本身就是说明。
+   */
+  const [uuids, setUuids] = React.useState<string[]>(() =>
+    Array.from({ length: initialCount }, () => formatUuid(generateV4(), false, true)),
+  );
+
+  /** 用**显式参数**生成，避免「先 setState 再调 generate」读到旧值的经典竞态（示例按钮依赖它） */
+  const generateWith = React.useCallback((n: number, upper: boolean, dash: boolean): void => {
+    const safe = Math.max(1, Math.min(n || 1, 1000));
+    setCount(safe);
+    setUppercase(upper);
+    setDashes(dash);
+    setUuids(Array.from({ length: safe }, () => formatUuid(generateV4(), upper, dash)));
+  }, []);
 
   const generate = React.useCallback((): void => {
-    const n = Math.max(1, Math.min(count || 1, 1000));
-    const list = Array.from({ length: n }, () => formatUuid(generateV4(), uppercase, dashes));
-    setUuids(list);
-  }, [count, uppercase, dashes]);
+    generateWith(count, uppercase, dashes);
+  }, [count, uppercase, dashes, generateWith]);
 
   const copyTextValue = uuids.join('\n');
 
@@ -72,7 +88,29 @@ export function UuidGenerator({ initialInput = '' }: CommandProps): React.JSX.El
       favorite={shell.favorite}
       onToggleFavorite={shell.onToggleFavorite}
       copyText={copyTextValue}
-      shortcutHint="设置数量后点击「生成」；每行可单独复制"
+      shortcutHint="设置数量后点击「生成」；每行可单独复制 · 打开即预生成若干条"
+      samples={[
+        {
+          label: '5 条标准 v4',
+          description: '小写 + 连字符，最常见的 RFC 4122 形态',
+          apply: () => generateWith(5, false, true),
+        },
+        {
+          label: '32 位无连字符',
+          description: '去掉连字符的 32 位十六进制串 —— 塞进 char(32) 主键或日志追踪号',
+          apply: () => generateWith(5, false, false),
+        },
+        {
+          label: '大写形式',
+          description: '部分老系统的校验规则要求大写，顺带看一眼大小写开关',
+          apply: () => generateWith(5, true, true),
+        },
+        {
+          label: '批量 100 条',
+          description: '导入测试数据用；上限 1000 条，一次性铺满',
+          apply: () => generateWith(100, false, true),
+        },
+      ]}
     >
       <div className="flex flex-col gap-4">
         <div className="flex flex-wrap items-end gap-3">

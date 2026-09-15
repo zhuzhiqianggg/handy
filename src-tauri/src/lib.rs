@@ -92,6 +92,11 @@ pub fn run() {
             commands::grid::grid_geometry_get,
             commands::grid::grid_geometry_set,
             commands::grid::grid_open_path,
+            // —— 桌面层挂载 / 系统图标显隐（V20：真正画在桌面上）——
+            commands::grid::grid_attach_get,
+            commands::grid::grid_attach_set,
+            commands::grid::grid_desktop_icons_set,
+            commands::grid::grid_desktop_icons_get,
             // —— 桌面整理：一键整理 / 布局备份与还原（V19）——
             commands::grid::grid_auto_arrange,
             commands::grid::grid_layout_export,
@@ -106,6 +111,7 @@ pub fn run() {
             // —— 工作台顶部贴条（常驻桌面顶部的今日概览）——
             commands::bar::bar_show,
             commands::bar::bar_hide,
+            commands::bar::bar_set_height,
             commands::bar::bar_open_workstation,
             // —— 设置中心 / 备份（M7 / V13）——
             commands::app::hotkey_update,
@@ -155,6 +161,13 @@ pub fn run() {
             }
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("启动 Handy 失败");
+        .build(tauri::generate_context!())
+        .expect("构建 Handy 失败")
+        .run(|_app, event| {
+            // 退出兜底（V20）：桌面整理可以把系统图标藏起来，退出时必须还回去，
+            // 否则用户会面对一个「应用没了、图标也没了」的桌面。
+            if let tauri::RunEvent::Exit = event {
+                commands::grid::restore_desktop_icons();
+            }
+        });
 }

@@ -81,6 +81,28 @@ export function CaseConverter({ initialInput = '' }: CommandProps): React.JSX.El
       onToggleFavorite={shell.onToggleFavorite}
       copyText={Object.values(results).filter((value) => value).join('\n')}
       shortcutHint="一次输入，六种风格实时输出，可逐条复制"
+      samples={[
+        {
+          label: '变量名',
+          description: 'userProfileImageUrl —— 最常见的驼峰转 snake / kebab',
+          apply: () => setInput('userProfileImageUrl'),
+        },
+        {
+          label: '数据库字段',
+          description: 'order_id —— 下划线风格转小驼峰（写接口 DTO 常用）',
+          apply: () => setInput('order_id'),
+        },
+        {
+          label: '路径式输入',
+          description: 'api/v2/user-profile.get —— 空格 / 点 / 斜杠都当分隔符拆词',
+          apply: () => setInput('api/v2/user-profile.get'),
+        },
+        {
+          label: '连续大写缩写',
+          description: 'HTTPResponseCode —— 检验 HTTP 这类缩写能否正确拆开',
+          apply: () => setInput('HTTPResponseCode'),
+        },
+      ]}
     >
       <div className="flex flex-col gap-4">
         <div className="flex flex-col gap-2">

@@ -81,6 +81,8 @@
   返回值 `≤ 32` 视为失败（不依赖 `tauri_plugin_shell::open`）。
 - **顶层浮窗用 Tauri 原生 `always_on_top`**（`bar.rs`），不要复用 grid-overlay 那套
   `SetWindowPos(HWND_BOTTOM)` + 光标命中轮询 —— 那套是「桌面最底层 + 点击穿透」专用。
+  （V20 修正：`SetWindowPos(HWND_BOTTOM)` 实际会把窗口压到**壁纸之下**，桌面上根本看不见；
+  桌面挂件真正贴到桌面的做法见 §8「桌面挂件」。）
 - **主窗口默认不置顶**（V19 #5）：`tauri.conf.json` 的 main 窗口 `alwaysOnTop: false`，
   用户想驻顶由设置项 `settings.mainPinned` 决定。
 - **窗口行为以设置项为单一事实源**：`settings.barPinned` / `settings.mainPinned` 由主窗口
@@ -103,3 +105,35 @@
 - **浏览器冒烟**：`node scripts/dev-static.cjs 41901` 起静态服务指向 `dist`，配合
   agent-browser 深链 `?tool=<id>` / `?module=<id>` / **`?demo=richmarkdown`**；浏览器无 SQLite/Tauri IPC，
   「加载待办失败」「快捷入口需桌面环境」属预期提示，不是缺陷。
+
+## 8. V20 确立的约定（工具基建 / 桌面挂载 / 贴条）
+
+- **工具「示例条」是框架能力，不再各写各的**：`src/components/SampleBar.tsx` +
+  `CommandShell` 的 `samples` 属性。每条示例自带 `apply` 闭包（可只填输入框，也可「填 + 开开关 + 切页签」，
+  或一次设置多个字段）。示例条挂在**内容区之上且 `shrink-0`** —— `fill` 模式内容区是 `flex-1`，
+  示例条必须是它的兄弟节点，塞进内容区会把输入框挤出可视区。新工具默认配 3–5 条示例。
+  工具清单与逐工具优化方案见 `docs/03-development/TOOL-OPTIMIZATION.md`。
+- **工具状态持久化用 `useToolState`**（`src/hooks/useToolState.ts`，localStorage、防抖 400ms、
+  卸载 flush、256KB 上限）。已接：`cron-descriptor` / `regex-tester` / `text-diff`；其余约 3 行/工具。
+- **结果区带高亮用 `CodeBlock`**（零依赖，按语言拼大正则扫 token）；Markdown 混代码块用
+  `MarkdownWithCode`（按 ``` 围栏切分，未闭合围栏回退纯文本）。
+- **文本对比对齐靠布局不靠事件**：单一滚动容器 + CSS Grid 两列 → 行对行对齐、滚动天然同步；
+  虚拟空行 = `line === null` 渲染虚线占位块。**不要回到「两个独立容器 + 同步滚动监听」那套。**
+- **贴条（`bar.rs` / `WorkstationBar.tsx`）**：
+  - 高度由前端量出后经 `bar_set_height` 回报；`resizable(false)` 只拦用户拖拽，程序性 `set_size` 照常生效，
+    但改高后**必须紧跟 `set_position()`** 才能保持顶部居中（Windows 以中心为锚点拉伸）。
+  - 前端**必须外套一层 auto height 的「量高壳」**（`w-full`，不带 `h-full`）再量，否则
+    「窗口高 → 量出窗口高 → 再设窗口高」会自激。展开态记忆在 localStorage（与主窗口同 origin）。
+  - 折叠态与展开态共用同一份 JSX：折叠态包装层用 `display: contents` 让子块直接成为卡片 flex 项。
+- **桌面挂件（`grid.rs`）**：真正「画在桌面上」= `SetParent(hwnd, 桌面宿主)`（Progman / WorkerW），
+  **不是** `SetWindowPos(HWND_BOTTOM)`。系统图标显隐走 `ShowWindow(SysListView32)`，
+  **绝不移动/删除用户文件**；启动 `heal_desktop_icons`、退出 `restore_desktop_icons`（图标一定回来）。
+- **windows crate 0.58 写法**：`FindWindowW/FindWindowExW` 返回 `Result<HWND>`
+  （用 `.unwrap_or_else(|_| null_hwnd())`）；`SetParent` 第二参**不是 `Option`**
+  （空父窗传 `null_hwnd()`，不是 `None`/`Some(...)`）。
+- **ShellExecute 兜底链（`sys.rs`）**：`.cpl` → `rundll32 shell32.dll,Control_RunDLL`；
+  `.msc` → `mmc.exe`；目录 → `explorer.exe`。返回码 **193 = 不是 PE**，**31 = `SE_ERR_NOASSOC`**（无文件关联）。
+- **前端新文件过 `tsc` 后，lucide 图标名用 node 脚本比对 `lucide-react` 导出表**
+  （`Settings`/`MonitorUp`/`PenLine`/`ChevronUp` 等实测都存在，别靠猜、也别靠旧版本印象）。
+- **交互元素必须真有效**：V20 挖出 5 个「界面有入口、点了不生效」的假功能（假复制按钮、切换重置、
+  冷启动空表、闭包竞态）。QA 检查项已加：**每个按钮的副作用是否真实发生**。

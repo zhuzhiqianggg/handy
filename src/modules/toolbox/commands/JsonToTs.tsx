@@ -141,6 +141,51 @@ export function JsonToTs({ initialInput = '' }: CommandProps): React.JSX.Element
       onToggleFavorite={shell.onToggleFavorite}
       copyText={result.ok ? result.ts : ''}
       shortcutHint="支持嵌套对象与数组；结果可一键复制"
+      samples={[
+        {
+          label: '接口返回体',
+          description: '最典型的 API 响应：对象 + 数组 + 嵌套对象，接口名按字段名推导',
+          apply: () =>
+            setInput(
+              JSON.stringify(
+                {
+                  code: 0,
+                  message: 'ok',
+                  data: {
+                    total: 128,
+                    page: 1,
+                    list: [
+                      { id: 'ops-web-01', ip: '192.168.10.204', role: 'web', online: true },
+                      { id: 'ops-db-01', ip: '192.168.10.205', role: 'db', online: false },
+                    ],
+                  },
+                },
+                null,
+                2,
+              ),
+            ),
+        },
+        {
+          label: '可空字段',
+          description: '值为 null 的字段会生成 `T | null` —— 检验空值推导',
+          apply: () => setInput('{"id":1,"deletedAt":null,"owner":{"name":null}}'),
+        },
+        {
+          label: '非法标识符键',
+          description: '键里带连字符/中文，会被自动加上引号，避免生成出不合法 TS',
+          apply: () => setInput('{"user-name":"handy","最后登录":"2026-09-15","a b":1}'),
+        },
+        {
+          label: '顶层数组',
+          description: 'JSON 本身是数组——生成 `XxxItem[]` + `Root` 别名',
+          apply: () => setInput('[{"id":1,"name":"a"},{"id":2,"name":"b"}]'),
+        },
+        {
+          label: '重名嵌套',
+          description: '多个同名嵌套对象 —— 看接口名自动追加序号去重',
+          apply: () => setInput('{"left":{"node":{"v":1}},"right":{"node":{"v":2}}}'),
+        },
+      ]}
     >
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <div className="flex min-w-0 flex-col gap-2">

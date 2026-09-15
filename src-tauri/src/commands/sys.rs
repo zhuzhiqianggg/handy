@@ -17,6 +17,14 @@
 //! ⚠️ `.cpl` / `.msc` / 目录**绝不能**用 `Launch::Spawn`：它们不是可执行文件，
 //! `std::process::Command` 会报 `os error 193`（曾是「网络连接」等入口点不开的根因）。
 //!
+//! # 两级启动（V20 加固）
+//!
+//! `Launch::Open` 先走 `ShellExecuteW`（系统关联，体验最好），失败后**再兜一层**
+//! [`launch_fallback`]：按扩展名直连固定宿主（`.cpl`→`rundll32 shell32.dll,Control_RunDLL`、
+//! `.msc`→`mmc.exe`、目录→`explorer.exe`）。用户实测报过 `ShellExecute 代码 31`
+//! （`SE_ERR_NOASSOC` = 注册表里该扩展名没有关联程序），说明系统关联**不保证存在**，
+//! 因此不能把它当唯一路径。
+//!
 //! 平台边界：本模块为 Windows 系统管理面板而设，非 Windows 平台返回明确的中文错误
 //! （不静默失败）。全部命令均为 `async fn`（项目 P0 约定）。
 
@@ -398,6 +406,147 @@ fn table() -> Vec<Entry> {
                 open(dir.to_string_lossy().to_string())
             },
         },
+        // ——— 网络（续）———
+        Entry {
+            id: "shared-folders",
+            name: "共享文件夹",
+            description: "fsmgmt.msc：本机共享目录与会话",
+            group: "网络",
+            elevated: false,
+            launch: || open(system32("fsmgmt.msc")),
+        },
+        // ——— 系统管理（续：运维高频）———
+        Entry {
+            id: "task-scheduler",
+            name: "任务计划程序",
+            description: "taskschd.msc：定时任务与触发器",
+            group: "系统管理",
+            elevated: false,
+            launch: || open(system32("taskschd.msc")),
+        },
+        Entry {
+            id: "resource-monitor",
+            name: "资源监视器",
+            description: "resmon：CPU / 磁盘 / 网络实时占用",
+            group: "系统管理",
+            elevated: false,
+            launch: || spawn(system32("resmon.exe")),
+        },
+        Entry {
+            id: "system-config",
+            name: "系统配置",
+            description: "msconfig：启动项 / 引导 / 服务排查",
+            group: "系统管理",
+            elevated: false,
+            launch: || spawn(system32("msconfig.exe")),
+        },
+        Entry {
+            id: "disk-cleanup",
+            name: "磁盘清理",
+            description: "cleanmgr：清理系统临时文件",
+            group: "系统管理",
+            elevated: false,
+            launch: || spawn(system32("cleanmgr.exe")),
+        },
+        Entry {
+            id: "defrag",
+            name: "优化驱动器",
+            description: "dfrgui：碎片整理 / SSD TRIM",
+            group: "系统管理",
+            elevated: true,
+            launch: || Launch::Elevated {
+                program: system32("dfrgui.exe"),
+                args: Vec::new(),
+            },
+        },
+        Entry {
+            id: "user-accounts",
+            name: "用户账户",
+            description: "netplwiz：账户与自动登录设置",
+            group: "系统管理",
+            elevated: false,
+            launch: || spawn(system32("netplwiz.exe")),
+        },
+        Entry {
+            id: "local-users",
+            name: "本地用户和组",
+            description: "lusrmgr.msc：账户与用户组（专业版）",
+            group: "系统管理",
+            elevated: false,
+            launch: || open(system32("lusrmgr.msc")),
+        },
+        Entry {
+            id: "cert-manager",
+            name: "证书管理器",
+            description: "certmgr.msc：受信任证书与吊销列表",
+            group: "系统管理",
+            elevated: false,
+            launch: || open(system32("certmgr.msc")),
+        },
+        Entry {
+            id: "odbc",
+            name: "ODBC 数据源",
+            description: "odbcad32：数据库驱动与 DSN 管理",
+            group: "系统管理",
+            elevated: false,
+            launch: || spawn(system32("odbcad32.exe")),
+        },
+        Entry {
+            id: "system-restore",
+            name: "系统还原",
+            description: "rstrui：创建 / 回滚还原点",
+            group: "系统管理",
+            elevated: false,
+            launch: || spawn(system32("rstrui.exe")),
+        },
+        Entry {
+            id: "printer-settings",
+            name: "打印机和扫描仪",
+            description: "设备与打印队列",
+            group: "系统管理",
+            elevated: false,
+            launch: || open("ms-settings:printers"),
+        },
+        Entry {
+            id: "bluetooth-settings",
+            name: "蓝牙设置",
+            description: "蓝牙设备配对与管理",
+            group: "系统管理",
+            elevated: false,
+            launch: || open("ms-settings:bluetooth"),
+        },
+        Entry {
+            id: "default-apps",
+            name: "默认应用",
+            description: "按协议 / 扩展名指定默认程序",
+            group: "系统管理",
+            elevated: false,
+            launch: || open("ms-settings:defaultapps"),
+        },
+        Entry {
+            id: "clipboard-settings",
+            name: "剪贴板历史",
+            description: "Win+V 历史与跨设备同步",
+            group: "系统管理",
+            elevated: false,
+            launch: || open("ms-settings:clipboard"),
+        },
+        Entry {
+            id: "remote-desktop",
+            name: "远程桌面",
+            description: "开启 / 关闭本机远程桌面",
+            group: "系统管理",
+            elevated: false,
+            launch: || open("ms-settings:remotedesktop"),
+        },
+        Entry {
+            id: "defender",
+            name: "Windows 安全中心",
+            description: "病毒防护 / 防火墙 / 设备安全",
+            group: "系统管理",
+            elevated: false,
+            launch: || open("ms-settings:windowsdefender"),
+        },
     ]
 }
 
@@ -514,6 +663,42 @@ fn launch_open(target: &str) -> Result<(), String> {
     Err(format!("「{target}」的打开方式仅支持 Windows 系统"))
 }
 
+/// `ShellExecuteW` 失败后的**二级兜底**：绕过系统关联，直接用该类型的固定宿主程序。
+///
+/// # 为什么还需要这一层（V20 血泪）
+///
+/// 用户实测「网络连接」由 `os error 193` 变成了
+/// `ShellExecute 代码 31`，代码 31 = `SE_ERR_NOASSOC`，意思是**注册表里 `.cpl`
+/// 没有关联程序**（精简版系统、被优化工具清过关联、或第三方软件抢注后卸载残留，
+/// 都会造成这种状态）。结论：**不能假设系统关联一定存在**。
+///
+/// 因此这里按扩展名硬走「一定有」的宿主：
+///   - `.cpl`（控制面板小程序）→ `rundll32.exe shell32.dll,Control_RunDLL <cpl>`
+///     （这正是 `.cpl` 的标准关联命令行，`ncpa.cpl` / `sysdm.cpl` / `mmsys.cpl` 通吃）；
+///   - `.msc`（管理单元）→ `mmc.exe <msc>`（`mmc.exe` 是系统自带、一定存在）；
+///   - 目录 → `explorer.exe <dir>`。
+///
+/// 返回 `None` = 该目标没有兜底路径（如 `ms-settings:` 协议），把原始错误抛回。
+fn launch_fallback(target: &str) -> Option<Result<(), String>> {
+    let lower = target.to_ascii_lowercase();
+    if lower.ends_with(".cpl") {
+        return Some(launch_spawn(
+            &system32("rundll32.exe"),
+            &[
+                "shell32.dll,Control_RunDLL".to_string(),
+                target.to_string(),
+            ],
+        ));
+    }
+    if lower.ends_with(".msc") {
+        return Some(launch_spawn(&system32("mmc.exe"), &[target.to_string()]));
+    }
+    if std::path::Path::new(target).is_dir() {
+        return Some(launch_spawn(&system32("explorer.exe"), &[target.to_string()]));
+    }
+    None
+}
+
 /// 执行一个快捷动作（`actionId` 必须在白名单内，否则报错）。
 #[tauri::command]
 pub async fn sys_action_run(action_id: String) -> Result<(), String> {
@@ -524,10 +709,21 @@ pub async fn sys_action_run(action_id: String) -> Result<(), String> {
         return Err(format!("「{}」目前仅支持 Windows 系统", entry.name));
     }
     let name = entry.name;
-    match (entry.launch)() {
-        Launch::Open(target) => launch_open(&target),
+    let outcome = match (entry.launch)() {
+        // 先走系统关联（成功时体验最好：由正确的宿主承载）；
+        // 关联缺失（代码 31）等失败情形再走二级兜底，保证「点了就能开」。
+        Launch::Open(target) => match launch_open(&target) {
+            Ok(()) => Ok(()),
+            Err(primary) => match launch_fallback(&target) {
+                Some(Ok(())) => Ok(()),
+                Some(Err(secondary)) => {
+                    Err(format!("{primary}；备用方式也未能打开：{secondary}"))
+                }
+                None => Err(primary),
+            },
+        },
         Launch::Spawn { program, args } => launch_spawn(&program, &args),
         Launch::Elevated { program, args } => launch_elevated(&program, &args),
-    }
-    .map_err(|err| format!("{name}：{err}"))
+    };
+    outcome.map_err(|err| format!("{name}：{err}"))
 }

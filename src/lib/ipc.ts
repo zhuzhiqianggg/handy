@@ -224,12 +224,31 @@ export const ipc = {
   /** 打开条目原文件（Rust 侧 shell 插件 open；本地路径不受前端 open 作用域限制） */
   gridOpenPath: (path: string): Promise<void> => call<void>('grid_open_path', { path }),
 
+  // —— 桌面层挂载 / 系统图标显隐（V20：让格子真正画在桌面上）——
+
+  /** 读取挂件窗基准层：`desktop` = 贴到桌面（默认），`bottom` = 压到 Z 序最底 */
+  gridAttachGet: (): Promise<'desktop' | 'bottom'> =>
+    call<'desktop' | 'bottom'>('grid_attach_get'),
+  /** 设置挂件窗基准层并立即生效（窗口未打开时只落库） */
+  gridAttachSet: (mode: 'desktop' | 'bottom'): Promise<void> =>
+    call<void>('grid_attach_set', { mode }),
+  /** 隐藏 / 恢复系统桌面图标（返回 false = 本机找不到桌面图标视图，不支持） */
+  gridDesktopIconsSet: (hidden: boolean): Promise<boolean> =>
+    call<boolean>('grid_desktop_icons_set', { hidden }),
+  /** 系统桌面图标当前是否可见 */
+  gridDesktopIconsGet: (): Promise<boolean> => call<boolean>('grid_desktop_icons_get'),
+
   // —— 工作台顶部贴条（常驻桌面顶部的今日概览）——
 
   /** 显示（幂等）工作台顶部贴条：无边框 / 透明 / 始终置顶 / 顶部居中 */
   barShow: (): Promise<void> => call<void>('bar_show'),
   /** 隐藏贴条（不销毁，下次 bar_show 复用） */
   barHide: (): Promise<void> => call<void>('bar_hide'),
+  /**
+   * 调整贴条高度（逻辑像素）；锚点不变（仍顶部居中）。
+   * 折叠 / 展开由前端量出内容高度后回报，Rust 侧只做区间钳制。
+   */
+  barSetHeight: (height: number): Promise<void> => call<void>('bar_set_height', { height }),
   /** 唤出主窗口并切到工作台模块（贴条上的「打开工作台」） */
   barOpenWorkstation: (): Promise<void> => call<void>('bar_open_workstation'),
 

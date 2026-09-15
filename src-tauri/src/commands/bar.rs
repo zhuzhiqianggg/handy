@@ -23,8 +23,12 @@ pub const BAR_LABEL: &str = "workstation-bar";
 /// 贴条加载 URL（窗口分派见 `src/main.tsx`）。
 const BAR_URL: &str = "index.html?window=workstation-bar";
 
-/// 贴条高度（逻辑像素；与前端 `h-full` 布局一一对应）。
-const BAR_HEIGHT: f64 = 44.0;
+/// 贴条**折叠态**高度（逻辑像素）—— 单行概览，建窗默认值。
+const BAR_COLLAPSED_HEIGHT: f64 = 44.0;
+/// 贴条高度下限（逻辑像素）。
+const BAR_MIN_HEIGHT: f64 = 44.0;
+/// 贴条高度上限（逻辑像素；前端量不出合理值时用它兜底）。
+const BAR_MAX_HEIGHT: f64 = 420.0;
 /// 贴条宽度 = 工作区宽度 × 比例，并夹在上下限之间。
 const BAR_WIDTH_RATIO: f64 = 0.62;
 const BAR_MIN_WIDTH: f64 = 560.0;
@@ -52,11 +56,11 @@ fn bar_geometry(app: &AppHandle) -> (f64, f64, f64, f64) {
                 area_x + (area_w - width) / 2.0,
                 area_y + BAR_TOP_GAP,
                 width,
-                BAR_HEIGHT.min(area_h),
+                BAR_COLLAPSED_HEIGHT.min(area_h),
             );
         }
     }
-    (280.0, BAR_TOP_GAP, 720.0, BAR_HEIGHT)
+    (280.0, BAR_TOP_GAP, 720.0, BAR_COLLAPSED_HEIGHT)
 }
 
 /// 显示（幂等）贴条窗：已存在则显示并重新置顶，不存在才创建。
@@ -104,6 +108,42 @@ pub async fn bar_hide(app: AppHandle) -> Result<(), String> {
         win.hide()
             .map_err(|err| format!("隐藏工作台贴条失败：{err}"))?;
     }
+    Ok(())
+}
+
+/// 贴条高度上限：不超过工作区高度的 60%（免得展开态贴条吃掉半个屏幕）。
+fn bar_max_height(app: &AppHandle) -> f64 {
+    if let Ok(Some(monitor)) = app.primary_monitor() {
+        let scale = monitor.scale_factor();
+        if scale > 0.0 {
+            let area_h = f64::from(monitor.work_area().size.height) / scale;
+            return BAR_MAX_HEIGHT.min(area_h * 0.6).max(BAR_MIN_HEIGHT);
+        }
+    }
+    BAR_MAX_HEIGHT
+}
+
+/// 动态调整贴条高度（折叠 / 展开）：**锚点不变** —— 仍是工作区顶部居中，只改高度。
+///
+/// 贴条高度取决于内容：折叠 = 单行 44px，展开 = 今日待办有几行就多高。
+/// 前端量出真实内容高度后回报本命令，Rust 侧只做区间钳制与重定位。
+/// `resizable(false)` 只拦用户手动拖拽边框，不影响程序性 `set_size`。
+#[tauri::command]
+pub async fn bar_set_height(app: AppHandle, height: f64) -> Result<(), String> {
+    // 窗口没开着就静默忽略：前端在隐藏后仍可能收到一次 ResizeObserver 回调
+    let Some(win) = app.get_webview_window(BAR_LABEL) else {
+        return Ok(());
+    };
+    if !height.is_finite() || height <= 0.0 {
+        return Ok(());
+    }
+    let target = height.clamp(BAR_MIN_HEIGHT, bar_max_height(&app));
+    let (x, y, width, _) = bar_geometry(&app);
+    win.set_size(tauri::LogicalSize::new(width, target))
+        .map_err(|err| format!("调整贴条高度失败：{err}"))?;
+    // 高度变化后重新贴回顶部居中（否则 Windows 会以中心为锚点把窗口上下拉伸）
+    win.set_position(tauri::LogicalPosition::new(x, y))
+        .map_err(|err| format!("调整贴条位置失败：{err}"))?;
     Ok(())
 }
 

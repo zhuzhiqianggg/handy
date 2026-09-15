@@ -7,7 +7,7 @@
 | 产品名 | **Handy · 顺手** |
 | 项目代号 | `handy` |
 | 一句话定位 | 一个常驻托盘、快捷键呼出、双击安装的**跨平台桌面效率套件** |
-| 当前阶段 | **规划完成（PRD + 架构 + 任务 全部就绪），待开发** |
+| 当前阶段 | **Phase 1（MVP）交付完成**：工具箱 23 工具 + 工作台 + 桌面挂件 + 密码存储器；V16→V20 五轮用户反馈修复已落地；Windows 安装包已产出，待装机 GUI 验收（现状见 [`../.workbuddy/PROJECT_STATUS.md`](../.workbuddy/PROJECT_STATUS.md)） |
 | 文档语言 | 简体中文 |
 
 ---
@@ -43,7 +43,8 @@ docs/
 │   ├── sequence-diagram.mermaid   # 时序图（源文件）
 │   └── class-diagram.mermaid      # 类图（源文件）
 ├── 03-development/                # 开发：怎么落地
-│   └── DEVELOPMENT.md             # 开发规范与环境准备
+│   ├── DEVELOPMENT.md             # 开发规范与环境准备
+│   └── TOOL-OPTIMIZATION.md       # 工具箱优化评估报告（V20，23 工具评分 + 方案）
 └── 99-archive/                    # v1 历史文档（只读归档）
     ├── PRD-v1.md
     ├── ARCHITECTURE-v1.md
@@ -59,6 +60,7 @@ docs/
 | `02-architecture/ARCHITECTURE.md` | v2.0 | ✅ 权威 | 增量架构设计（ADR-5…10） |
 | `02-architecture/TASKS.md` | v2.0 | ✅ 权威 | 15 个任务 + Phase 划分 + 依赖图 |
 | `03-development/DEVELOPMENT.md` | v1.0 | ✅ 有效 | 开发规范 |
+| `03-development/TOOL-OPTIMIZATION.md` | v1.0 | ✅ 有效 | 工具箱 23 个工具的成熟度评分、共性问题、逐工具优化方案与 P0/P1/P2 路线（V20） |
 | `99-archive/*-v1.md` | v1.0 | 🗄️ 已归档 | 历史版本，仅作追溯，**不再维护** |
 
 ---
@@ -79,4 +81,4 @@ docs/
 
 ---
 
-*最后更新：规划阶段收官（文档整理与迁移）*
+*最后更新：2026-09-15（V20 批次——补入 `03-development/TOOL-OPTIMIZATION.md`，并把「当前阶段」从「待开发」更正为 MVP 完成待验收）*

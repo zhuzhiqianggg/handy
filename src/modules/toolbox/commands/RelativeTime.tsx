@@ -147,11 +147,17 @@ export function RelativeTime({ initialInput = '' }: CommandProps): React.JSX.Ele
     setTab(value);
   }, []);
 
-  const handleCopyDescribe = React.useCallback((): void => {
-    if (!describe) {
-      toast.warning('暂无可复制内容');
-    }
-  }, [describe]);
+  /**
+   * 填入「此刻」。
+   *
+   * 旧实现这个位置是个只弹一句「暂无可复制内容」的按钮 —— 既不复制也不填值，
+   * 纯粹占位。改成真正有用的动作：一键把当前时间戳填进输入框，
+   * 用来验证「刚刚」这类边界值是否算得对。
+   */
+  const fillNow = React.useCallback((): void => {
+    setDateInput(String(Math.floor(Date.now() / 1000)));
+    toast.success('已填入当前时间戳（秒）');
+  }, []);
 
   return (
     <CommandShell
@@ -163,6 +169,25 @@ export function RelativeTime({ initialInput = '' }: CommandProps): React.JSX.Ele
       onToggleFavorite={shell.onToggleFavorite}
       copyText={copyText}
       shortcutHint="上方切换「描述 / 解析」；结果可一键复制"
+      samples={
+        tab === 'describe'
+          ? [
+              { label: '刚发生', description: '当前秒级时间戳 —— 应输出「几秒前」', apply: () => { setDateInput(String(Math.floor(Date.now() / 1000))); } },
+              { label: '3 天前', description: '固定日期串，跨天/跨月边界是否算对', apply: () => setDateInput('2026-09-12 09:00:00') },
+              { label: '3 小时后', description: '未来时间 —— 输出带「后」字', apply: () => setDateInput('2026-09-15 21:00:00') },
+              { label: '毫秒时间戳', description: '13 位时间戳与 10 位秒级时间戳都能识别（运维日志两种都常见）', apply: () => setDateInput(String(Date.now())) },
+              { label: '跨年', description: '去年的日期 —— 应落到「年前」档位', apply: () => setDateInput('2025-01-01 00:00:00') },
+            ]
+          : [
+              { label: 'in 2h', description: '英文写法，两小时后', apply: () => setExprInput('in 2h') },
+              { label: '+2h', description: '加号前缀写法（命令行习惯）', apply: () => setExprInput('+2h') },
+              { label: '2小时后', description: '中文写法，与英文等价', apply: () => setExprInput('2小时后') },
+              { label: '-1d', description: '减号前缀 = 过去，一天前', apply: () => setExprInput('-1d') },
+              { label: '3天前', description: '中文过去式，等价于 -3d', apply: () => setExprInput('3天前') },
+              { label: '1.5小时', description: '小数与中文单位混用，检验解析健壮性', apply: () => setExprInput('1.5小时') },
+              { label: '45分钟', description: '分钟粒度，常用于「给缓存设 45 分钟过期」', apply: () => setExprInput('45分钟') },
+            ]
+      }
     >
       <Tabs value={tab} onValueChange={onTabChange}>
         <TabsList>
@@ -184,8 +209,8 @@ export function RelativeTime({ initialInput = '' }: CommandProps): React.JSX.Ele
                 placeholder="2024-01-01 08:00:00 或 1704067200"
                 onChange={(event) => setDateInput(event.target.value)}
               />
-              <Button variant="ghost" size="sm" className="self-start" onClick={handleCopyDescribe}>
-                复制描述
+              <Button variant="ghost" size="sm" className="self-start" onClick={fillNow}>
+                填入当前时间
               </Button>
             </div>
             <div className="flex min-w-0 flex-col gap-2">

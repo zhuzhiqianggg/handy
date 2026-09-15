@@ -6,9 +6,30 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
 import { useCommandShell } from '@/hooks/useCommandShell';
 import { toast } from '@/components/ui/toast';
+import { downloadTextFile, timestampSuffix } from '@/modules/toolbox/lib/download';
 import type { CommandProps } from '@/core/types';
 
 const COMMAND_ID = 'csv-json';
+
+/** 示例：真实导出的 CSV —— 含引号包裹的字段、字段内逗号、字段内换行 */
+const SAMPLE_CSV = [
+  'host,ip,role,status,remark',
+  'ops-web-01,192.168.10.204,web,running,"对外主入口, 含 Nginx"',
+  'ops-db-01,192.168.10.205,db,running,"主库',
+  '备库同机部署"',
+  'ops-dev-01,192.168.10.206,dev,stopped,',
+].join('\n');
+
+/** 示例：字段不齐 / 含嵌套对象的 JSON 数组 —— 检验表头取并集与嵌套序列化 */
+const SAMPLE_JSON = JSON.stringify(
+  [
+    { id: 1, name: 'ops-web-01', role: 'web', tags: ['nginx', 'keepalived'] },
+    { id: 2, name: 'ops-db-01', role: 'db' },
+    { id: 3, name: 'ops-dev-01', role: 'dev', owner: { name: '朱治强', team: 'ops' } },
+  ],
+  null,
+  2,
+);
 
 /** 解析 CSV 文本为二维数组（支持引号包裹、双写转义、字段内逗号/换行）。 */
 function parseCsv(text: string): string[][] {
@@ -146,13 +167,27 @@ export function CsvJson({ initialInput = '' }: CommandProps): React.JSX.Element 
     setTab(value);
   }, []);
 
+  /**
+   * 下载结果文件。
+   *
+   * 旧实现这个按钮只弹一句「已复制结果」——既没下载也没复制，纯误导。
+   * 现在真的落一个文件：CSV 方向导出 `.json`，JSON 方向导出 `.csv`，
+   * 方便直接拖进编辑器或喂给下一个工具。
+   */
   const handleDownload = React.useCallback((): void => {
     if (!output) {
       toast.error('暂无可导出的结果');
       return;
     }
-    toast.success('已复制结果');
-  }, [output]);
+    const ext = tab === 'csv2json' ? 'json' : 'csv';
+    const mime = ext === 'json' ? 'application/json;charset=utf-8' : 'text/csv;charset=utf-8';
+    const ok = downloadTextFile(`handy-csvjson-${timestampSuffix()}.${ext}`, output, mime);
+    if (ok) {
+      toast.success(`已导出 .${ext} 文件`);
+    } else {
+      toast.error('导出失败，可改用标题栏的复制按钮');
+    }
+  }, [output, tab]);
 
   return (
     <CommandShell
@@ -163,7 +198,44 @@ export function CsvJson({ initialInput = '' }: CommandProps): React.JSX.Element 
       favorite={shell.favorite}
       onToggleFavorite={shell.onToggleFavorite}
       copyText={output}
-      shortcutHint="切换上方标签选择转换方向；结果可一键复制"
+      shortcutHint="切换上方标签选择转换方向；结果可复制或导出为文件"
+      samples={
+        tab === 'csv2json'
+          ? [
+              {
+                label: '运维主机清单',
+                description: '含引号包裹字段、字段内逗号与换行的 CSV —— 最容易把简易解析器搞崩的场景',
+                apply: () => setInput(SAMPLE_CSV),
+              },
+              {
+                label: '最小示例',
+                description: '两行 CSV，看数字如何被自动识别为 number',
+                apply: () => setInput('name,age,score\nHandy,3,99.5\n顺手,1,88'),
+              },
+              {
+                label: '带空行与空单元格',
+                description: '空行被跳过、空单元格保留为空串，检验容错',
+                apply: () => setInput('a,b,c\n1,,3\n\n4,5,'),
+              },
+            ]
+          : [
+              {
+                label: '字段不齐的 JSON',
+                description: '对象字段不一致 + 嵌套数组/对象 —— 表头取并集，嵌套字段整体序列化',
+                apply: () => setInput(SAMPLE_JSON),
+              },
+              {
+                label: '最小示例',
+                description: '两个同构对象，最标准的 JSON → CSV',
+                apply: () => setInput('[{"name":"Handy","age":3},{"name":"顺手","age":1}]'),
+              },
+              {
+                label: '含特殊字符',
+                description: '值里带逗号与引号，检验 CSV 转义（双写引号 + 整体包裹）',
+                apply: () => setInput('[{"remark":"主入口, 含 \"Nginx\"","ok":true}]'),
+              },
+            ]
+      }
     >
       <Tabs value={tab} onValueChange={onTabChange}>
         <TabsList>
@@ -193,7 +265,7 @@ export function CsvJson({ initialInput = '' }: CommandProps): React.JSX.Element 
             />
             {output ? (
               <Button variant="ghost" size="sm" className="self-start" onClick={handleDownload}>
-                复制结果提示
+                导出为 .{tab === 'csv2json' ? 'json' : 'csv'} 文件
               </Button>
             ) : null}
           </div>

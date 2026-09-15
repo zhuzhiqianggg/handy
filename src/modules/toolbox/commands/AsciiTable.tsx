@@ -110,6 +110,33 @@ export function AsciiTable({ initialInput = '' }: CommandProps): React.JSX.Eleme
       onToggleFavorite={shell.onToggleFavorite}
       copyText={tab === 'lookup' ? tsv : ''}
       shortcutHint="查询结果可一键复制为 TSV（可粘贴到 Excel）"
+      samples={[
+        {
+          label: '中英混排',
+          description: 'ASCII 与多字节字符同框 —— 一眼看清「中文占 2 字节以上」到底长什么样',
+          apply: () => setInput('Handy 顺手 2026'),
+        },
+        {
+          label: 'Emoji（代理对）',
+          description: '按码点拆分而不是按 UTF-16 单元 —— emoji 不会被劈成两半乱码',
+          apply: () => setInput('🚀🛠️✅'),
+        },
+        {
+          label: '控制字符',
+          description: '制表符与换行逐字符展示为 \\t / \\n，排查「看不见的字符」',
+          apply: () => setInput('a\tb\nc'),
+        },
+        {
+          label: '全角 / 空格',
+          description: '普通空格显示为 ␣、全角空格（U+3000）显示为 Unicode 码点 —— 定位排版怪问题的利器',
+          apply: () => setInput('a b\u3000c'),
+        },
+        {
+          label: 'HTTP 报文头',
+          description: '真实报文片段（含 CRLF）—— 从字节层面看为什么「多了一个空行就解析失败」',
+          apply: () => setInput('GET / HTTP/1.1\r\nHost: handy.local\r\n\r\n'),
+        },
+      ]}
     >
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList>

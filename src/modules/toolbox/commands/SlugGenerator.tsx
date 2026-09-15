@@ -64,6 +64,60 @@ export function SlugGenerator({ initialInput = '' }: CommandProps): React.JSX.El
       onToggleFavorite={shell.onToggleFavorite}
       copyText={output}
       shortcutHint="中文可开启「拼音化」转为拼音 slug"
+      samples={[
+        {
+          label: '中文标题',
+          description: '「顺手 · 效率工具」→ 开启拼音化后变成 shun-shou-xiao-lv-gong-ju 风格',
+          apply: () => {
+            setInput('Handy 顺手 · 效率工具');
+            setRomanize(true);
+            setLowercase(true);
+            setSeparator('-');
+            setMaxLength(0);
+          },
+        },
+        {
+          label: '英文标题',
+          description: '长英文标题 → 空格、冒号、大小写统一压成单个连字符',
+          apply: () => {
+            setInput('Deploy Tauri App to Windows: A Complete Guide');
+            setRomanize(true);
+            setSeparator('-');
+            setMaxLength(0);
+          },
+        },
+        {
+          label: '含特殊字符',
+          description: 'C++ / Rust（2026版）→ 非法字符被清洗，中文转拼音',
+          apply: () => {
+            setInput('C++ / Rust: 性能对比（2026 版）');
+            setRomanize(true);
+            setSeparator('-');
+            setMaxLength(0);
+          },
+        },
+        {
+          label: '限定 60 字符',
+          description: '常用于 SEO 标题；超出后按分隔符边界截断，不留尾巴',
+          apply: () => {
+            setInput('How to Build a Cross Platform Desktop Tool with Tauri and React in 2026');
+            setRomanize(true);
+            setSeparator('-');
+            setMaxLength(60);
+          },
+        },
+        {
+          label: '下划线文件名',
+          description: '分隔符切到下划线，适合当静态资源文件名',
+          apply: () => {
+            setInput('用户协议 v2 最终版');
+            setRomanize(true);
+            setLowercase(true);
+            setSeparator('_');
+            setMaxLength(0);
+          },
+        },
+      ]}
     >
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <div className="flex min-w-0 flex-col gap-3">

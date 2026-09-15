@@ -93,13 +93,17 @@ export function UnitConverter({ initialInput = '' }: CommandProps): React.JSX.El
   const [fromUnit, setFromUnit] = React.useState<string>('m');
   const [value, setValue] = React.useState<string>(initialInput || '1');
 
-  const category = CATEGORIES[categoryId] ?? CATEGORIES.length;
+  const category = CATEGORIES[categoryId];
 
+  // 切换类别时校正源单位：**当前单位在新类别里仍然存在就保留**，否则退回第一个。
+  // （旧实现一律重置为第一个单位，等于把用户刚选好的单位清掉 —— 「示例」一类的
+  //   「切类别 + 指定单位」组合操作会被它悄悄覆盖）
   React.useEffect(() => {
     const cat = CATEGORIES[categoryId];
-    if (cat) {
-      setFromUnit(cat.units[0]?.id ?? '');
+    if (!cat) {
+      return;
     }
+    setFromUnit((prev) => (cat.units.some((u) => u.id === prev) ? prev : (cat.units[0]?.id ?? '')));
   }, [categoryId]);
 
   const num = Number.parseFloat(value);
@@ -149,6 +153,53 @@ export function UnitConverter({ initialInput = '' }: CommandProps): React.JSX.El
       onToggleFavorite={shell.onToggleFavorite}
       copyText={resultText}
       shortcutHint="选择类别与源单位，输入数值实时换算所有单位"
+      samples={[
+        {
+          label: '1 米 → 英尺',
+          description: '长度类：一次看到米/厘米/千米/英寸/英尺/英里全部结果',
+          apply: () => {
+            setCategoryId('length');
+            setFromUnit('m');
+            setValue('1');
+          },
+        },
+        {
+          label: '100 °F → °C',
+          description: '温度类：华氏 100 度对应摄氏 37.78 度（体温换算常用）',
+          apply: () => {
+            setCategoryId('temp');
+            setFromUnit('F');
+            setValue('100');
+          },
+        },
+        {
+          label: '1 GB → MB',
+          description: '数据存储类：按 1024 进制，1 GB = 1024 MB',
+          apply: () => {
+            setCategoryId('data');
+            setFromUnit('GB');
+            setValue('1');
+          },
+        },
+        {
+          label: '23 kg → 磅',
+          description: '重量类：国内习惯的千克换成英制磅（行李限重场景）',
+          apply: () => {
+            setCategoryId('mass');
+            setFromUnit('kg');
+            setValue('23');
+          },
+        },
+        {
+          label: '绝对零度',
+          description: '温度类：0 K = -273.15 °C = -459.67 °F，检验温度边界',
+          apply: () => {
+            setCategoryId('temp');
+            setFromUnit('K');
+            setValue('0');
+          },
+        },
+      ]}
     >
       <div className="flex flex-col gap-4">
         <div className="flex flex-wrap items-end gap-3">

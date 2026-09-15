@@ -8,6 +8,19 @@ import type { CommandProps } from '@/core/types';
 
 const COMMAND_ID = 'text-dedup';
 
+/** 示例：同一异常刷屏的日志片段（真实场景里最常见的去重对象） */
+const SAMPLE_LOG = [
+  '2026-09-15 10:12:03 ERROR upstream timeout host=cache-01 retry=1',
+  '2026-09-15 10:12:03 ERROR upstream timeout host=cache-01 retry=1',
+  '2026-09-15 10:12:08 WARN slow query 2.31s db=orders',
+  ' 2026-09-15 10:12:08 WARN slow query 2.31s db=orders ',
+  '2026-09-15 10:13:41 ERROR upstream timeout host=cache-02 retry=1',
+  '2026-09-15 10:13:41 ERROR upstream timeout host=cache-02 retry=1',
+].join('\n');
+
+/** 示例：同一批主机名，大小写与空格不一致 */
+const SAMPLE_HOSTS = ['Node-A.Example.com', 'node-a.example.com', ' Node-B.example.com', 'NODE-B.EXAMPLE.COM', 'node-c.example.com'].join('\n');
+
 /**
  * 文本去重：按行去重，支持「去首尾空格」「忽略大小写」「结果排序」选项。
  * 标题栏「一键复制」复制去重后全部行。
@@ -52,6 +65,44 @@ export function TextDedupe({ initialInput = '' }: CommandProps): React.JSX.Eleme
       onToggleFavorite={shell.onToggleFavorite}
       copyText={output}
       shortcutHint={`已去除 ${removed} 行重复`}
+      samples={[
+        {
+          label: '日志刷屏去重',
+          description: '同一错误重复打印，保留首次出现（真实日志场景）',
+          apply: () => {
+            setInput(SAMPLE_LOG);
+            setTrim(true);
+            setIgnoreCase(false);
+          },
+        },
+        {
+          label: '大小写混合主机名',
+          description: 'Node-A 与 node-a 默认算两条；打开「忽略大小写」即合并',
+          apply: () => {
+            setInput(SAMPLE_HOSTS);
+            setTrim(true);
+            setIgnoreCase(true);
+          },
+        },
+        {
+          label: '带空格的脏数据',
+          description: '行首尾有多余空格，靠「去空格」先归一化再去重',
+          apply: () => {
+            setInput(SAMPLE_LOG);
+            setTrim(true);
+          },
+        },
+        {
+          label: '排序输出',
+          description: '在去重基础上按字典序排列，便于比对两份清单',
+          apply: () => {
+            setInput(SAMPLE_HOSTS);
+            setTrim(true);
+            setIgnoreCase(true);
+            setSort(true);
+          },
+        },
+      ]}
     >
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <div className="flex min-w-0 flex-col gap-3">

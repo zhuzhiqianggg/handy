@@ -8,7 +8,7 @@ import { useAppStore } from '@/stores/useAppStore';
 import { CalendarPanel } from './CalendarPanel';
 import { PlanPanel } from './PlanPanel';
 import { NotesPanel } from './NotesPanel';
-import { QuickActionsPanel } from './QuickActionsPanel';
+import { QuickActionsRail } from './QuickActionsRail';
 import {
   addDays,
   pendingCountByDay,
@@ -21,15 +21,25 @@ import {
 } from './planUtils';
 
 /**
- * 工作台（原「便签」模块的首屏，路由 id 仍为 `notes`，便于零迁移）。
+ * 工作台（路由 id 仍为 `notes`，便于零迁移）。
  *
- * 结构（V18 重构）：
- *   - **日历为主轴**：月历选日期 → 「计划」面板自动切到该日，新增事件直接挂到那一天；
- *     今日 / 本周 / 本月计划由同一份待办数据按范围聚合，完成后勾选即划掉；
- *   - **笔记内置**：Markdown 分屏编辑，边写边渲染，不再开桌面悬浮便签窗；
- *   - **系统快捷入口**：管理员终端、网络 / DNS / hosts、系统管理面板等（白名单制）。
+ * # 布局（V20 按用户反馈重排）
  *
- * 数据说明：待办与笔记**完全复用**既有 `useTodosStore` / `useNotesStore`（同一份 SQLite），
+ * ```
+ * ┌──────────────────────────────────────────┬──────┐
+ * │ 问候 / 日期 / 概览数字          时钟 贴到顶 │ 快捷 │
+ * ├───────────────────────┬──────────────────┤ 入口 │
+ * │  日历（左）            │  任务列表（右）   │ 竖排 │
+ * │  ← 与右侧**等高**      │  ← 日期/范围/新增 │ 图标 │
+ * ├───────────────────────┴──────────────────┤ 栏   │
+ * │  便签（全宽 · 编辑/预览 · 右键贴到桌面）    │      │
+ * └──────────────────────────────────────────┴──────┘
+ * ```
+ *
+ * 用户原话：「工作台结构应该前面任务管理左边日历右边是任务列表等，高度相同；
+ * 下面笔记改成便签；快捷入口应该要放在一个随手可以点击到的地方……竖排大图标」。
+ *
+ * 数据说明：待办与便签**完全复用**既有 `useTodosStore` / `useNotesStore`（同一份 SQLite），
  * 因此工作台与「待办清单」命令看到的是同一批数据，改动实时互通。
  */
 
@@ -86,7 +96,7 @@ export default function WorkstationView(_props: WorkstationViewProps = {}): Reac
     void hydrateTodos();
   }, [hydrateTodos]);
 
-  // —— 笔记（复用既有数据层，仅做加载与统计）——
+  // —— 便签（复用既有数据层，仅做加载与统计）——
   const notes = useNotesStore((state) => state.notes);
   const hydrateNotes = useNotesStore((state) => state.hydrate);
   useEffect(() => {
@@ -144,9 +154,8 @@ export default function WorkstationView(_props: WorkstationViewProps = {}): Reac
   };
 
   /**
-   * 切换「今日概览」贴条常驻：写 `settings.barPinned` 即可——
-   * 窗口显隐由 `main.tsx` 订阅该字段驱动（`bar_show` / `bar_hide`），
-   * 所以这里不再直接调 IPC，保证「按钮 / 贴条 × / 设置中心开关」三者行为完全一致。
+   * 切换「今日概览」贴条常驻：写 `settings.barPinned` 即可 ——
+   * 窗口显隐由 `main.tsx` 订阅该字段驱动（`bar_show` / `bar_hide`）。
    */
   const handlePinBar = (): void => {
     const next = !barPinned;
@@ -158,9 +167,8 @@ export default function WorkstationView(_props: WorkstationViewProps = {}): Reac
     if (!next) {
       return;
     }
-    // 置顶窗在部分平台会被其他全屏窗抢焦点，贴出后提示一次用户如何收起
     toast.success('已贴到桌面顶部', {
-      description: '贴条上可直接勾掉完成项；点右侧「×」或再按一次本按钮即可取消常驻',
+      description: '贴条上可直接勾掉完成项、下拉展开全部今日待办；点「×」或再按一次本按钮即可取消常驻',
     });
   };
 
@@ -191,7 +199,7 @@ export default function WorkstationView(_props: WorkstationViewProps = {}): Reac
             {statChip('本周', overview.weekCount)}
             {statChip('本月', overview.monthCount)}
             {overview.overdue > 0 ? statChip('逾期', overview.overdue, 'warn') : null}
-            {statChip('笔记', overview.noteCount)}
+            {statChip('便签', overview.noteCount)}
           </div>
         </div>
         <div className="flex shrink-0 flex-col items-end gap-1">
@@ -220,31 +228,35 @@ export default function WorkstationView(_props: WorkstationViewProps = {}): Reac
         </div>
       ) : null}
 
-      {/* —— 主区：窄栏（日历 + 计划） + 宽区（笔记） —— */}
-      <div className="min-h-0 flex-1 scrollbar-thin overflow-auto px-6 pb-6">
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,330px)_minmax(0,1fr)]">
-          {/* 左（窄）：日历 + 计划 —— 日期与条目扫一眼即可，不需要宽度 */}
-          <div className="flex min-w-0 flex-col gap-4">
-            <CalendarPanel anchorMs={anchorMs} onSelect={handleSelectDay} pendingByDay={pendingByDay} />
-            <PlanPanel
-              todos={todos}
-              anchorMs={anchorMs}
-              scope={scope}
-              onScopeChange={setScope}
-              hideDone={hideDone}
-              onHideDoneChange={setHideDone}
-              focusToken={focusToken}
-            />
+      {/* —— 主区：内容列 + 右侧快捷入口图标栏 —— */}
+      <div className="flex min-h-0 flex-1 gap-4 px-6 pb-6">
+        <div className="scrollbar-thin min-w-0 flex-1 overflow-auto pr-1">
+          {/* 上排：日历（左） | 任务列表（右）—— 两栏等高 */}
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,350px)_minmax(0,1fr)]">
+            <div className="flex min-w-0 flex-col [&>section]:h-full">
+              <CalendarPanel anchorMs={anchorMs} onSelect={handleSelectDay} pendingByDay={pendingByDay} />
+            </div>
+            <div className="flex min-w-0 flex-col [&>section]:h-full">
+              <PlanPanel
+                todos={todos}
+                anchorMs={anchorMs}
+                scope={scope}
+                onScopeChange={setScope}
+                hideDone={hideDone}
+                onHideDoneChange={setHideDone}
+                focusToken={focusToken}
+              />
+            </div>
           </div>
 
-          {/* 右（宽）：笔记 —— 写作最吃宽度，给它整个主区（用户反馈「笔记需要更宽」） */}
-          <NotesPanel />
+          {/* 下排：便签（全宽） */}
+          <div className="mt-4">
+            <NotesPanel />
+          </div>
         </div>
 
-        {/* 底部全宽：系统快捷入口（横排得多，独占一行才不至于挤成一条缝） */}
-        <div className="mt-4">
-          <QuickActionsPanel />
-        </div>
+        {/* 右侧：竖排快捷入口（随手可点，悬停出说明） */}
+        <QuickActionsRail />
       </div>
     </div>
   );

@@ -3,9 +3,10 @@
 //! 设计原则（用户明确否决 V12「建目录 + 移动文件」方案）：
 //!   - **零磁盘副作用**：挂件条目只是原文件路径的**引用**（`grid_items.file_path`），
 //!     打开经 shell 插件唤起系统默认程序打开**原文件**，从不移动 / 复制 / 重命名；
-//!   - **桌面层挂件窗**：`grid-overlay` 无边框透明窗，位于壁纸之上、普通应用窗口之下
-//!     —— Tauri 2 无 always-on-bottom API，Windows 经 `SetWindowPos(HWND_BOTTOM)`
-//!     兜底压回（见 [`ensure_bottom`]）；
+//!   - **桌面层挂件窗**：`grid-overlay` 无边框透明窗，**作为桌面窗口的子窗口**
+//!     真正长在桌面上（`SetParent` 到 Progman / WorkerW，见 [`apply_attach`]）。
+//!     V20 修复：旧实现用 `SetWindowPos(HWND_BOTTOM)` 把它压到了**壁纸之下**，
+//!     用户看到的是「格子建了但桌面上什么都没有」；
 //!   - **默认点击穿透**：窗口创建后即 `set_ignore_cursor_events(true)`；Rust 侧轻量
 //!     轮询线程每 [`POLL_INTERVAL_MS`] 毫秒取全局光标位置，与前端上报的盒子区域
 //!     （[`grid_overlay_update_regions`]，挂件窗内**物理像素**）做命中测试，命中
@@ -18,8 +19,11 @@
 //! 全部命令均为 `async fn`（项目 P0 约定：同步命令会楔死 WebView2 COM STA），
 //! 错误一律中文可读，SQL 一律参数化绑定。
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Mutex;
+
+#[cfg(target_os = "windows")]
+use windows::Win32::Foundation::HWND;
 
 use rusqlite::{params, Connection, Row};
 use serde::{Deserialize, Serialize};
@@ -502,45 +506,439 @@ fn default_geometry(app: &AppHandle) -> (f64, f64, f64, f64) {
     (0.0, 0.0, 1280.0, 800.0)
 }
 
-/// 将挂件窗压回 Z 序最底（壁纸之上、普通应用窗口之下）。
+// ————————————————————————————————————————————————————————————————
+// 桌面层挂载（V20 关键修复）
+//
+// # 为什么原来的 `SetWindowPos(HWND_BOTTOM)` 看不见
+//
+// `HWND_BOTTOM` 是「整个 Z 序的最底」——**包括桌面窗口（Progman）之下**。
+// 也就是说窗口被塞到了壁纸的后面，用户看到的是「格子建了、数据也建了，
+// 但桌面上什么都没有」（用户原话：「一直在自己的页面上创建，根本没有影响桌面」）。
+//
+// # 正确做法：把挂件窗做成**桌面窗口的子窗口**
+//
+// 找到 Progman（或持有 `SHELLDLL_DefView` 的 WorkerW），`SetParent` 过去，
+// 它就真正长在桌面上：随桌面显示/隐藏、不会盖住任何应用窗口、
+// 也不会被切到壁纸背面。这同时是「桌面整理」该有的语义。
+//
+// 兜底：找不到桌面宿主 / SetParent 失败 → 退回旧的 Bottom 模式（仍能操作，
+// 但可能不可见），并把失败原因原样报给前端，不做静默吞错。
+// ————————————————————————————————————————————————————————————————
+
+/// 挂件窗基准层。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttachMode {
+    /// 贴到桌面（默认）：作为桌面窗口的子窗口，真正画在桌面上。
+    Desktop,
+    /// Z 序压到最底（旧方案，保留作兼容 / 排查用）。
+    Bottom,
+}
+
+impl AttachMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Desktop => "desktop",
+            Self::Bottom => "bottom",
+        }
+    }
+
+    fn parse(value: &str) -> Self {
+        if value == "bottom" {
+            Self::Bottom
+        } else {
+            Self::Desktop
+        }
+    }
+
+    fn from_u8(value: u8) -> Self {
+        if value == 1 {
+            Self::Bottom
+        } else {
+            Self::Desktop
+        }
+    }
+
+    /// 当前进程内生效的基准层（供后续扩展读取；`ATTACH_MODE` 为唯一写入点）。
+    #[allow(dead_code)]
+    fn current() -> Self {
+        Self::from_u8(ATTACH_MODE.load(Ordering::Relaxed))
+    }
+
+    fn as_u8(self) -> u8 {
+        match self {
+            Self::Desktop => 0,
+            Self::Bottom => 1,
+        }
+    }
+}
+
+/// `grid_meta` 中「挂件基准层」的键名。
+const META_KEY_ATTACH: &str = "attach_mode";
+
+/// `grid_meta` 中「系统桌面图标是否被隐藏」的键名（崩溃后启动时据此恢复）。
+const META_KEY_ICONS_HIDDEN: &str = "desktop_icons_hidden";
+
+/// 当前生效的基准层（轮询线程读它做周期复位，避免每 tick 查库）。
+static ATTACH_MODE: AtomicU8 = AtomicU8::new(0);
+
+/// 宽字符字面量（Win32 API 需要 NUL 结尾的 UTF-16）。
+#[cfg(target_os = "windows")]
+fn wide(value: &str) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    std::ffi::OsStr::new(value)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
+}
+
+/// 找「桌面宿主窗口」：优先 Progman，其次挂有 `SHELLDLL_DefView` 的 WorkerW。
 ///
-/// 方案选择：Tauri 2 **没有** `always_on_bottom` / `set_always_on_bottom` API
-/// （仅有 `always_on_top`），故走 Windows 兜底 —— 取窗口 `HWND` 后调
-/// `SetWindowPos(HWND_BOTTOM, SWP_NOMOVE|NOSIZE|NOACTIVATE)`。项目已依赖
-/// `windows` crate（Win32_UI_WindowsAndMessaging 特性），无需新增依赖。
-/// 其它平台暂不保证层级（返回成功，见交付报告的已知限制）。
-fn ensure_bottom(win: &WebviewWindow) -> Result<(), String> {
+/// 说明：Win10/11 通常由 `Progman` 承载 `SHELLDLL_DefView`（桌面图标视图）；
+/// 装了壁纸软件 / 多显示器动态壁纸时，`SHELLDLL_DefView` 会被挪到某个 `WorkerW`
+/// 下，故两种都试。
+#[cfg(target_os = "windows")]
+fn null_hwnd() -> HWND {
+    HWND(std::ptr::null_mut())
+}
+
+#[cfg(target_os = "windows")]
+fn desktop_host() -> Option<HWND> {
+    use windows::core::PCWSTR;
+    use windows::Win32::UI::WindowsAndMessaging::{FindWindowExW, FindWindowW};
+
+    let progman_class = wide("Progman");
+    let def_view_class = wide("SHELLDLL_DefView");
+    let worker_class = wide("WorkerW");
+
+    // 注：windows 0.58 把 `FindWindowW` / `FindWindowExW` 包成了 `Result<HWND>`
+    // （找不到 = `Err`），所以统一 `unwrap_or_else` 退化成空句柄判断。
+    unsafe {
+        let progman = FindWindowW(PCWSTR(progman_class.as_ptr()), PCWSTR::null())
+            .unwrap_or_else(|_| null_hwnd());
+        if !progman.0.is_null() {
+            let def_view = FindWindowExW(
+                progman,
+                null_hwnd(),
+                PCWSTR(def_view_class.as_ptr()),
+                PCWSTR::null(),
+            )
+            .unwrap_or_else(|_| null_hwnd());
+            if !def_view.0.is_null() {
+                return Some(progman);
+            }
+        }
+
+        // 遍历顶层 WorkerW：哪个直接挂着 SHELLDLL_DefView 就是壁纸层
+        let mut current = null_hwnd();
+        for _ in 0..32 {
+            let worker = match FindWindowExW(
+                null_hwnd(),
+                current,
+                PCWSTR(worker_class.as_ptr()),
+                PCWSTR::null(),
+            ) {
+                Ok(handle) => handle,
+                Err(_) => break,
+            };
+            if worker.0.is_null() {
+                break;
+            }
+            let def_view = FindWindowExW(
+                worker,
+                null_hwnd(),
+                PCWSTR(def_view_class.as_ptr()),
+                PCWSTR::null(),
+            )
+            .unwrap_or_else(|_| null_hwnd());
+            if !def_view.0.is_null() {
+                return Some(worker);
+            }
+            current = worker;
+        }
+        None
+    }
+}
+
+/// 桌面图标视图（`SHELLDLL_DefView` → `SysListView32`）。
+#[cfg(target_os = "windows")]
+fn desktop_icon_view() -> Option<HWND> {
+    use windows::core::PCWSTR;
+    use windows::Win32::UI::WindowsAndMessaging::FindWindowExW;
+
+    let host = desktop_host()?;
+    let def_view_class = wide("SHELLDLL_DefView");
+    let list_class = wide("SysListView32");
+    unsafe {
+        let def_view = FindWindowExW(
+            host,
+            null_hwnd(),
+            PCWSTR(def_view_class.as_ptr()),
+            PCWSTR::null(),
+        )
+        .unwrap_or_else(|_| null_hwnd());
+        if def_view.0.is_null() {
+            return None;
+        }
+        let list = FindWindowExW(
+            def_view,
+            null_hwnd(),
+            PCWSTR(list_class.as_ptr()),
+            PCWSTR::null(),
+        )
+        .unwrap_or_else(|_| null_hwnd());
+        if list.0.is_null() {
+            None
+        } else {
+            Some(list)
+        }
+    }
+}
+
+/// 隐藏 / 恢复桌面系统图标（仅切换 `SysListView32` 的可见性，**不动任何文件**）。
+///
+/// 语义：这是「桌面整理」的关键一步 —— 格子接管呈现后，原来的图标不该再重复显示。
+/// 返回 `Ok(false)` 表示没找到图标视图窗口（例如 Explorer 未运行 / 已被第三方接管），
+/// 调用方据此提示「本机不支持自动隐藏」而不是报错。
+#[cfg(target_os = "windows")]
+fn desktop_icons_apply(hidden: bool) -> Result<bool, String> {
+    use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE, SW_SHOW};
+    let Some(view) = desktop_icon_view() else {
+        return Ok(false);
+    };
+    // SAFETY: view 为系统桌面图标 ListView 的有效 HWND；ShowWindow 仅切可见性。
+    unsafe {
+        let _ = ShowWindow(view, if hidden { SW_HIDE } else { SW_SHOW });
+    }
+    Ok(true)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn desktop_icons_apply(_hidden: bool) -> Result<bool, String> {
+    Ok(false)
+}
+
+/// 桌面图标当前是否可见（非 Windows / 找不到视图时返回 `true` = 视为可见）。
+#[cfg(target_os = "windows")]
+fn desktop_icons_visible() -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::IsWindowVisible;
+    match desktop_icon_view() {
+        Some(view) => unsafe { IsWindowVisible(view).as_bool() },
+        None => true,
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn desktop_icons_visible() -> bool {
+    true
+}
+
+/// 按基准层把挂件窗放到位。
+///
+/// - `Desktop`：`SetParent` 到桌面宿主；父窗口找不到 / 挂载失败**自动退回 `Bottom`**
+///   并把原因返回（前端提示用户改基准层，而不是让用户面对一个「看不见的窗」）；
+/// - `Bottom`：解除父子关系后压到 Z 序最底（旧行为）。
+fn apply_attach(win: &WebviewWindow, mode: AttachMode) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            SetParent, SetWindowPos, HWND_BOTTOM, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+        };
+        let raw = win
+            .hwnd()
+            .map_err(|err| format!("获取挂件窗句柄失败：{err}"))?;
+        let hwnd = HWND(raw.0 as _);
+
+        let push_bottom = |handle: HWND| -> Result<(), String> {
+            unsafe {
+                SetWindowPos(
+                    handle,
+                    HWND_BOTTOM,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                )
+                .map_err(|err| format!("挂件窗层级复位失败：{err}"))
+            }
+        };
+
+        if mode == AttachMode::Desktop {
+            match desktop_host() {
+                Some(host) => {
+                    // SAFETY: host 为系统桌面窗口有效句柄；hwnd 为本进程窗口有效句柄。
+                    if let Err(err) = unsafe { SetParent(hwnd, host) } {
+                        push_bottom(hwnd)?;
+                        return Err(format!(
+                            "贴到桌面层失败（已退回最底层）：{err}"
+                        ));
+                    }
+                    // 挂到桌面后仍要落在桌面自己的子窗口最底（图标视图之下）
+                    push_bottom(hwnd)?;
+                    ATTACH_MODE.store(AttachMode::Desktop.as_u8(), Ordering::Relaxed);
+                    return Ok(());
+                }
+                None => {
+                    push_bottom(hwnd)?;
+                    ATTACH_MODE.store(AttachMode::Bottom.as_u8(), Ordering::Relaxed);
+                    return Err("未找到桌面窗口（Progman / WorkerW），已退回最底层".to_string());
+                }
+            }
+        }
+
+        // Bottom：先解除父子关系（可能此前挂在桌面上；父句柄传 NULL = 回到桌面级）
+        unsafe {
+            let _ = SetParent(hwnd, null_hwnd());
+        }
+        push_bottom(hwnd)?;
+        ATTACH_MODE.store(AttachMode::Bottom.as_u8(), Ordering::Relaxed);
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (win, mode);
+        Ok(())
+    }
+}
+
+/// 周期复位（不重建父子关系，只把 Z 序压回所属层的最底，避免闪烁）。
+fn reassert_attach(win: &WebviewWindow) {
     #[cfg(target_os = "windows")]
     {
         use windows::Win32::Foundation::HWND;
         use windows::Win32::UI::WindowsAndMessaging::{
             SetWindowPos, HWND_BOTTOM, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
         };
-        let raw = win
-            .hwnd()
-            .map_err(|err| format!("获取挂件窗句柄失败：{err}"))?;
-        // tauri 内部依赖的 windows crate 版本可能与本 crate 不同，按底层指针值转换
-        let hwnd = HWND(raw.0 as _);
-        unsafe {
-            SetWindowPos(
-                hwnd,
-                HWND_BOTTOM,
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-            )
-            .map_err(|err| format!("挂件窗压回桌面层失败：{err}"))?;
+        if let Ok(raw) = win.hwnd() {
+            let hwnd = HWND(raw.0 as _);
+            // SAFETY: 有效 HWND，仅调整 Z 序。
+            unsafe {
+                let _ = SetWindowPos(
+                    hwnd,
+                    HWND_BOTTOM,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                );
+            }
         }
-        Ok(())
     }
     #[cfg(not(target_os = "windows"))]
     {
         let _ = win;
-        Ok(())
     }
 }
+
+/// 读基准层（无记录 = 默认「贴到桌面」）。
+fn read_attach_mode(app: &AppHandle) -> AttachMode {
+    let Ok(conn) = connect(app) else {
+        return AttachMode::Desktop;
+    };
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT value FROM grid_meta WHERE key = ?1",
+            params![META_KEY_ATTACH],
+            |row| row.get(0),
+        )
+        .ok();
+    raw.map(|value| AttachMode::parse(&value))
+        .unwrap_or(AttachMode::Desktop)
+}
+
+/// 写基准层。
+fn write_attach_mode(app: &AppHandle, mode: AttachMode) -> Result<(), String> {
+    let conn = connect(app)?;
+    conn.execute(
+        "INSERT INTO grid_meta (key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![META_KEY_ATTACH, mode.as_str()],
+    )
+    .map_err(|err| format!("保存挂件基准层失败：{err}"))?;
+    Ok(())
+}
+
+/// 读「系统桌面图标是否被隐藏」的持久化标记。
+fn read_icons_hidden(app: &AppHandle) -> bool {
+    let Ok(conn) = connect(app) else {
+        return false;
+    };
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT value FROM grid_meta WHERE key = ?1",
+            params![META_KEY_ICONS_HIDDEN],
+            |row| row.get(0),
+        )
+        .ok();
+    raw.as_deref() == Some("1")
+}
+
+/// 写「系统桌面图标是否被隐藏」的持久化标记。
+fn write_icons_hidden(app: &AppHandle, hidden: bool) -> Result<(), String> {
+    let conn = connect(app)?;
+    conn.execute(
+        "INSERT INTO grid_meta (key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![META_KEY_ICONS_HIDDEN, if hidden { "1" } else { "0" }],
+    )
+    .map_err(|err| format!("保存桌面图标状态失败：{err}"))?;
+    Ok(())
+}
+
+/// 退出 / 启动时无条件恢复桌面系统图标（避免「图标被藏住但应用没了」的尴尬）。
+pub fn restore_desktop_icons() {
+    let _ = desktop_icons_apply(false);
+}
+
+/// 启动时自愈：上次是被强杀 / 崩溃（图标还藏着），这里恢复并清标记。
+pub fn heal_desktop_icons(app: &AppHandle) {
+    if !read_icons_hidden(app) {
+        return;
+    }
+    match desktop_icons_apply(false) {
+        Ok(_) => {
+            let _ = write_icons_hidden(app, false);
+            println!("[Handy] 检测到上次退出时隐藏了桌面图标，已自动恢复");
+        }
+        Err(err) => eprintln!("[Handy] 恢复桌面图标失败：{err}"),
+    }
+}
+
+/// 读取挂件窗基准层（`desktop` | `bottom`）。
+#[tauri::command]
+pub async fn grid_attach_get(app: AppHandle) -> Result<String, String> {
+    Ok(read_attach_mode(&app).as_str().to_string())
+}
+
+/// 设置挂件窗基准层并立即生效（窗口不存在时只落库，下次开窗生效）。
+#[tauri::command]
+pub async fn grid_attach_set(app: AppHandle, mode: String) -> Result<(), String> {
+    let parsed = AttachMode::parse(&mode);
+    write_attach_mode(&app, parsed)?;
+    if let Some(win) = app.get_webview_window(GRID_LABEL) {
+        apply_attach(&win, parsed)?;
+    }
+    Ok(())
+}
+
+/// 隐藏 / 恢复桌面系统图标。返回「本机是否支持」（false = 没找到桌面图标视图）。
+#[tauri::command]
+pub async fn grid_desktop_icons_set(app: AppHandle, hidden: bool) -> Result<bool, String> {
+    let supported = desktop_icons_apply(hidden)?;
+    if supported {
+        write_icons_hidden(&app, hidden)?;
+    }
+    Ok(supported)
+}
+
+/// 查询桌面系统图标当前是否可见。
+#[tauri::command]
+pub async fn grid_desktop_icons_get() -> Result<bool, String> {
+    Ok(desktop_icons_visible())
+}
+
 
 /// Windows 光标命中测试：全局光标（物理像素）→ 挂件窗内坐标 → 区域判定。
 #[cfg(target_os = "windows")]
@@ -614,9 +1012,9 @@ fn ensure_poller(app: AppHandle) {
                     continue;
                 }
                 tick += 1;
-                // 周期性压回最底：应用窗口激活后挂件可能上浮（桌面挂件语义 = 永远垫底）
+                // 周期性压回所属层的最底：应用窗口激活后挂件可能上浮
                 if tick % BOTTOM_REASSERT_TICKS == 0 {
-                    let _ = ensure_bottom(&win);
+                    reassert_attach(&win);
                 }
                 let want_interactive =
                     cursor_hit(&win) || FORCED_INTERACTIVE.load(Ordering::Relaxed);
@@ -635,12 +1033,13 @@ fn ensure_poller(app: AppHandle) {
 
 /// 创建（幂等复用）并显示挂件窗。
 fn show_overlay(app: &AppHandle) -> Result<(), String> {
-    // 已存在 → 显示 + 压回底层即可（同 note 窗的幂等约定，不开第二个）
+    let mode = read_attach_mode(app);
+    // 已存在 → 显示 + 按基准层归位（同 note 窗的幂等约定，不开第二个）
     if let Some(existing) = app.get_webview_window(GRID_LABEL) {
         let _ = existing.show();
-        let _ = ensure_bottom(&existing);
+        let attach = apply_attach(&existing, mode);
         ensure_poller(app.clone());
-        return Ok(());
+        return attach;
     }
 
     // 几何：DB 优先（逻辑像素），缺省 = 主显示器工作区
@@ -672,9 +1071,10 @@ fn show_overlay(app: &AppHandle) -> Result<(), String> {
 
     // 默认点击穿透；光标命中盒子区域后由轮询线程开放交互
     let _ = win.set_ignore_cursor_events(true);
-    let _ = ensure_bottom(&win);
+    // 按基准层归位（默认「贴到桌面」；失败时窗口仍在，把原因透给前端）
+    let attach = apply_attach(&win, mode);
     ensure_poller(app.clone());
-    Ok(())
+    attach
 }
 
 /// 显示（幂等）桌面挂件窗。

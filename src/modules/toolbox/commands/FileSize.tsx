@@ -84,6 +84,55 @@ export function FileSize({ initialInput = '' }: CommandProps): React.JSX.Element
       onToggleFavorite={shell.onToggleFavorite}
       copyText={copyText}
       shortcutHint="切换上方标签；右下开关切换 base-2 / base-10"
+      samples={[
+        {
+          label: '1 MiB 是多少',
+          description: '1048576 字节 —— base-2 下正好 1 MiB，一次看到全部单位',
+          apply: () => {
+            setTab('b2h');
+            setBase2(true);
+            setBytesInput('1048576');
+          },
+        },
+        {
+          label: 'base-2 vs base-10',
+          description: '同为 1000000000：base-2 显示 953.67 MiB，base-10 显示 1 GB，这就是「硬盘容量缩水」的来源',
+          apply: () => {
+            setTab('b2h');
+            setBase2(true);
+            setBytesInput('1000000000');
+          },
+        },
+        {
+          label: '磁盘容量 512 GB',
+          description: '厂商标称容量按 base-10 算 —— 切到 base-10 才是你要的那一行',
+          apply: () => {
+            setTab('b2h');
+            setBase2(false);
+            setBytesInput('512000000000');
+          },
+        },
+        {
+          label: '反查 1.5 TiB',
+          description: '易读 → 字节：1.5 TiB 到底是多少字节（备份脚本算容量常用）',
+          apply: () => {
+            setTab('h2b');
+            setBase2(true);
+            setValueInput('1.5');
+            setUnit('TiB');
+          },
+        },
+        {
+          label: '反查 20 MB',
+          description: '易读 → 字节：接口限流写「20MB」时对应的字节上限',
+          apply: () => {
+            setTab('h2b');
+            setBase2(false);
+            setValueInput('20');
+            setUnit('MB');
+          },
+        },
+      ]}
     >
       <div className="flex flex-col gap-4">
         <label className="flex items-center gap-2 text-sm text-foreground">
