@@ -14,7 +14,7 @@
 | 项 | 值 |
 | --- | --- |
 | 阶段 | Phase 1 收尾 + V18/V19/V20 反馈修复（MVP 完成，待装机验收） |
-| git | V19 批次 = **`64e3008`**（31 文件，+3112/−372），其后 `e09d25b` 为文档回填；`be1dc58` = V18 文档回填；`862d5bf` = V18 批次。**V20 批次尚未提交** |
+| git | **V20 批次 = `f96a374`**（37 文件，+6118/−999）；V19 批次 = `64e3008`（31 文件，+3112/−372）；`be1dc58` = V18 文档回填；`862d5bf` = V18 批次 |
 | 安装包（V20 重新打包，2026-09-15 21:55） | `src-tauri/target/release/bundle/nsis/Handy_0.1.0_x64-setup.exe`（3.66 MB）<br>`src-tauri/target/release/bundle/msi/Handy_0.1.0_x64_en-US.msi`（4.71 MB）<br>`src-tauri/target/release/handy.exe`（9.29 MB，免安装可直接跑） |
 
 ---
