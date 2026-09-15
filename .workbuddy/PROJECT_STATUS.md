@@ -13,7 +13,7 @@
 | 项 | 值 |
 | --- | --- |
 | 阶段 | Phase 1 收尾 + V18/V19 反馈修复（MVP 完成，待装机验收） |
-| git | V18 = `862d5bf`；V19 批次见当日提交 |
+| git | **HEAD `64e3008`** = V19 批次（31 文件，+3112/−372）；`be1dc58` = V18 文档回填；`862d5bf` = V18 批次 |
 | 安装包 | `src-tauri/target/release/bundle/nsis/Handy_0.1.0_x64-setup.exe`（3.80 MB，2026-09-15 19:52）<br>`src-tauri/target/release/bundle/msi/Handy_0.1.0_x64_en-US.msi`（4.89 MB，19:51）<br>`src-tauri/target/release/handy.exe`（9.68 MB，免安装可直接跑） |
 
 ---
