@@ -16,6 +16,9 @@ const config: Config = {
         input: 'hsl(var(--input))',
         ring: 'hsl(var(--ring))',
         background: 'hsl(var(--background))',
+        /** 页面画布底色（V24）：浅灰，白色卡片浮在它上面形成层次。
+         *  不要拿 `background` 当画布用 —— 输入框、二维码画布等都应该保持纯白。 */
+        canvas: 'hsl(var(--canvas))',
         foreground: 'hsl(var(--foreground))',
         primary: {
           DEFAULT: 'hsl(var(--primary))',
@@ -54,6 +57,12 @@ const config: Config = {
       },
       fontFamily: {
         sans: [
+          // V24：Windows 11 优先走 Segoe UI Variable（字重与字宽更细腻），
+          // 回退到 YaHei UI（比 YaHei 行距更好）；macOS 走 PingFang SC。
+          '"Segoe UI Variable Display"',
+          '"Segoe UI Variable Text"',
+          '"Segoe UI"',
+          '"Microsoft YaHei UI"',
           '"Microsoft YaHei"',
           '"PingFang SC"',
           '"Hiragino Sans GB"',
@@ -61,7 +70,6 @@ const config: Config = {
           '"Noto Sans SC"',
           'system-ui',
           '-apple-system',
-          'Segoe UI',
           'sans-serif',
         ],
         mono: [
@@ -79,9 +87,16 @@ const config: Config = {
         xl: 'calc(var(--radius) + 4px)',
       },
       boxShadow: {
-        // 扁平优先：仅保留极浅的浮层阴影
+        // V24 层次：card（静息）→ hover（悬停微抬）→ popover（浮层）。
+        // 一律走同一色相的低透明阴影，避免彩色投影那种廉价感。
+        card: '0 1px 2px 0 hsl(215 16% 47% / 0.06)',
         panel: '0 1px 2px 0 hsl(215 16% 47% / 0.08)',
-        popover: '0 4px 12px -2px hsl(215 16% 47% / 0.12)',
+        hover: '0 4px 12px -2px hsl(215 16% 47% / 0.12), 0 2px 4px -2px hsl(215 16% 47% / 0.06)',
+        popover: '0 8px 24px -4px hsl(215 16% 47% / 0.16), 0 2px 8px -2px hsl(215 16% 47% / 0.08)',
+      },
+      transitionTimingFunction: {
+        // 统一的「现代感」缓动：出场快、收尾缓
+        out: 'cubic-bezier(0.16, 1, 0.3, 1)',
       },
       keyframes: {
         'fade-in': {

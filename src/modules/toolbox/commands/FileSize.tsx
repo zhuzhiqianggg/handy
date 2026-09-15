@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { usePersistedState } from '@/hooks/usePersistedState';
 import { HardDrive } from 'lucide-react';
 import { CommandShell } from '@/components/CommandShell';
 import { ResultBox } from '@/components/ResultBox';
@@ -33,11 +34,11 @@ function unitFactor(unit: string, base: number): number {
  */
 export function FileSize({ initialInput = '' }: CommandProps): React.JSX.Element {
   const shell = useCommandShell(COMMAND_ID);
-  const [tab, setTab] = React.useState<string>('b2h');
-  const [base2, setBase2] = React.useState<boolean>(true);
-  const [bytesInput, setBytesInput] = React.useState<string>(initialInput);
-  const [valueInput, setValueInput] = React.useState<string>('');
-  const [unit, setUnit] = React.useState<string>('MB');
+  const [tab, setTab] = usePersistedState<string>(COMMAND_ID, 'tab', 'b2h');
+  const [base2, setBase2] = usePersistedState<boolean>(COMMAND_ID, 'base2', true);
+  const [bytesInput, setBytesInput] = usePersistedState<string>(COMMAND_ID, 'bytesInput', initialInput);
+  const [valueInput, setValueInput] = usePersistedState<string>(COMMAND_ID, 'valueInput', '');
+  const [unit, setUnit] = usePersistedState<string>(COMMAND_ID, 'unit', 'MB');
 
   const base = base2 ? 1024 : 1000;
 

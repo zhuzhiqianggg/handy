@@ -27,6 +27,7 @@ import { cn } from '@/lib/utils';
 import type { CommandProps } from '@/core/types';
 
 const COMMAND_ID = 'regex-tester';
+// tool-audit-ignore: samples —— 正则库（整行可点展开）已是更强的示例入口
 
 /** 可勾选的 flags */
 const FLAG_OPTIONS: ReadonlyArray<{ flag: string; label: string; hint: string }> = [

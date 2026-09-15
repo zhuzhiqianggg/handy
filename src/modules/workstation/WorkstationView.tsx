@@ -225,7 +225,7 @@ export default function WorkstationView(_props: WorkstationViewProps = {}): Reac
   );
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-canvas">
       {/* —— 问候头部：左侧日期，右侧时钟（用户反馈「分到两边展示」）—— */}
       <header className="flex shrink-0 flex-wrap items-start justify-between gap-4 px-6 pb-4 pt-5">
         <div className="min-w-0">

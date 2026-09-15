@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { usePersistedState } from '@/hooks/usePersistedState';
 import { ImageDown, QrCode, ScanLine, Upload } from 'lucide-react';
 import QRCode from 'qrcode';
 import jsQR from 'jsqr';
@@ -190,23 +191,23 @@ export function QrCodeGenerator({ initialInput = '' }: CommandProps): React.JSX.
   const shell = useCommandShell(COMMAND_ID);
 
   // —— 内容模板状态 ——
-  const [template, setTemplate] = React.useState<Template>('text');
-  const [text, setText] = React.useState<string>(initialInput);
-  const [url, setUrl] = React.useState<string>('');
-  const [ssid, setSsid] = React.useState<string>('');
+  const [template, setTemplate] = usePersistedState<Template>(COMMAND_ID, 'template', 'text');
+  const [text, setText] = usePersistedState<string>(COMMAND_ID, 'text', initialInput);
+  const [url, setUrl] = usePersistedState<string>(COMMAND_ID, 'url', '');
+  const [ssid, setSsid] = usePersistedState<string>(COMMAND_ID, 'ssid', '');
   const [password, setPassword] = React.useState<string>('');
-  const [encryption, setEncryption] = React.useState<WifiEncryption>('WPA');
-  const [hidden, setHidden] = React.useState<boolean>(false);
-  const [email, setEmail] = React.useState<string>('');
-  const [subject, setSubject] = React.useState<string>('');
-  const [body, setBody] = React.useState<string>('');
-  const [phone, setPhone] = React.useState<string>('');
+  const [encryption, setEncryption] = usePersistedState<WifiEncryption>(COMMAND_ID, 'encryption', 'WPA');
+  const [hidden, setHidden] = usePersistedState<boolean>(COMMAND_ID, 'hidden', false);
+  const [email, setEmail] = usePersistedState<string>(COMMAND_ID, 'email', '');
+  const [subject, setSubject] = usePersistedState<string>(COMMAND_ID, 'subject', '');
+  const [body, setBody] = usePersistedState<string>(COMMAND_ID, 'body', '');
+  const [phone, setPhone] = usePersistedState<string>(COMMAND_ID, 'phone', '');
 
   // —— 样式状态 ——
-  const [level, setLevel] = React.useState<Level>('M');
-  const [size, setSize] = React.useState<number>(256);
-  const [dark, setDark] = React.useState<string>('#111827');
-  const [light, setLight] = React.useState<string>('#ffffff');
+  const [level, setLevel] = usePersistedState<Level>(COMMAND_ID, 'level', 'M');
+  const [size, setSize] = usePersistedState<number>(COMMAND_ID, 'size', 256);
+  const [dark, setDark] = usePersistedState<string>(COMMAND_ID, 'dark', '#111827');
+  const [light, setLight] = usePersistedState<string>(COMMAND_ID, 'light', '#ffffff');
 
   // —— 渲染状态 ——
   const [error, setError] = React.useState<string | null>(null);
@@ -380,9 +381,55 @@ export function QrCodeGenerator({ initialInput = '' }: CommandProps): React.JSX.
       copyText={trimmed}
       primaryAction={{ label: '保存 PNG', onClick: savePng, disabled: !ready }}
       shortcutHint="选模板填内容自动生成；拖入图片可解析二维码（Esc 返回）"
+      samples={[
+        {
+          label: '一段文本',
+          description: '最基础的文本码：默认 256px、容错 M',
+          apply: () => {
+            setTemplate('text');
+            setText('Handy 顺手 · 方便，而非全面');
+          },
+        },
+        {
+          label: '网址',
+          description: '扫码即跳转；内容越长码点越密，长链接建议先用短链',
+          apply: () => {
+            setTemplate('url');
+            setUrl('https://github.com/');
+          },
+        },
+        {
+          label: 'WiFi 卡',
+          description: '扫码直接连网 —— 注意密码栏不进草稿存储，只活在当前会话',
+          apply: () => {
+            setTemplate('wifi');
+            setSsid('Handy-Guest');
+            setEncryption('WPA');
+            setHidden(false);
+          },
+        },
+        {
+          label: '邮件草稿',
+          description: '扫码打开邮件客户端并带上主题与正文',
+          apply: () => {
+            setTemplate('email');
+            setEmail('ops@example.com');
+            setSubject('顺手 · 使用反馈');
+            setBody('你好，我想反馈一个问题：');
+          },
+        },
+        {
+          label: '电话',
+          description: '扫码直接拨号（vCard / tel 场景）',
+          apply: () => {
+            setTemplate('phone');
+            setPhone('+8613800000000');
+          },
+        },
+      ]}
     >
-      {/* 1180×820 基准：两列并排，窄屏（<1280px）自动回退单列 */}
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+      {/* 1180×820 基准：两列并排，窄屏（<1024px）自动回退单列 */}
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         {/* ——— 左列：内容配置 ——— */}
         <div className="flex min-w-0 flex-col gap-3">
           <div className="flex flex-wrap items-center gap-1">

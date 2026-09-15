@@ -9,6 +9,7 @@ import type { CommandMeta } from '@/core/types';
 export const toolboxCommands: CommandMeta[] = [
   {
     id: 'timestamp',
+    category: 'convert',
     moduleId: 'toolbox',
     name: '时间戳转换',
     description: 'Unix 时间戳与日期时间互转',
@@ -21,6 +22,7 @@ export const toolboxCommands: CommandMeta[] = [
   },
   {
     id: 'json-formatter',
+    category: 'data',
     moduleId: 'toolbox',
     name: 'JSON 格式化',
     description: '格式化、压缩与语法校验 JSON',
@@ -33,6 +35,7 @@ export const toolboxCommands: CommandMeta[] = [
   },
   {
     id: 'base64-codec',
+    category: 'encode',
     moduleId: 'toolbox',
     name: 'Base64 编解码',
     description: '文本与 Base64 互转（UTF-8 安全）',
@@ -45,6 +48,7 @@ export const toolboxCommands: CommandMeta[] = [
   },
   {
     id: 'url-codec',
+    category: 'encode',
     moduleId: 'toolbox',
     name: 'URL 编解码',
     description: 'URL 转义 / 还原，解析查询参数',
@@ -57,6 +61,7 @@ export const toolboxCommands: CommandMeta[] = [
   },
   {
     id: 'jwt-decoder',
+    category: 'encode',
     moduleId: 'toolbox',
     name: 'JWT 解码',
     description: '解析 JWT 头部与载荷（不校验签名）',
@@ -70,6 +75,7 @@ export const toolboxCommands: CommandMeta[] = [
   },
   {
     id: 'text-diff',
+    category: 'text',
     moduleId: 'toolbox',
     name: '文本对比',
     description: '两段文本行级差异（并排 / 行内高亮）',
@@ -82,6 +88,7 @@ export const toolboxCommands: CommandMeta[] = [
   },
   {
     id: 'password-generator',
+    category: 'generate',
     moduleId: 'toolbox',
     name: '密码生成器',
     description: '随机强密码（本地生成，不上传）',
@@ -95,6 +102,7 @@ export const toolboxCommands: CommandMeta[] = [
   },
   {
     id: 'hash-generator',
+    category: 'encode',
     moduleId: 'toolbox',
     name: '哈希计算',
     description: '文本 MD5 / SHA-1 / SHA-256 摘要',
@@ -107,6 +115,7 @@ export const toolboxCommands: CommandMeta[] = [
   },
   {
     id: 'qrcode-generator',
+    category: 'generate',
     moduleId: 'toolbox',
     name: '二维码生成',
     description: '文本 / 链接生成二维码（可存 PNG）',
@@ -119,6 +128,7 @@ export const toolboxCommands: CommandMeta[] = [
   },
   {
     id: 'uuid-generator',
+    category: 'generate',
     moduleId: 'toolbox',
     name: 'UUID 生成器',
     description: '批量生成 RFC 4122 v4 UUID（可复制）',
@@ -131,6 +141,7 @@ export const toolboxCommands: CommandMeta[] = [
   },
   {
     id: 'json-to-ts',
+    category: 'dev',
     moduleId: 'toolbox',
     name: 'JSON 转 TypeScript',
     description: '粘贴 JSON，生成 TS 接口定义',
@@ -143,6 +154,7 @@ export const toolboxCommands: CommandMeta[] = [
   },
   {
     id: 'regex-tester',
+    category: 'dev',
     moduleId: 'toolbox',
     name: '正则测试',
     description: '正则表达式匹配测试（高亮与命名分组）',
@@ -155,6 +167,7 @@ export const toolboxCommands: CommandMeta[] = [
   },
   {
     id: 'case-converter',
+    category: 'text',
     moduleId: 'toolbox',
     name: '大小写转换',
     description: 'snake / camel / kebab / Pascal / 常量 等命名风格互转',
@@ -167,6 +180,7 @@ export const toolboxCommands: CommandMeta[] = [
   },
   {
     id: 'text-dedup',
+    category: 'text',
     moduleId: 'toolbox',
     name: '文本去重',
     description: '移除重复行（忽略大小写 / 去首尾空格，可选排序）',
@@ -179,6 +193,7 @@ export const toolboxCommands: CommandMeta[] = [
   },
   {
     id: 'text-lab',
+    category: 'text',
     moduleId: 'toolbox',
     name: '文本处理台',
     description: '查找替换（正则/捕获组） · 行处理 · 取列 · 统计，就地改写随时撤销',
@@ -215,6 +230,7 @@ export const toolboxCommands: CommandMeta[] = [
   },
   {
     id: 'csv-json',
+    category: 'data',
     moduleId: 'toolbox',
     name: 'CSV / JSON 互转',
     description: 'CSV 与 JSON 双向转换',
@@ -227,6 +243,7 @@ export const toolboxCommands: CommandMeta[] = [
   },
   {
     id: 'sql-formatter',
+    category: 'data',
     moduleId: 'toolbox',
     name: 'SQL 格式化 · 检查 · 学习',
     description: 'SQL 美化 + 常见写法检查 + 示例学语法（MySQL）',
@@ -239,6 +256,7 @@ export const toolboxCommands: CommandMeta[] = [
   },
   {
     id: 'relative-time',
+    category: 'convert',
     moduleId: 'toolbox',
     name: '相对时间',
     description: '日期 → 中文相对时间（3 天前 / 2 小时后）',
@@ -251,6 +269,7 @@ export const toolboxCommands: CommandMeta[] = [
   },
   {
     id: 'unit-converter',
+    category: 'convert',
     moduleId: 'toolbox',
     name: '单位换算',
     description: '长度 / 重量 / 温度 / 面积 / 体积等换算',
@@ -263,6 +282,7 @@ export const toolboxCommands: CommandMeta[] = [
   },
   {
     id: 'file-size',
+    category: 'convert',
     moduleId: 'toolbox',
     name: '文件大小换算',
     description: '字节与 KB / MB / GB 互转（二进制 / 十进制）',
@@ -275,6 +295,7 @@ export const toolboxCommands: CommandMeta[] = [
   },
   {
     id: 'cron-descriptor',
+    category: 'dev',
     moduleId: 'toolbox',
     name: 'Cron 表达式解析',
     description: '标准 5 段（crontab / K8s）逐段编辑 · 中文描述 · 下次执行时间',
@@ -300,6 +321,7 @@ export const toolboxCommands: CommandMeta[] = [
   },
   {
     id: 'slug-generator',
+    category: 'text',
     moduleId: 'toolbox',
     name: 'Slug 生成',
     description: '文本转 URL slug（支持中文拼音 / 分隔符选项）',
@@ -312,6 +334,7 @@ export const toolboxCommands: CommandMeta[] = [
   },
   {
     id: 'image-to-base64',
+    category: 'encode',
     moduleId: 'toolbox',
     name: '图片转 Base64',
     description: '本地图片读取为 Base64（可预览 / 复制）',
@@ -324,6 +347,7 @@ export const toolboxCommands: CommandMeta[] = [
   },
   {
     id: 'ascii-table',
+    category: 'dev',
     moduleId: 'toolbox',
     name: 'ASCII 表',
     description: '字符编码查询与 0-127 ASCII 速查表',

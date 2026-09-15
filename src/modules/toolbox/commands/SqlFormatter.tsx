@@ -24,6 +24,8 @@ import {
   type SqlSyntaxPoint,
 } from '@/lib/sql';
 import { SQL_SAMPLE_GROUPS, SQL_SAMPLES_FLAT, type SqlSample, type SqlSampleGroup } from './sqlSamples';
+// tool-audit-ignore: samples —— 本工具的示例入口是 sqlSamples.ts 的示例库（10 组 30 条教学示例，
+// 点一条即填输入框并展开讲解），比标题栏下方的静态示例 chip 更完整，故不重复接 SampleBar。
 import type { CommandProps } from '@/core/types';
 
 const COMMAND_ID = 'sql-formatter';
@@ -365,7 +367,11 @@ export function SqlFormatter({ initialInput = '' }: CommandProps): React.JSX.Ele
       fill
       shortcutHint="格式化只调整换行与缩进，字符串与注释内容原样保留"
     >
-      <div className="flex min-h-0 flex-1 flex-col gap-3">
+      {/* V24：窄窗口（<lg）下**不强制撑满**，内容按自然高度堆叠、由本容器滚动。
+          之前 `min-h-0 flex-1` 一路往下传，680px 时「SQL 输入」卡片被压到只剩 53px 标题栏
+          （布局审计实测 scrollHeight 58 / clientHeight 53）—— 与 V23 工作台那次是同一个坑：
+          flex-1 在高度不足时会先把内容压扁，而不是产生滚动条。 */}
+      <div className="scrollbar-thin flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto lg:overflow-hidden">
         {/* ① 示例库：分组 tab + 该组示例。点一条 = 填充输入框 + 展开讲解 */}
         <section className="flex shrink-0 flex-col overflow-hidden rounded-xl border border-border bg-card">
           <header className="flex items-center gap-2 border-b border-border px-4 py-2">
@@ -419,10 +425,10 @@ export function SqlFormatter({ initialInput = '' }: CommandProps): React.JSX.Ele
         </section>
 
         {/* ② 主区：左输入右结果 */}
-        <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 lg:grid-cols-2">
+        <div className="grid grid-cols-1 gap-3 lg:min-h-0 lg:flex-1 lg:grid-cols-2">
           {/* 左列：输入 + 选项 + 检查 */}
-          <div className="flex min-h-0 min-w-0 flex-col gap-3">
-            <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-border bg-card">
+          <div className="flex min-w-0 flex-col gap-3 lg:min-h-0">
+            <div className="flex flex-col overflow-hidden rounded-xl border border-border bg-card lg:min-h-0 lg:flex-1">
               <div className="flex shrink-0 items-center gap-2 border-b border-border px-4 py-2">
                 <label className="text-sm font-medium text-foreground" htmlFor="sql-input">
                   SQL 输入
@@ -444,7 +450,7 @@ export function SqlFormatter({ initialInput = '' }: CommandProps): React.JSX.Ele
                 id="sql-input"
                 spellCheck={false}
                 autoComplete="off"
-                className="scrollbar-thin min-h-0 flex-1 resize-none bg-transparent px-3 py-2.5 font-mono text-[13px] leading-relaxed text-foreground outline-none placeholder:text-muted-foreground"
+                className="scrollbar-thin min-h-[220px] flex-1 resize-none bg-transparent px-3 py-2.5 font-mono text-[13px] leading-relaxed text-foreground outline-none placeholder:text-muted-foreground lg:min-h-0"
                 value={state.input}
                 placeholder={'select id, name, email\nfrom users\nwhere status = 1\norder by created_at desc\nlimit 20'}
                 onChange={(event: React.ChangeEvent<HTMLTextAreaElement>) =>
@@ -486,7 +492,7 @@ export function SqlFormatter({ initialInput = '' }: CommandProps): React.JSX.Ele
           </div>
 
           {/* 右列：结果 + 学习（整体滚动，长 SQL 也不会把学习卡挤没） */}
-          <div className="scrollbar-thin flex min-h-0 min-w-0 flex-col gap-3 overflow-y-auto pr-1">
+          <div className="flex min-w-0 flex-col gap-3 pr-1 lg:scrollbar-thin lg:min-h-0 lg:overflow-y-auto">
             <div className="shrink-0 overflow-hidden rounded-xl border border-border bg-card">
               <div className="flex items-center gap-2 border-b border-border px-4 py-2.5">
                 <span className="text-sm font-medium text-foreground">格式化结果</span>

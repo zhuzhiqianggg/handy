@@ -982,6 +982,87 @@ export function TextDiff({ initialInput = '' }: CommandProps): React.JSX.Element
       onToggleFavorite={shell.onToggleFavorite}
       copyText={mergeMode ? merged : unified}
       shortcutHint="↑/↓ 或 j/k 跳到上一处 / 下一处差异；关掉工具再打开，输入还在"
+      samples={[
+        {
+          label: '配置改动',
+          description: '改了一行端口、加了一行 gzip，看行内高亮定位到具体片段',
+          apply: () => {
+            patch({
+              textA: `server {
+  listen 80;
+  server_name handy.local;
+  root /var/www;
+}`,
+              textB: `server {
+  listen 8080;
+  server_name handy.local;
+  gzip on;
+  root /var/www;
+}`,
+              mode: 'split',
+              granularity: 'line',
+            });
+          },
+        },
+        {
+          label: '代码重构',
+          description: '函数改名 + 参数变多：切「单词」粒度才看清真正的改动点',
+          apply: () => {
+            patch({
+              textA: `function fetchUser(id) {
+  return api.get('/user/' + id);
+}`,
+              textB: `function fetchUserDetail(userId, opts) {
+  return api.get('/user/' + userId, opts);
+}`,
+              mode: 'inline',
+              granularity: 'word',
+            });
+          },
+        },
+        {
+          label: '表格数据',
+          description: '两版 CSV：用「字符」粒度能看出单元格里改的是哪个数字',
+          apply: () => {
+            patch({
+              textA: `name,qty,price
+顺手键盘,12,299
+顺手鼠标,8,129`,
+              textB: `name,qty,price
+顺手键盘,15,299
+顺手鼠标,8,139`,
+              mode: 'split',
+              granularity: 'char',
+            });
+          },
+        },
+        {
+          label: '大段相同',
+          description: '配合「折叠未变更的行」——只留下差异与上下文',
+          apply: () => {
+            patch({
+              textA: `第一步：打开设置
+第二步：选择网络
+第三步：保存并重启
+第四步：确认生效`,
+              textB: `第一步：打开设置
+第二步：选择网络
+第三步：保存并重启服务
+第四步：确认生效`,
+              mode: 'split',
+              granularity: 'line',
+              collapse: true,
+            });
+          },
+        },
+        {
+          label: '清空两栏',
+          description: '把左右两栏都清空，重新开始',
+          apply: () => {
+            patch({ textA: '', textB: '' });
+          },
+        },
+      ]}
     >
       <div className="flex min-w-0 flex-col gap-3">
         {/* ——— 工具条 ——— */}

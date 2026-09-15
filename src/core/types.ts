@@ -116,6 +116,14 @@ export interface ModuleMeta {
  * 必须显式标注类型（`const CMD: CommandMeta = {...}` 或 `satisfies CommandMeta`）。
  * `load`（有 UI）与 `run`（动作式，框架级系统命令）**至少提供一个**。
  */
+/**
+ * 工具分类 id（V24）。
+ *
+ * 与 `src/modules/toolbox/commands/categories.ts` 的 `TOOL_CATEGORIES` **一一对应**：
+ * 这里加成员 → 那里加元数据，`scripts/audit/tool-audit.mjs` 会校验两边一致。
+ */
+export type ToolCategory = 'text' | 'data' | 'encode' | 'convert' | 'generate' | 'dev';
+
 export interface CommandMeta {
   /** 命令 id（kebab-case，全局唯一），如 'timestamp' */
   id: string;
@@ -128,6 +136,11 @@ export interface CommandMeta {
   aliases: string[];
   /** 关键词（含拼音首字母），如 ['时间戳', 'sjc'] */
   keywords: string[];
+  /**
+   * 工具分类（V24）：工具箱首页按它分组展示。
+   * 工具箱下的命令**必填**（`tool-audit` 会卡）；系统命令可不填。
+   */
+  category?: ToolCategory;
   layout?: CommandLayout;
   tier: Tier;
   /** 敏感命令：结果默认不写历史 / 剪贴板（密码 / 密钥） */

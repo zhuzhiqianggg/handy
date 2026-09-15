@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { usePersistedState } from '@/hooks/usePersistedState';
 import { Table2 } from 'lucide-react';
 import { CommandShell } from '@/components/CommandShell';
 import { CopyButton } from '@/components/CopyButton';
@@ -93,8 +94,8 @@ function toTsv(infos: CharInfo[]): string {
  */
 export function AsciiTable({ initialInput = '' }: CommandProps): React.JSX.Element {
   const shell = useCommandShell(COMMAND_ID);
-  const [tab, setTab] = React.useState<string>('lookup');
-  const [input, setInput] = React.useState<string>(initialInput);
+  const [tab, setTab] = usePersistedState<string>(COMMAND_ID, 'tab', 'lookup');
+  const [input, setInput] = usePersistedState<string>(COMMAND_ID, 'input', initialInput);
 
   const infos = React.useMemo(() => toCharInfos(input), [input]);
   const tsv = React.useMemo(() => toTsv(infos), [infos]);

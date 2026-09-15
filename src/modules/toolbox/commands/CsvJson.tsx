@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { usePersistedState } from '@/hooks/usePersistedState';
 import { Table2 } from 'lucide-react';
 import { CommandShell } from '@/components/CommandShell';
 import { ResultBox } from '@/components/ResultBox';
@@ -147,8 +148,8 @@ function jsonToCsv(text: string): string {
  */
 export function CsvJson({ initialInput = '' }: CommandProps): React.JSX.Element {
   const shell = useCommandShell(COMMAND_ID);
-  const [tab, setTab] = React.useState<string>('csv2json');
-  const [input, setInput] = React.useState<string>(initialInput);
+  const [tab, setTab] = usePersistedState<string>(COMMAND_ID, 'tab', 'csv2json');
+  const [input, setInput] = usePersistedState<string>(COMMAND_ID, 'input', initialInput);
 
   const { output, error } = React.useMemo(() => {
     if (!input.trim()) {

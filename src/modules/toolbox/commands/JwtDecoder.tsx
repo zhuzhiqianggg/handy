@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { usePersistedState } from '@/hooks/usePersistedState';
 import { Check, ChevronDown, ChevronRight, KeyRound, ShieldCheck, ShieldX } from 'lucide-react';
 import { CommandShell } from '@/components/CommandShell';
 import { CopyButton } from '@/components/CopyButton';
@@ -24,6 +25,7 @@ import {
 import type { CommandProps } from '@/core/types';
 
 const COMMAND_ID = 'jwt-decoder';
+// tool-audit-ignore: samples —— 内置「示例 token」生成（含过期 token），比静态示例更完整
 
 /** 算法下拉：自动（跟随 header.alg）+ 三种 HMAC */
 const ALG_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
@@ -125,9 +127,9 @@ function InfoCell({
  */
 export function JwtDecoder({ initialInput = '' }: CommandProps): React.JSX.Element {
   const shell = useCommandShell(COMMAND_ID);
-  const [input, setInput] = React.useState<string>(initialInput);
+  const [input, setInput] = usePersistedState<string>(COMMAND_ID, 'input', initialInput);
   const [secret, setSecret] = React.useState<string>('');
-  const [algOverride, setAlgOverride] = React.useState<string>('');
+  const [algOverride, setAlgOverride] = usePersistedState<string>(COMMAND_ID, 'algOverride', '');
   const [verify, setVerify] = React.useState<VerifyState>({
     status: 'idle',
     message: '未验证签名',

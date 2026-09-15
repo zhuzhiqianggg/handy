@@ -33,6 +33,7 @@ import { cn } from '@/lib/utils';
 import type { CommandProps } from '@/core/types';
 
 const COMMAND_ID = 'cron-descriptor';
+// tool-audit-ignore: samples —— 生成器预设已是更强的示例入口，见 CronDescriptor 顶部说明
 
 /**
  * Cron 表达式解析（V21 重做 → V23 收敛）。

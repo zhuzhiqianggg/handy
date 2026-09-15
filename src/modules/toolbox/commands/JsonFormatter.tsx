@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { usePersistedState } from '@/hooks/usePersistedState';
 import { Braces, ChevronDown, ChevronRight, Search } from 'lucide-react';
 import { CommandShell } from '@/components/CommandShell';
 import { CopyButton } from '@/components/CopyButton';
@@ -29,7 +30,6 @@ import type { CommandProps } from '@/core/types';
 
 const COMMAND_ID = 'json-formatter';
 
-/** 输出模式 */
 type OutputMode = 'pretty' | 'min' | 'tree' | 'csv' | 'yaml' | 'ts';
 /** 缩进选项（仅格式化模式生效） */
 type Indent = '2' | '4';
@@ -349,10 +349,10 @@ function JsonTree({
  */
 export function JsonFormatter({ initialInput = '' }: CommandProps): React.JSX.Element {
   const shell = useCommandShell(COMMAND_ID);
-  const [input, setInput] = React.useState<string>(initialInput);
-  const [mode, setMode] = React.useState<OutputMode>('pretty');
-  const [indent, setIndent] = React.useState<Indent>('2');
-  const [pathQuery, setPathQuery] = React.useState<string>('');
+  const [input, setInput] = usePersistedState<string>(COMMAND_ID, 'input', initialInput);
+  const [mode, setMode] = usePersistedState<OutputMode>(COMMAND_ID, 'mode', 'pretty');
+  const [indent, setIndent] = usePersistedState<Indent>(COMMAND_ID, 'indent', '2');
+  const [pathQuery, setPathQuery] = usePersistedState<string>(COMMAND_ID, 'pathQuery', '');
   const [output, setOutput] = React.useState<string>('');
   const [warning, setWarning] = React.useState<string | null>(null);
   const [busy, setBusy] = React.useState<boolean>(false);
@@ -434,12 +434,6 @@ export function JsonFormatter({ initialInput = '' }: CommandProps): React.JSX.El
     }
   }, []);
 
-  const fillSample = React.useCallback((): void => {
-    setInput(SAMPLE_JSON);
-    setMode('pretty');
-    toast.success('已填入示例 JSON');
-  }, []);
-
   const copyValue = React.useCallback(
     (text: string, label: string) => {
       void handleCopy(text, label);
@@ -469,9 +463,66 @@ export function JsonFormatter({ initialInput = '' }: CommandProps): React.JSX.El
       fill
       copyText={mode === 'tree' ? '' : output}
       shortcutHint="粘贴 JSON 后自动处理；支持 JSONPath 如 $.store.book[0].title（Esc 返回）"
+      samples={[
+        {
+          label: '嵌套对象',
+          description: '结构完整的示例：对象 / 数组 / 布尔 / null 都有，可切树视图看折叠',
+          apply: () => {
+            setMode('pretty');
+            setIndent('2');
+            setPathQuery('');
+            setInput(SAMPLE_JSON);
+          },
+        },
+        {
+          label: 'JSONPath 查询',
+          description: '$.store.book[0].title —— 只看命中的那一小段',
+          apply: () => {
+            setMode('pretty');
+            setInput(SAMPLE_JSON);
+            setPathQuery('$.store.book[0].title');
+          },
+        },
+        {
+          label: '压缩成一行',
+          description: '去掉所有空白，便于塞进配置或命令行参数',
+          apply: () => {
+            setMode('min');
+            setPathQuery('');
+            setInput(SAMPLE_JSON);
+          },
+        },
+        {
+          label: '转 TypeScript',
+          description: '按数据推断结构生成 interface，字段名与类型都自动来',
+          apply: () => {
+            setMode('ts');
+            setPathQuery('');
+            setInput(SAMPLE_JSON);
+          },
+        },
+        {
+          label: 'book 转 CSV',
+          description: '数组转 CSV 最直观：配合 JSONPath 只取 books 这一层',
+          apply: () => {
+            setMode('csv');
+            setInput(SAMPLE_JSON);
+            setPathQuery('$.store.book');
+          },
+        },
+        {
+          label: '故意写错',
+          description: '少一个逗号 —— 看错误提示定位到第几行第几列',
+          apply: () => {
+            setMode('pretty');
+            setPathQuery('');
+            setInput('{\n  "a": 1\n  "b": 2\n}');
+          },
+        },
+      ]}
     >
-      {/* 撑满模式：两列并排（<1280px 回退单列），输入与结果区随窗口高度伸缩 */}
-      <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 xl:grid-cols-2">
+      {/* 撑满模式：两列并排（<1024px 回退单列），输入与结果区随窗口高度伸缩 */}
+      <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 lg:grid-cols-2">
         {/* ——— 左列：输入 ——— */}
         <div className="flex min-h-0 min-w-0 flex-col gap-2">
           <div className="flex items-center justify-between gap-2">
@@ -479,9 +530,6 @@ export function JsonFormatter({ initialInput = '' }: CommandProps): React.JSX.El
               输入 JSON
             </label>
             <div className="flex items-center gap-1">
-              <Button size="sm" variant="ghost" className="h-7 px-2 text-xs" onClick={fillSample}>
-                示例
-              </Button>
               <Button
                 size="sm"
                 variant="ghost"

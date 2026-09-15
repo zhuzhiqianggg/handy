@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { usePersistedState } from '@/hooks/usePersistedState';
 import { ArrowLeftRight, Binary, Download, Upload } from 'lucide-react';
 import { CommandShell } from '@/components/CommandShell';
 import { ResultBox } from '@/components/ResultBox';
@@ -91,12 +92,12 @@ function StatCell({ label, value }: { label: string; value: string }): React.JSX
  */
 export function Base64Codec({ initialInput = '' }: CommandProps): React.JSX.Element {
   const shell = useCommandShell(COMMAND_ID);
-  const [input, setInput] = React.useState<string>(initialInput);
-  const [mode, setMode] = React.useState<Mode>('encode');
-  const [encoding, setEncoding] = React.useState<TextEncoding>('utf-8');
-  const [urlSafe, setUrlSafe] = React.useState<boolean>(false);
-  const [wrap, setWrap] = React.useState<boolean>(false);
-  const [auto, setAuto] = React.useState<boolean>(true);
+  const [input, setInput] = usePersistedState<string>(COMMAND_ID, 'input', initialInput);
+  const [mode, setMode] = usePersistedState<Mode>(COMMAND_ID, 'mode', 'encode');
+  const [encoding, setEncoding] = usePersistedState<TextEncoding>(COMMAND_ID, 'encoding', 'utf-8');
+  const [urlSafe, setUrlSafe] = usePersistedState<boolean>(COMMAND_ID, 'urlSafe', false);
+  const [wrap, setWrap] = usePersistedState<boolean>(COMMAND_ID, 'wrap', false);
+  const [auto, setAuto] = usePersistedState<boolean>(COMMAND_ID, 'auto', true);
   /** 手动模式下的计算快照（点按钮才更新）。 */
   const [snapshot, setSnapshot] = React.useState<string | null>(null);
   /** 文件来源（编码模式：文件 → Base64）。 */
@@ -279,6 +280,56 @@ export function Base64Codec({ initialInput = '' }: CommandProps): React.JSX.Elem
         disabled: !auto && input.trim().length === 0 && !fileSource,
       }}
       shortcutHint="粘贴即算 · 交换按钮翻转方向（Esc 返回）"
+      samples={[
+        {
+          label: '编码中文',
+          description: 'UTF-8 编码：一个汉字占 3 字节，所以 Base64 比原文长',
+          apply: () => {
+            setMode('encode');
+            setEncoding('utf-8');
+            setUrlSafe(false);
+            setWrap(false);
+            setInput('Handy 顺手 · 效率工具');
+          },
+        },
+        {
+          label: '解码回文本',
+          description: '上面那条的逆运算，用来确认「编解码是对称的」',
+          apply: () => {
+            setMode('decode');
+            setUrlSafe(false);
+            setInput('SGFuZHkg6aG65omLIMK3IOaViOeOh+W3peWFtw==');
+          },
+        },
+        {
+          label: 'URL 安全变体',
+          description: '把 + / 换成 - _，才能安全地放进 URL 或文件名',
+          apply: () => {
+            setMode('encode');
+            setUrlSafe(true);
+            setInput('a?b=1&c=2/3+4');
+          },
+        },
+        {
+          label: 'MIME 换行',
+          description: '每 76 字符折行（RFC 2045），邮件与证书里都是这个习惯',
+          apply: () => {
+            setMode('encode');
+            setUrlSafe(false);
+            setWrap(true);
+            setInput('Handy 顺手 · 效率工具 '.repeat(6));
+          },
+        },
+        {
+          label: '解码 JWT 中段',
+          description: 'JWT 的 payload 段就是 URL 安全 Base64，解开是一段 JSON',
+          apply: () => {
+            setMode('decode');
+            setUrlSafe(true);
+            setInput('eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkhhbmR5In0');
+          },
+        },
+      ]}
     >
       {/* 1180×820 基准：两列并排（左输入 / 右输出），窄屏（<1024px）自动回退单列。
           断点用 lg(1024) 而非 xl(1280)：工具页预设宽度就是 1180，用 xl 会在默认尺寸下退化成单列。 */}

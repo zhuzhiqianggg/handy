@@ -8,44 +8,52 @@
  */
 @layer base {
   :root {
+    /* V24 视觉现代化：
+       - `--canvas` 是页面画布底色（浅灰），卡片 / 面板用白 `--background` 浮在它上面，
+         这才有了「层次」。改它之前要明白：改 `--background` 会连带把输入框、二维码画布
+         等一大片本该是白色的东西一起染灰，所以层次只能靠 canvas 这一层来做。 */
+    --canvas: 220 20% 97%;
+
     --background: 0 0% 100%;
-    --foreground: 222 20% 15%;
+    --foreground: 222 24% 12%;
 
     --card: 0 0% 100%;
-    --card-foreground: 222 20% 15%;
+    --card-foreground: 222 24% 12%;
 
     --popover: 0 0% 100%;
-    --popover-foreground: 222 20% 15%;
+    --popover-foreground: 222 24% 12%;
 
-    --primary: 205 90% 48%;
+    --primary: 221 83% 53%;
     --primary-foreground: 0 0% 100%;
 
-    --secondary: 210 20% 96%;
-    --secondary-foreground: 222 20% 20%;
+    --secondary: 220 16% 95%;
+    --secondary-foreground: 222 24% 18%;
 
-    --muted: 210 20% 96%;
-    --muted-foreground: 215 12% 45%;
+    --muted: 220 16% 95%;
+    --muted-foreground: 220 10% 46%;
 
-    --accent: 205 90% 96%;
-    --accent-foreground: 205 90% 32%;
+    --accent: 221 100% 96%;
+    --accent-foreground: 221 83% 42%;
 
     --destructive: 0 72% 51%;
     --destructive-foreground: 0 0% 100%;
 
     /* 低对比分割线，扁平优先 */
-    --border: 214 16% 90%;
-    --input: 214 16% 90%;
-    --ring: 205 90% 48%;
+    --border: 220 16% 91%;
+    --input: 220 16% 91%;
+    --ring: 221 83% 53%;
 
     /* 单一品牌强调色（与 primary 同源，供 brand-* 使用） */
-    --brand: 205 90% 48%;
+    --brand: 221 83% 53%;
     --brand-foreground: 0 0% 100%;
-    --brand-muted: 205 90% 96%;
+    --brand-muted: 221 100% 96%;
 
-    --radius: 0.625rem;
+    --radius: 0.75rem;
   }
 
   .dark {
+    --canvas: 222 24% 9%;
+
     --background: 222 20% 12%;
     --foreground: 210 20% 94%;
 
@@ -55,7 +63,7 @@
     --popover: 222 18% 15%;
     --popover-foreground: 210 20% 94%;
 
-    --primary: 205 85% 55%;
+    --primary: 221 85% 60%;
     --primary-foreground: 0 0% 100%;
 
     --secondary: 222 16% 22%;
@@ -64,19 +72,19 @@
     --muted: 222 16% 22%;
     --muted-foreground: 215 14% 65%;
 
-    --accent: 205 40% 24%;
-    --accent-foreground: 205 90% 88%;
+    --accent: 221 40% 26%;
+    --accent-foreground: 221 90% 88%;
 
     --destructive: 0 62% 50%;
     --destructive-foreground: 0 0% 100%;
 
     --border: 222 14% 26%;
     --input: 222 14% 26%;
-    --ring: 205 85% 55%;
+    --ring: 221 85% 60%;
 
-    --brand: 205 85% 55%;
+    --brand: 221 85% 60%;
     --brand-foreground: 0 0% 100%;
-    --brand-muted: 205 40% 24%;
+    --brand-muted: 221 40% 26%;
   }
 }
 
@@ -92,9 +100,13 @@
   }
 
   body {
-    @apply bg-background font-sans text-foreground antialiased;
+    @apply bg-canvas font-sans text-foreground antialiased;
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
+  }
+
+  ::selection {
+    background-color: hsl(var(--primary) / 0.18);
   }
 
   /* 桌面应用禁用整页文本选择拖拽感，输入区按需恢复 */

@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { usePersistedState } from '@/hooks/usePersistedState';
 import { Scale } from 'lucide-react';
 import { CommandShell } from '@/components/CommandShell';
 import { ResultBox } from '@/components/ResultBox';
@@ -89,9 +90,9 @@ function fromCelsius(c: number, unit: string): number {
  */
 export function UnitConverter({ initialInput = '' }: CommandProps): React.JSX.Element {
   const shell = useCommandShell(COMMAND_ID);
-  const [categoryId, setCategoryId] = React.useState<string>('length');
-  const [fromUnit, setFromUnit] = React.useState<string>('m');
-  const [value, setValue] = React.useState<string>(initialInput || '1');
+  const [categoryId, setCategoryId] = usePersistedState<string>(COMMAND_ID, 'categoryId', 'length');
+  const [fromUnit, setFromUnit] = usePersistedState<string>(COMMAND_ID, 'fromUnit', 'm');
+  const [value, setValue] = usePersistedState<string>(COMMAND_ID, 'value', initialInput || '1');
 
   const category = CATEGORIES[categoryId];
 

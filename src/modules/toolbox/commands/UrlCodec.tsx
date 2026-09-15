@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { usePersistedState } from '@/hooks/usePersistedState';
 import { ArrowLeftRight, Link2, Trash2 } from 'lucide-react';
 import { CommandShell } from '@/components/CommandShell';
 import { ResultBox } from '@/components/ResultBox';
@@ -87,9 +88,9 @@ export function UrlCodec({ initialInput = '' }: CommandProps): React.JSX.Element
   const shell = useCommandShell(COMMAND_ID);
   const history = useToolHistory<UrlHistoryPayload>({ toolId: COMMAND_ID, limit: 20 });
 
-  const [input, setInput] = React.useState<string>(initialInput);
-  const [mode, setMode] = React.useState<Mode>('decode');
-  const [method, setMethod] = React.useState<UrlMethod>('component');
+  const [input, setInput] = usePersistedState<string>(COMMAND_ID, 'input', initialInput);
+  const [mode, setMode] = usePersistedState<Mode>(COMMAND_ID, 'mode', 'decode');
+  const [method, setMethod] = usePersistedState<UrlMethod>(COMMAND_ID, 'method', 'component');
   /** 结构化字段的编辑草稿（null = 跟随输入解析结果）。 */
   const [draft, setDraft] = React.useState<UrlParts | null>(null);
 
@@ -239,6 +240,53 @@ export function UrlCodec({ initialInput = '' }: CommandProps): React.JSX.Element
         onClick: () => setMode((current) => (current === 'encode' ? 'decode' : 'encode')),
       }}
       shortcutHint="粘贴 URL 自动解析 · 结构化字段可编辑后重建（Esc 返回）"
+      samples={[
+        {
+          label: '带参数的 URL',
+          description: '自动拆出协议 / 主机 / 路径 / 参数，每段都能改了再重建',
+          apply: () => {
+            setMode('decode');
+            setMethod('component');
+            setInput('https://example.com/search?q=%E9%A1%BA%E6%89%8B&page=2#top');
+          },
+        },
+        {
+          label: '中文查询转义',
+          description: '把带空格的中文参数编码成 %XX，可直接贴进浏览器',
+          apply: () => {
+            setMode('encode');
+            setMethod('component');
+            setInput('https://example.com/search?q=顺手 效率工具');
+          },
+        },
+        {
+          label: '整条 URL 编码',
+          description: '标准编码：连 : / ? 一起转义，整串适合当参数值',
+          apply: () => {
+            setMode('encode');
+            setMethod('uri');
+            setInput('https://example.com/a b?c=1&d=2');
+          },
+        },
+        {
+          label: '表单风格（+ 号）',
+          description: 'application/x-www-form-urlencoded：空格编码成 +',
+          apply: () => {
+            setMode('encode');
+            setMethod('form');
+            setInput('name=顺手 效率工具&city=成都');
+          },
+        },
+        {
+          label: '解码散落转义串',
+          description: '从日志 / 报错里复制出来的一串 %XX → 中文',
+          apply: () => {
+            setMode('decode');
+            setMethod('component');
+            setInput('%E9%A1%BA%E6%89%8B%20Handy');
+          },
+        },
+      ]}
     >
       {/* 1180×820 基准：两列并排（左输入 / 右结果），窄屏（<1024px）自动回退单列。
           断点用 lg(1024) 而非 xl(1280)：工具页预设宽度就是 1180，用 xl 会在默认尺寸下退化成单列。 */}

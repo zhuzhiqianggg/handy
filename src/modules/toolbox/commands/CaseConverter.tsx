@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { usePersistedState } from '@/hooks/usePersistedState';
 import { CaseSensitive } from 'lucide-react';
 import { CommandShell } from '@/components/CommandShell';
 import { CopyButton } from '@/components/CopyButton';
@@ -61,7 +62,7 @@ function toCase(input: string, kind: CaseKind): string {
  */
 export function CaseConverter({ initialInput = '' }: CommandProps): React.JSX.Element {
   const shell = useCommandShell(COMMAND_ID);
-  const [input, setInput] = React.useState<string>(initialInput);
+  const [input, setInput] = usePersistedState<string>(COMMAND_ID, 'input', initialInput);
 
   const results = React.useMemo<Record<CaseKind, string>>(() => {
     const kinds: CaseKind[] = ['snake', 'camel', 'kebab', 'pascal', 'title', 'constant'];

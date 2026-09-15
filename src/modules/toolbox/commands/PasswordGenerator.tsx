@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { usePersistedState } from '@/hooks/usePersistedState';
 import { ChevronDown, ChevronRight, Download, Eye, EyeOff, RefreshCw, ShieldCheck } from 'lucide-react';
 import { CommandShell } from '@/components/CommandShell';
 import { CopyButton } from '@/components/CopyButton';
@@ -365,20 +366,20 @@ function dedupeChars(value: string): string {
 export function PasswordGenerator(_props: CommandProps): React.JSX.Element {
   const shell = useCommandShell(COMMAND_ID);
 
-  const [length, setLength] = React.useState<number>(16);
-  const [enabled, setEnabled] = React.useState<Record<SetId, boolean>>({
+  const [length, setLength] = usePersistedState<number>(COMMAND_ID, 'length', 16);
+  const [enabled, setEnabled] = usePersistedState<Record<SetId, boolean>>(COMMAND_ID, 'enabled', {
     upper: true,
     lower: true,
     digit: true,
     symbol: true,
   });
-  const [symbolGroups, setSymbolGroups] = React.useState<Record<string, boolean>>({});
-  const [excludeSimilar, setExcludeSimilar] = React.useState<boolean>(false);
-  const [excludeAmbiguous, setExcludeAmbiguous] = React.useState<boolean>(false);
-  const [customCharset, setCustomCharset] = React.useState<string>('');
-  const [count, setCount] = React.useState<number>(1);
-  const [edgeLetter, setEdgeLetter] = React.useState<boolean>(true);
-  const [maxSymbolPercent, setMaxSymbolPercent] = React.useState<number>(100);
+  const [symbolGroups, setSymbolGroups] = usePersistedState<Record<string, boolean>>(COMMAND_ID, 'symbolGroups', {});
+  const [excludeSimilar, setExcludeSimilar] = usePersistedState<boolean>(COMMAND_ID, 'excludeSimilar', false);
+  const [excludeAmbiguous, setExcludeAmbiguous] = usePersistedState<boolean>(COMMAND_ID, 'excludeAmbiguous', false);
+  const [customCharset, setCustomCharset] = usePersistedState<string>(COMMAND_ID, 'customCharset', '');
+  const [count, setCount] = usePersistedState<number>(COMMAND_ID, 'count', 1);
+  const [edgeLetter, setEdgeLetter] = usePersistedState<boolean>(COMMAND_ID, 'edgeLetter', true);
+  const [maxSymbolPercent, setMaxSymbolPercent] = usePersistedState<number>(COMMAND_ID, 'maxSymbolPercent', 100);
   const [advancedOpen, setAdvancedOpen] = React.useState<boolean>(false);
   const [visible, setVisible] = React.useState<boolean>(true);
   const [nonce, setNonce] = React.useState<number>(0);
@@ -542,6 +543,50 @@ export function PasswordGenerator(_props: CommandProps): React.JSX.Element {
       copyText={passwords.join('\n')}
       primaryAction={{ label: '重新生成', onClick: regenerate, disabled: pool.length === 0 }}
       shortcutHint="调整选项自动重新生成（Esc 返回）"
+      samples={[
+        {
+          label: '16 位通用',
+          description: '四类字符全开 + 排除易混淆的 il1Lo0O，日常账号够用',
+          apply: () => {
+            setLength(16);
+            setEnabled({ upper: true, lower: true, digit: true, symbol: true });
+            setExcludeSimilar(true);
+            setExcludeAmbiguous(false);
+            setCustomCharset('');
+            setCount(1);
+          },
+        },
+        {
+          label: '只字母数字',
+          description: '有些老系统不收符号 —— 32 位补足强度',
+          apply: () => {
+            setLength(32);
+            setEnabled({ upper: true, lower: true, digit: true, symbol: false });
+            setExcludeSimilar(false);
+            setCustomCharset('');
+          },
+        },
+        {
+          label: '强口令 40 位',
+          description: '本地 CSPRNG 生成，长度优先于复杂度',
+          apply: () => {
+            setLength(40);
+            setEnabled({ upper: true, lower: true, digit: true, symbol: true });
+            setExcludeSimilar(false);
+            setExcludeAmbiguous(false);
+            setCustomCharset('');
+          },
+        },
+        {
+          label: '批量 10 条',
+          description: '一次出 10 条，给一批新账号用',
+          apply: () => {
+            setCount(10);
+            setLength(16);
+            setEnabled({ upper: true, lower: true, digit: true, symbol: true });
+          },
+        },
+      ]}
     >
       {/* 1180×820 基准：两列并排（左选项 / 右结果），窄屏（<1024px）自动回退单列。
           断点用 lg(1024) 而非 xl(1280)：工具页预设宽度就是 1180，用 xl 会在默认尺寸下退化成单列。 */}

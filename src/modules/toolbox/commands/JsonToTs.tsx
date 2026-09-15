@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { usePersistedState } from '@/hooks/usePersistedState';
 import { FileCode } from 'lucide-react';
 import { CommandShell } from '@/components/CommandShell';
 import { ResultBox } from '@/components/ResultBox';
@@ -128,7 +129,7 @@ function convert(input: string): { ok: boolean; ts: string; error?: string } {
  */
 export function JsonToTs({ initialInput = '' }: CommandProps): React.JSX.Element {
   const shell = useCommandShell(COMMAND_ID);
-  const [input, setInput] = React.useState<string>(initialInput);
+  const [input, setInput] = usePersistedState<string>(COMMAND_ID, 'input', initialInput);
   const result = React.useMemo(() => convert(input), [input]);
 
   return (

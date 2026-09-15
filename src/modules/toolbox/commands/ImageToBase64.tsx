@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { usePersistedState } from '@/hooks/usePersistedState';
 import { FileImage, Upload } from 'lucide-react';
 import { CommandShell } from '@/components/CommandShell';
 import { ResultBox } from '@/components/ResultBox';
@@ -11,6 +12,7 @@ import { formatBytes } from '@/lib/utils';
 import type { CommandProps } from '@/core/types';
 
 const COMMAND_ID = 'image-to-base64';
+// tool-audit-ignore: samples —— 本工具无文本输入（文件选择 / 拖放），示例条无处可填
 
 /**
  * 图片转 Base64：选择本地图片文件，读取字节为 Base64（复用工具箱 base64Utils 的
@@ -25,7 +27,7 @@ export function ImageToBase64({ initialInput = '' }: CommandProps): React.JSX.El
   const [base64, setBase64] = React.useState<string>('');
   const [preview, setPreview] = React.useState<string>('');
   const [meta, setMeta] = React.useState<{ name: string; size: number; type: string } | null>(null);
-  const [dataUri, setDataUri] = React.useState<boolean>(false);
+  const [dataUri, setDataUri] = usePersistedState<boolean>(COMMAND_ID, 'dataUri', false);
   const fileRef = React.useRef<HTMLInputElement>(null);
 
   const handleFile = React.useCallback(async (file: File | undefined): Promise<void> => {

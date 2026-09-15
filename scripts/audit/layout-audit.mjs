@@ -81,7 +81,12 @@ const TOOLS = [
  * 模块注册表靠 `import.meta.glob` 收集各模块 `index.ts`，只有 notes / vault /
  * desktop-organizer 三个存在。传不存在的 id 会渲染空视图 —— 审计会得出「没问题」的假结论。
  */
-const MODULES = ['notes', 'vault', 'desktop-organizer'];
+const MODULES = [
+  'toolbox', // 工具箱首页（V24 重做为搜索+分类+收藏/最近，最该被盯着）
+  'notes',
+  'vault',
+  'desktop-organizer',
+];
 
 const args = process.argv.slice(2);
 const argOf = (name) => {
@@ -139,7 +144,29 @@ const MEASURE = `(()=>{
       bad.push({ t:el.tagName.toLowerCase(), c:String(el.className||'').slice(0,70), l:Math.round(r.left), r:Math.round(r.right) });
     }
   }
-  // 重叠：非 absolute/fixed、非祖孙关系的块级容器两两相交
+  // 「可见矩形」：把元素矩形依次与所有会裁剪它的祖先求交。
+  // V24 修正 —— 直接用 getBoundingClientRect 会产生大批假阳性：滚动容器里的长内容
+  // 即使被 overflow:auto 裁得看不见，它的 rect 依旧是完整高度，于是「看起来」
+  // 压住了下面的底部提示条 / 兄弟面板。裁过之后再判相交才是用户真正看到的东西。
+  // （注意：本字符串是模板字面量，注释里禁止出现反引号）
+  const visibleRect=(el)=>{
+    const r=el.getBoundingClientRect();
+    let box={left:r.left, top:r.top, right:r.right, bottom:r.bottom};
+    let p=el.parentElement;
+    while (p) {
+      const cs=getComputedStyle(p);
+      if (cs.overflowX!=='visible'||cs.overflowY!=='visible') {
+        const pr=p.getBoundingClientRect();
+        box.left=Math.max(box.left, pr.left);
+        box.top=Math.max(box.top, pr.top);
+        box.right=Math.min(box.right, pr.right);
+        box.bottom=Math.min(box.bottom, pr.bottom);
+      }
+      p=p.parentElement;
+    }
+    return box;
+  };
+  // 重叠：非 absolute/fixed、非祖孙关系的块级容器两两相交（按可见矩形）
   const boxes=[];
   for (const el of document.querySelectorAll('div,section,header,footer,aside,main,nav')) {
     const cs=getComputedStyle(el);
@@ -147,18 +174,21 @@ const MEASURE = `(()=>{
     if (cs.display==='none'||cs.visibility==='hidden') continue;
     const r=el.getBoundingClientRect();
     if (r.width<40||r.height<24) continue;
-    boxes.push(el);
+    const v=visibleRect(el);
+    // 被祖先裁到几乎不可见的元素不参与判定
+    if (v.right-v.left<8 || v.bottom-v.top<8) continue;
+    boxes.push({el, v});
   }
   const overlaps=[];
   for (let i=0;i<boxes.length && overlaps.length<8;i++) {
     for (let j=i+1;j<boxes.length && overlaps.length<8;j++) {
       const A=boxes[i], B=boxes[j];
-      if (A.contains(B)||B.contains(A)) continue;
-      const a=A.getBoundingClientRect(), b=B.getBoundingClientRect();
+      if (A.el.contains(B.el)||B.el.contains(A.el)) continue;
+      const a=A.v, b=B.v;
       const ox=Math.min(a.right,b.right)-Math.max(a.left,b.left);
       const oy=Math.min(a.bottom,b.bottom)-Math.max(a.top,b.top);
       if (ox>4 && oy>4) {
-        overlaps.push({ a:String(A.className||A.tagName).slice(0,64), b:String(B.className||B.tagName).slice(0,64), ox:Math.round(ox), oy:Math.round(oy) });
+        overlaps.push({ a:String(A.el.className||A.el.tagName).slice(0,64), b:String(B.el.className||B.el.tagName).slice(0,64), ox:Math.round(ox), oy:Math.round(oy) });
       }
     }
   }

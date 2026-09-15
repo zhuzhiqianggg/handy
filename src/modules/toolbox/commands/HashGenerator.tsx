@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { usePersistedState } from '@/hooks/usePersistedState';
 import {
   CheckCircle2,
   Download,
@@ -132,8 +133,8 @@ export function HashGenerator({ initialInput = '' }: CommandProps): React.JSX.El
   const shell = useCommandShell(COMMAND_ID);
   const history = useToolHistory<HashHistoryPayload>({ toolId: COMMAND_ID, limit: 20 });
 
-  const [tab, setTab] = React.useState<HashTab>('text');
-  const [text, setText] = React.useState<string>(initialInput);
+  const [tab, setTab] = usePersistedState<HashTab>(COMMAND_ID, 'tab', 'text');
+  const [text, setText] = usePersistedState<string>(COMMAND_ID, 'text', initialInput);
   const [digests, setDigests] = React.useState<Record<HashAlgo, string>>(emptyDigests);
   const [busy, setBusy] = React.useState<boolean>(false);
   const [error, setError] = React.useState<string | null>(null);
@@ -145,8 +146,8 @@ export function HashGenerator({ initialInput = '' }: CommandProps): React.JSX.El
   const fileInputRef = React.useRef<HTMLInputElement | null>(null);
 
   // 校验模式
-  const [expected, setExpected] = React.useState<string>('');
-  const [verifyAlgo, setVerifyAlgo] = React.useState<HashAlgo | 'auto'>('auto');
+  const [expected, setExpected] = usePersistedState<string>(COMMAND_ID, 'expected', '');
+  const [verifyAlgo, setVerifyAlgo] = usePersistedState<HashAlgo | 'auto'>(COMMAND_ID, 'verifyAlgo', 'auto');
 
   const subtleOk = React.useMemo<boolean>(hasSubtleCrypto, []);
   /** 计算竞态序号：快速输入时只认最后一次计算的结果。 */
@@ -353,6 +354,41 @@ export function HashGenerator({ initialInput = '' }: CommandProps): React.JSX.El
       onToggleFavorite={shell.onToggleFavorite}
       copyText={copyText}
       shortcutHint="文本实时计算 · 文件分片读取 · 校验模式自动匹配算法（Esc 返回）"
+      samples={[
+        {
+          label: '空串基准值',
+          description: 'SHA-256 的公开基准：e3b0c442… —— 拿它验证算法实现是否正确',
+          apply: () => {
+            setTab('text');
+            setText('');
+          },
+        },
+        {
+          label: '一句话五算法',
+          description: '同一段文本并排比较五种算法，注意长度差异',
+          apply: () => {
+            setTab('text');
+            setText('The quick brown fox jumps over the lazy dog');
+          },
+        },
+        {
+          label: '中文内容',
+          description: '摘要算的是 UTF-8 字节，不是字符 —— 换编码值就变',
+          apply: () => {
+            setTab('text');
+            setText('Handy 顺手 · 效率工具');
+          },
+        },
+        {
+          label: '校验比对',
+          description: '粘贴官方公布的摘要，自动识别算法并给出是否一致',
+          apply: () => {
+            setTab('verify');
+            setText('The quick brown fox jumps over the lazy dog');
+            setExpected('d7a8fbb307d7809469ca9abcb0082e4f8d5651e46d3cdb762d02d0bf37c9e592');
+          },
+        },
+      ]}
     >
       {/* 1180×820 基准：两列并排（左输入 / 右输出），窄屏（<1024px）自动回退单列。
           断点用 lg(1024) 而非 xl(1280)：工具页预设宽度就是 1180，用 xl 会在默认尺寸下退化成单列。 */}

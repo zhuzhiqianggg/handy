@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { usePersistedState } from '@/hooks/usePersistedState';
 import { Hourglass } from 'lucide-react';
 import { CommandShell } from '@/components/CommandShell';
 import { ResultBox } from '@/components/ResultBox';
@@ -112,9 +113,9 @@ function parseRelativeExpr(raw: string): Date | null {
  */
 export function RelativeTime({ initialInput = '' }: CommandProps): React.JSX.Element {
   const shell = useCommandShell(COMMAND_ID);
-  const [tab, setTab] = React.useState<string>('describe');
-  const [dateInput, setDateInput] = React.useState<string>(initialInput);
-  const [exprInput, setExprInput] = React.useState<string>('');
+  const [tab, setTab] = usePersistedState<string>(COMMAND_ID, 'tab', 'describe');
+  const [dateInput, setDateInput] = usePersistedState<string>(COMMAND_ID, 'dateInput', initialInput);
+  const [exprInput, setExprInput] = usePersistedState<string>(COMMAND_ID, 'exprInput', '');
 
   const describe = React.useMemo<string>(() => {
     if (!dateInput.trim()) {

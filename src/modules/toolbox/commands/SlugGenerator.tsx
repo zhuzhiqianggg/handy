@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { usePersistedState } from '@/hooks/usePersistedState';
 import { AtSign } from 'lucide-react';
 import { pinyin } from 'pinyin-pro';
 import { CommandShell } from '@/components/CommandShell';
@@ -43,11 +44,11 @@ function slugify(
  */
 export function SlugGenerator({ initialInput = '' }: CommandProps): React.JSX.Element {
   const shell = useCommandShell(COMMAND_ID);
-  const [input, setInput] = React.useState<string>(initialInput || 'Handy 顺手 · 效率工具');
-  const [separator, setSeparator] = React.useState<Separator>('-');
-  const [lowercase, setLowercase] = React.useState<boolean>(true);
-  const [romanize, setRomanize] = React.useState<boolean>(true);
-  const [maxLength, setMaxLength] = React.useState<number>(0);
+  const [input, setInput] = usePersistedState<string>(COMMAND_ID, 'input', initialInput || 'Handy 顺手 · 效率工具');
+  const [separator, setSeparator] = usePersistedState<Separator>(COMMAND_ID, 'separator', '-');
+  const [lowercase, setLowercase] = usePersistedState<boolean>(COMMAND_ID, 'lowercase', true);
+  const [romanize, setRomanize] = usePersistedState<boolean>(COMMAND_ID, 'romanize', true);
+  const [maxLength, setMaxLength] = usePersistedState<number>(COMMAND_ID, 'maxLength', 0);
 
   const output = React.useMemo(
     () => slugify(input, separator, lowercase, romanize, maxLength),

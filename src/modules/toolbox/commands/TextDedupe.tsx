@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { usePersistedState } from '@/hooks/usePersistedState';
 import { Filter } from 'lucide-react';
 import { CommandShell } from '@/components/CommandShell';
 import { ResultBox } from '@/components/ResultBox';
@@ -27,10 +28,10 @@ const SAMPLE_HOSTS = ['Node-A.Example.com', 'node-a.example.com', ' Node-B.examp
  */
 export function TextDedupe({ initialInput = '' }: CommandProps): React.JSX.Element {
   const shell = useCommandShell(COMMAND_ID);
-  const [input, setInput] = React.useState<string>(initialInput);
-  const [trim, setTrim] = React.useState<boolean>(true);
-  const [ignoreCase, setIgnoreCase] = React.useState<boolean>(false);
-  const [sort, setSort] = React.useState<boolean>(false);
+  const [input, setInput] = usePersistedState<string>(COMMAND_ID, 'input', initialInput);
+  const [trim, setTrim] = usePersistedState<boolean>(COMMAND_ID, 'trim', true);
+  const [ignoreCase, setIgnoreCase] = usePersistedState<boolean>(COMMAND_ID, 'ignoreCase', false);
+  const [sort, setSort] = usePersistedState<boolean>(COMMAND_ID, 'sort', false);
 
   const { output, removed } = React.useMemo(() => {
     const raw = input.split(/\r?\n/);

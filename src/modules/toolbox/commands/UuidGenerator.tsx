@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { usePersistedState } from '@/hooks/usePersistedState';
 import { Fingerprint } from 'lucide-react';
 import { CommandShell } from '@/components/CommandShell';
 import { Button } from '@/components/ui/button';
@@ -53,9 +54,9 @@ export function UuidGenerator({ initialInput = '' }: CommandProps): React.JSX.El
     return Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, 1000) : 5;
   }, [initialInput]);
 
-  const [count, setCount] = React.useState<number>(initialCount);
-  const [uppercase, setUppercase] = React.useState<boolean>(false);
-  const [dashes, setDashes] = React.useState<boolean>(true);
+  const [count, setCount] = usePersistedState<number>(COMMAND_ID, 'count', initialCount);
+  const [uppercase, setUppercase] = usePersistedState<boolean>(COMMAND_ID, 'uppercase', false);
+  const [dashes, setDashes] = usePersistedState<boolean>(COMMAND_ID, 'dashes', true);
   /**
    * 冷启动即出结果（V20）：打开工具先摆上 `initialCount` 条 UUID。
    * 空表 + 一个「生成」按钮等于白白让用户多点一次 —— 示例本身就是说明。

@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { usePersistedState } from '@/hooks/usePersistedState';
 import { Clock } from 'lucide-react';
 import { CommandShell } from '@/components/CommandShell';
 import { Button } from '@/components/ui/button';
@@ -378,15 +379,15 @@ function NowBanner({ timezone, fmt }: { timezone: string; fmt: string }): React.
  */
 export function TimestampConverter({ initialInput = '' }: CommandProps): React.JSX.Element {
   const shell = useCommandShell(COMMAND_ID);
-  const [mode, setMode] = React.useState<InputMode>('timestamp');
-  const [unit, setUnit] = React.useState<TsUnit>('seconds');
-  const [text, setText] = React.useState<string>(initialInput);
-  const [timezone, setTimezone] = React.useState<string>('Asia/Shanghai');
-  const [fmt, setFmt] = React.useState<string>(FORMATS[0] ?? 'YYYY-MM-DD HH:mm:ss');
+  const [mode, setMode] = usePersistedState<InputMode>(COMMAND_ID, 'mode', 'timestamp');
+  const [unit, setUnit] = usePersistedState<TsUnit>(COMMAND_ID, 'unit', 'seconds');
+  const [text, setText] = usePersistedState<string>(COMMAND_ID, 'text', initialInput);
+  const [timezone, setTimezone] = usePersistedState<string>(COMMAND_ID, 'timezone', 'Asia/Shanghai');
+  const [fmt, setFmt] = usePersistedState<string>(COMMAND_ID, 'fmt', FORMATS[0] ?? 'YYYY-MM-DD HH:mm:ss');
   /** 相对偏移：数值 + 单位 + 方向（原生支持 周 / 月 / 年，比手打 `+1h` 更好发现）。 */
-  const [offsetValue, setOffsetValue] = React.useState<string>('1');
-  const [offsetUnit, setOffsetUnit] = React.useState<string>('d');
-  const [offsetForward, setOffsetForward] = React.useState<boolean>(true);
+  const [offsetValue, setOffsetValue] = usePersistedState<string>(COMMAND_ID, 'offsetValue', '1');
+  const [offsetUnit, setOffsetUnit] = usePersistedState<string>(COMMAND_ID, 'offsetUnit', 'd');
+  const [offsetForward, setOffsetForward] = usePersistedState<boolean>(COMMAND_ID, 'offsetForward', true);
 
   const lines = React.useMemo<string[]>(
     () => text.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0),
@@ -651,6 +652,51 @@ export function TimestampConverter({ initialInput = '' }: CommandProps): React.J
       onToggleFavorite={shell.onToggleFavorite}
       copyText={copyTextValue}
       shortcutHint="支持多行批量；相对偏移如 +1h / -2d（也可用下方「应用偏移」）；「当前时间」按当前 Tab 填入"
+      samples={[
+        {
+          label: '当前秒级',
+          description: '填入此刻的秒级时间戳（10 位），再切「时间戳 → 日期」看换算',
+          apply: () => {
+            setMode('timestamp');
+            setUnit('seconds');
+            setText(String(Math.floor(Date.now() / 1000)));
+          },
+        },
+        {
+          label: '毫秒时间戳',
+          description: '13 位毫秒时间戳 —— 单位选错就差 1000 倍，这里直接对比',
+          apply: () => {
+            setMode('timestamp');
+            setUnit('milliseconds');
+            setText(String(Date.now()));
+          },
+        },
+        {
+          label: '带时区的 ISO',
+          description: 'ISO 8601 转时间戳：同一时刻在不同时区显示不同，但时间戳相同',
+          apply: () => {
+            setMode('datetime');
+            setText('2026-09-16T09:30:00+08:00');
+          },
+        },
+        {
+          label: '多行批量',
+          description: '时间戳与日期混排也能逐行识别，适合从日志里整段粘',
+          apply: () => {
+            setMode('timestamp');
+            setUnit('seconds');
+            setText('1700000000\n2026-01-01 00:00:00\n1767225600');
+          },
+        },
+        {
+          label: '相对偏移 +1M',
+          description: '相对语法：m 是分钟、M 是月、w 是周、y 是年',
+          apply: () => {
+            setMode('datetime');
+            setText('+1M');
+          },
+        },
+      ]}
     >
       {/* 顶部当前时间横幅（默认展示、每秒刷新、可复制） */}
       <NowBanner timezone={timezone} fmt={fmt} />
