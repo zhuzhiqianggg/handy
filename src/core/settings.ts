@@ -36,4 +36,6 @@ export const DEFAULT_SETTINGS: AppSettings = {
   modules: {},
   tier: 'free',
   onboarded: false,
+  // 默认不常驻：贴条属于「需要了才贴」的可选增强，由工作台里的「贴到桌面顶部」开启
+  barPinned: false,
 };

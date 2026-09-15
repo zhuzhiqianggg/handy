@@ -9,13 +9,14 @@ import {
   Trash2,
 } from 'lucide-react';
 import { useTodosStore } from '@/stores/useTodosStore';
+import { useNotesStore } from '@/stores/useNotesStore';
 import {
   TODO_PRIORITIES,
   type Todo,
   createNoteFromTodo,
   priorityStyle,
 } from '@/core/data/todosService';
-import { openNoteWindow } from '@/core/data/notesService';
+import { openModule } from '@/core/navigation';
 import { toast } from '@/components/ui/toast';
 import { cn } from '@/lib/utils';
 
@@ -24,7 +25,10 @@ import { cn } from '@/lib/utils';
  *
  * 双承载：主面板内页与命令视图（「待办清单」命令）复用。
  * 提供：新建（标题 + 优先级 + 到期 + 提醒）、完成切换、过滤、编辑、
- * 转为便签（互转）、打开来源便签、删除；空态 / 错误态齐备。
+ * 转为笔记（互转）、在工作台打开来源笔记、删除；空态 / 错误态齐备。
+ *
+ * V18 变更：原先「来源便签」会弹独立桌面悬浮窗，现改为切到工作台的笔记面板并定位到该条
+ * （见 `handleOpenSourceNote`）；`NoteWindow` / `NoteListView` 仍保留但无入口，属休眠代码。
  */
 
 /** 提醒偏移选项（相对到期时间；提前量超过 1 天的场景用自定义编辑覆盖） */
@@ -178,14 +182,20 @@ export default function TodoView(_props: TodoViewProps = {}): React.JSX.Element 
 
   const handleConvertToNote = (todo: Todo): void => {
     void createNoteFromTodo(todo)
-      .then(() => toast.success('已转为便签（可在便签列表查看）'))
-      .catch((err: unknown) => toast.error(`转为便签失败：${err instanceof Error ? err.message : String(err)}`));
+      .then(() => toast.success('已转为笔记（可在工作台的笔记面板查看）'))
+      .catch((err: unknown) => toast.error(`转为笔记失败：${err instanceof Error ? err.message : String(err)}`));
   };
 
+  /**
+   * 「打开来源笔记」：V18 起**不再弹桌面悬浮便签窗**，改为切到工作台的笔记面板并定位到该条
+   * （对应用户反馈「不要便签了 —— 便签该放进工作台，不要悬浮到桌面」）。
+   *
+   * 定位通过 `useNotesStore.requestFocus` 传递：待办与工作台同在主窗口、共用同一 store 实例，
+   * 所以不需要跨窗口 IPC 或额外路由参数。
+   */
   const handleOpenSourceNote = (noteId: string): void => {
-    void openNoteWindow(noteId).catch((err: unknown) =>
-      toast.error(`打开便签失败：${err instanceof Error ? err.message : String(err)}`),
-    );
+    useNotesStore.getState().requestFocus(noteId);
+    openModule('notes');
   };
 
   const handleDelete = (id: string): void => {
@@ -409,10 +419,11 @@ export default function TodoView(_props: TodoViewProps = {}): React.JSX.Element 
                       <button
                         type="button"
                         onClick={() => handleOpenSourceNote(todo.noteId!)}
+                        title="在工作台的笔记面板打开来源笔记"
                         className="inline-flex items-center gap-0.5 underline-offset-2 hover:underline"
                       >
                         <StickyNote className="h-3 w-3" />
-                        来源便签
+                        来源笔记
                       </button>
                     )}
                   </div>
@@ -421,7 +432,7 @@ export default function TodoView(_props: TodoViewProps = {}): React.JSX.Element 
                 <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition group-hover:opacity-100">
                   <button
                     type="button"
-                    title="转为便签"
+                    title="转为笔记（写入工作台笔记面板）"
                     onClick={() => handleConvertToNote(todo)}
                     className="rounded p-1 text-muted-foreground transition hover:bg-accent hover:text-foreground"
                   >

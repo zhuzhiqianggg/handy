@@ -53,13 +53,27 @@ export function GridManagerView(): React.JSX.Element {
   const addBox = useCallback((): void => {
     setBusy(true);
     void ipc
-      .gridBoxUpsert({ name: '新盒子', width: 320, height: 220 })
-      .then(() => refresh())
+      // 显式给出级联位置：多个新盒子依次错开，不会叠在同一处
+      .gridBoxUpsert({
+        name: `新盒子 ${boxes.length + 1}`,
+        posX: 60 + (boxes.length % 6) * 340,
+        posY: 60 + (boxes.length % 4) * 250,
+        width: 320,
+        height: 220,
+      })
+      .then(async () => {
+        await refresh();
+        // 新建后立刻把挂件窗显示出来：让「添加盒子」有立刻可见的结果
+        if (!overlayVisible) {
+          await ipc.gridOverlayShow();
+          setOverlayVisible(true);
+        }
+      })
       .catch((err: unknown) => {
         setError(err instanceof Error ? err.message : String(err));
       })
       .finally(() => setBusy(false));
-  }, [refresh]);
+  }, [refresh, boxes.length, overlayVisible]);
 
   const deleteBox = useCallback(
     (box: GridBox): void => {
@@ -139,10 +153,14 @@ export function GridManagerView(): React.JSX.Element {
         ) : boxes.length === 0 ? (
           <div className="py-14 text-center">
             <p className="text-sm font-medium text-foreground">还没有盒子</p>
-            <p className="mt-1 text-xs text-muted-foreground">
-              点击右上角「显示挂件」开启桌面挂件，再点挂件右下角「＋」添加盒子；
-              也可以直接在这里添加。
+            <p className="mx-auto mt-1 max-w-md text-xs leading-relaxed text-muted-foreground">
+              盒子是桌面上的半透明收纳格。点下面的按钮即可创建第一个盒子 ——
+              挂件窗会自动出现，把桌面文件拖进盒子就建立引用（文件本体不会被移动）。
             </p>
+            <Button className="mt-4" size="sm" onClick={addBox} disabled={busy}>
+              <Plus className="h-3.5 w-3.5" />
+              创建第一个盒子并显示挂件
+            </Button>
           </div>
         ) : (
           <>

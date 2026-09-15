@@ -168,4 +168,12 @@ export interface AppSettings {
   tier: Tier;
   /** 首次引导完成 */
   onboarded: boolean;
+  /**
+   * 工作台顶部贴条常驻开关（V18）。
+   *
+   * `true` = 启动时自动把「今日概览」贴条贴回桌面顶部并保持置顶；
+   * 贴条上的「×」与设置中心开关都写这个字段 —— 它是贴条显隐的**唯一事实源**，
+   * 实际窗口显隐由主窗口在 `main.tsx` 里订阅本字段驱动（见 `commands/bar.rs`）。
+   */
+  barPinned: boolean;
 }

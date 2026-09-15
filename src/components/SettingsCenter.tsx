@@ -478,6 +478,11 @@ export function SettingsCenter(): React.JSX.Element {
             field="closeToTray"
           />
           <BooleanRow title="自动检查更新" description="有新版本时提示" field="autoUpdate" />
+          <BooleanRow
+            title="桌面顶部常驻「今日概览」贴条"
+            description="在工作台/桌面顶部显示一条随时可见的待办速览，可直接勾掉完成项"
+            field="barPinned"
+          />
         </section>
 
         <Separator />

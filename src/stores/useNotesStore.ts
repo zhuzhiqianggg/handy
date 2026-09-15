@@ -29,6 +29,19 @@ interface NotesState {
   loaded: boolean;
   /** 首次加载失败信息（null = 正常） */
   error: string | null;
+  /**
+   * 外部请求聚焦的笔记 id（V18）。
+   *
+   * 用途：待办里「打开来源笔记」不再弹桌面悬浮便签窗，而是切到工作台的笔记面板
+   * 并定位到那一条。工作台与待办同在主窗口、共用本 store，所以用一次性请求传递即可；
+   * 消费方（`NotesPanel`）定位后必须调用 `clearFocusRequest` 清空，避免重复触发。
+   */
+  focusRequestId: string | null;
+
+  /** 请求把笔记面板定位到指定笔记（切视图由调用方负责） */
+  requestFocus: (id: string) => void;
+  /** 清空聚焦请求（消费后调用） */
+  clearFocusRequest: () => void;
 
   /** 启动装配：加载列表 + 订阅跨窗口变更（幂等，可重复调用） */
   hydrate: () => Promise<void>;
@@ -98,6 +111,11 @@ export const useNotesStore = create<NotesState>()((set, get) => ({
   notes: [],
   loaded: false,
   error: null,
+  focusRequestId: null,
+
+  requestFocus: (id) => set({ focusRequestId: id }),
+
+  clearFocusRequest: () => set({ focusRequestId: null }),
 
   hydrate: async () => {
     subscribeOnce();

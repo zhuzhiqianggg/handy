@@ -8,6 +8,8 @@ import {
   Pencil,
   Plus,
   Search,
+  ShieldCheck,
+  Sparkles,
   Trash2,
 } from 'lucide-react';
 import { copyText } from '@/lib/clipboard';
@@ -20,6 +22,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { cn } from '@/lib/utils';
+import { generateStrongPassword } from '@/lib/passwordGen';
 import {
   VAULT_CATEGORIES,
   categoryLabel,
@@ -352,6 +355,9 @@ export default function VaultView(): React.JSX.Element {
         </div>
       )}
 
+      {/* 安全说明：把「到底安全在哪」直接写清楚，而不是让用户猜 */}
+      <SecurityNotice />
+
       {/* 分组列表 */}
       <div className="min-h-0 flex-1 scrollbar-thin overflow-auto px-4 py-3">
         {items.length === 0 && !loadError && (
@@ -494,6 +500,45 @@ function VaultItemRow(props: VaultItemRowProps): React.JSX.Element {
           <Trash2 className="h-3.5 w-3.5" />
         </button>
       </div>
+    </div>
+  );
+}
+
+// —— 安全说明（解锁后常驻的一行提示 + 可展开明细） ——
+
+/**
+ * 密码存储器安全说明。
+ *
+ * 产品判断：一个存密码的工具，**必须把安全模型摊开讲清楚**——用户有权知道
+ * 「密钥怎么来的、存在哪、有没有联网、什么情况下会被人看到」。
+ * 含糊其辞的「已加密」既不能建立信任，也不能帮助用户规避风险。
+ */
+function SecurityNotice(): React.JSX.Element {
+  const [open, setOpen] = React.useState(false);
+  return (
+    <div className="mx-4 mt-2 rounded-md border border-emerald-200 bg-emerald-50/60 px-3 py-2">
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        className="flex w-full items-center gap-2 text-left"
+      >
+        <ShieldCheck className="h-3.5 w-3.5 shrink-0 text-emerald-700" />
+        <span className="min-w-0 flex-1 text-xs text-emerald-900">
+          本地加密：主密码经 Argon2id 派生密钥 → AES-256-GCM 逐字段加密；主密码与明文均不落盘、不联网。
+        </span>
+        <span className="shrink-0 text-[11px] text-emerald-700">{open ? '收起' : '详情'}</span>
+      </button>
+      {open ? (
+        <ul className="mt-2 flex flex-col gap-1 pl-5 text-[11px] leading-relaxed text-emerald-900/90">
+          <li>· 主密码经 Argon2id（内存 19 MiB / 迭代 2 轮）派生 32 字节密钥，密钥只存在于应用进程内存。</li>
+          <li>· 每个字段独立 AES-256-GCM 加密；每次写入生成新的 12 字节随机 nonce，绝不复用。</li>
+          <li>· 数据库里只有「盐 + 校验密文 + 各字段密文」，没有主密码、没有密钥、没有明文。</li>
+          <li>· 全程不访问网络：不存在云端同步，也就不存在服务端泄露路径。</li>
+          <li>· 遗忘主密码 = 数据永久不可解密（无后门、无找回），请自行妥善记忆。</li>
+          <li>· 已解锁状态下，能操作这台已登录电脑的人可直接查看条目 —— 离开时点「锁定」，闲置 5 分钟也会自动锁定。</li>
+          <li>· 复制机密 20 秒后自动清空剪贴板，避免留在系统剪贴板历史里。</li>
+        </ul>
+      ) : null}
     </div>
   );
 }
@@ -790,6 +835,17 @@ function VaultItemDialog(props: VaultItemDialogProps): React.JSX.Element {
             type="password"
             multiline={state.category !== 'login'}
             placeholder={state.category === 'note' ? '安全笔记正文' : undefined}
+            action={
+              state.category === 'login'
+                ? {
+                    // 与工具箱「密码生成器」同源的安全实现（crypto + 拒绝采样，
+                    // 四类字符各至少一次、首尾为字母）
+                    label: '生成密码',
+                    icon: <Sparkles className="h-3 w-3" />,
+                    onClick: () => onChange({ ...state, secret: generateStrongPassword(20) }),
+                  }
+                : undefined
+            }
           />
           {isLogin && (
             <LabeledInput
@@ -847,15 +903,33 @@ interface LabeledInputProps {
   type?: 'text' | 'password';
   multiline?: boolean;
   placeholder?: string;
+  /** 标签行右侧的小动作按钮（如「生成密码」） */
+  action?: { label: string; icon?: React.ReactNode; onClick: () => void };
 }
 
 function LabeledInput(props: LabeledInputProps): React.JSX.Element {
-  const { label, value, onChange, type = 'text', multiline = false, placeholder } = props;
+  const { label, value, onChange, type = 'text', multiline = false, placeholder, action } = props;
   const shared =
     'w-full rounded-md border bg-transparent px-2.5 py-1.5 text-sm text-foreground outline-none placeholder:text-muted-foreground focus:ring-1 focus:ring-brand';
   return (
     <label className="flex flex-col gap-1">
-      <span className="text-xs text-muted-foreground">{label}</span>
+      <span className="flex items-center gap-2">
+        <span className="text-xs text-muted-foreground">{label}</span>
+        {action ? (
+          <button
+            type="button"
+            onClick={(event) => {
+              // 阻止 label 默认行为，避免按钮点击把焦点甩回输入框
+              event.preventDefault();
+              action.onClick();
+            }}
+            className="ml-auto inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-brand transition hover:bg-brand-muted"
+          >
+            {action.icon}
+            {action.label}
+          </button>
+        ) : null}
+      </span>
       {multiline ? (
         <textarea
           value={value}

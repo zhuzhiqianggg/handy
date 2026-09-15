@@ -1,41 +1,47 @@
 import type { CommandMeta } from '@/core/types';
-import { createNote, openNoteWindow } from '@/core/data/notesService';
+import { createNote } from '@/core/data/notesService';
+import { openModule } from '@/core/navigation';
 
 /**
- * 便签·待办（M3）命令清单（V08 便签 / V09 待办）。
+ * 工作台（原「便签·待办」M3）命令清单。
  *
- * - 「新建便签」：动作式命令（`run`）——落库一张新便签后立即打开其独立窗口；
- * - 「便签列表」：视图式命令（`load`）——主面板内查看/置顶/删除/互转全部便签；
- * - 「待办清单」：视图式命令（`load`）——待办增删改、优先级/到期/提醒与互转。
+ * V18 调整（用户反馈「不要便签了，便签该放进工作台」）：
+ *   - **取消桌面悬浮便签窗入口**：`note-create` 改为「在工作台里新建笔记」——
+ *     落库后直接切到工作台面板（笔记列表 + 分屏 Markdown 编辑器），
+ *     不再创建一个独立悬浮窗口；
+ *   - `note-list` 同样收敛为「打开工作台」，避免出现第二套笔记界面；
+ *     （原全屏列表视图 `NoteListView` 与悬浮窗 `NoteWindow` 代码保留休眠，未删除）
+ *   - `todo-list` 保持原样：整屏待办管理（优先级 / 到期 / 提醒 / 互转）仍在这里。
  *
- * 新增命令：在本数组追加一条 `CommandMeta` 即完成，**框架零改动**（ARCHITECTURE §4.3）。
+ * 数据层不动：笔记仍是 `notes` 表，经 `useNotesStore` 读写，历史数据零迁移。
  */
 export const notesCommands: CommandMeta[] = [
   {
     id: 'note-create',
     moduleId: 'notes',
-    name: '新建便签',
-    description: '创建一张桌面便签，并打开便签窗口',
+    name: '新建笔记',
+    description: '在工作台里新建一条 Markdown 笔记（边写边渲染）',
     icon: 'StickyNote',
     aliases: ['new note', 'add note'],
-    keywords: ['新建', '便签', '笔记', '便笺', '便条', 'xj', 'xinjian', 'bq', 'bianqian'],
+    keywords: ['新建', '笔记', '便签', '记事', 'xj', 'xinjian', 'bj', 'biji'],
     tier: 'free',
     run: async () => {
-      const note = await createNote();
-      await openNoteWindow(note.id);
+      await createNote({ title: '新笔记', body: '' });
+      openModule('notes');
     },
   },
   {
     id: 'note-list',
     moduleId: 'notes',
-    name: '便签列表',
-    description: '查看、置顶与管理全部桌面便签',
+    name: '笔记',
+    description: '打开工作台内的笔记面板（Markdown 分屏编辑）',
     icon: 'StickyNote',
     aliases: ['notes'],
-    keywords: ['便签', '列表', '管理', '笔记', 'notes', 'bq', 'bianqian', 'lb'],
-    layout: 'full',
+    keywords: ['笔记', '便签', '列表', '管理', 'notes', 'bj', 'biji', 'lb'],
     tier: 'free',
-    load: () => import('../NoteListView'),
+    run: () => {
+      openModule('notes');
+    },
   },
   {
     id: 'todo-list',

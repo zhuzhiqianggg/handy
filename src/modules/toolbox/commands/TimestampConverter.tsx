@@ -14,8 +14,23 @@ type InputMode = 'timestamp' | 'datetime';
 /** 时间戳单位。 */
 type TsUnit = 'seconds' | 'milliseconds';
 
-/** 相对偏移语法：`+1d` / `-2h` / `+30m` / `+10s` / `+500ms`（基于当前时刻）。 */
-const RELATIVE_RE = /^[+-]\d+(ms|s|m|h|d)$/;
+/**
+ * 相对偏移语法：`+1d` / `-2h` / `+30m` / `+10s` / `+500ms` / `+2w` / `-1M` / `+1y`。
+ * 注意大小写：`m` = 分钟、`M` = 月；`w` = 周、`y` = 年。
+ */
+const RELATIVE_RE = /^[+-]\d+(ms|s|m|h|d|w|M|y)$/;
+
+/** 偏移单位（界面选择器与提示共用）。 */
+const OFFSET_UNITS: ReadonlyArray<{ id: string; label: string }> = [
+  { id: 'ms', label: '毫秒' },
+  { id: 's', label: '秒' },
+  { id: 'm', label: '分钟' },
+  { id: 'h', label: '小时' },
+  { id: 'd', label: '天' },
+  { id: 'w', label: '周' },
+  { id: 'M', label: '月' },
+  { id: 'y', label: '年' },
+];
 
 interface BatchRow {
   input: string;
@@ -92,22 +107,129 @@ function weekdayInZone(ms: number, timeZone: string): string {
   }
 }
 
-/** 解析相对偏移（如 `-1d`）为 Date。 */
-function parseRelative(token: string): Date {
+/** 拆分偏移标记（`ms` 先于 `m` 匹配，`M` = 月不与会话分钟混淆）。 */
+function splitOffset(token: string): { sign: number; value: number; unitTag: string } {
   const sign = token[0] === '-' ? -1 : 1;
-  const unitTag = token.match(/(ms|s|m|h|d)$/)?.[0] ?? 's';
-  const value = Number.parseInt(token.slice(1).replace(/(ms|s|m|h|d)$/, ''), 10);
-  const delta =
-    unitTag === 'ms'
-      ? value
-      : unitTag === 's'
-        ? value * 1000
-        : unitTag === 'm'
-          ? value * 60_000
-          : unitTag === 'h'
-            ? value * 3_600_000
-            : value * 86_400_000;
-  return new Date(Date.now() + sign * delta);
+  const unitTag = token.match(/(ms|s|m|h|d|w|M|y)$/)?.[0] ?? 's';
+  const parsed = Number.parseInt(token.slice(1).replace(/(ms|s|m|h|d|w|M|y)$/, ''), 10);
+  return { sign, value: Number.isNaN(parsed) ? 0 : parsed, unitTag };
+}
+
+/**
+ * 在基准时刻上叠加偏移。
+ *
+ * 定长单位（ms / s / m / h / d / w）走毫秒加减；日历单位（M 月 / y 年）走
+ * `setMonth` / `setFullYear`，对齐「自然月 / 自然年」直觉（各月天数不同也不漂移）。
+ */
+function addOffset(baseMs: number, signedValue: number, unitTag: string): number {
+  switch (unitTag) {
+    case 'ms':
+      return baseMs + signedValue;
+    case 's':
+      return baseMs + signedValue * 1000;
+    case 'm':
+      return baseMs + signedValue * 60_000;
+    case 'h':
+      return baseMs + signedValue * 3_600_000;
+    case 'd':
+      return baseMs + signedValue * 86_400_000;
+    case 'w':
+      return baseMs + signedValue * 7 * 86_400_000;
+    case 'M': {
+      const d = new Date(baseMs);
+      d.setMonth(d.getMonth() + signedValue);
+      return d.getTime();
+    }
+    case 'y': {
+      const d = new Date(baseMs);
+      d.setFullYear(d.getFullYear() + signedValue);
+      return d.getTime();
+    }
+    default:
+      return baseMs;
+  }
+}
+
+/** 解析相对偏移（如 `-1d`）为「相对当前时刻」的毫秒值。 */
+function parseRelative(token: string): number {
+  const { sign, value, unitTag } = splitOffset(token);
+  return addOffset(Date.now(), sign * value, unitTag);
+}
+
+/** 该时刻指定时区相对 UTC 的偏移（毫秒）；把「时区本地时间当 UTC 读」反推。 */
+function zoneOffsetMs(ms: number, timeZone: string): number {
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    }).formatToParts(new Date(ms));
+    const pick = (type: string): number =>
+      Number(parts.find((part) => part.type === type)?.value ?? '0');
+    return (
+      Date.UTC(
+        pick('year'),
+        pick('month') - 1,
+        pick('day'),
+        pick('hour') % 24,
+        pick('minute'),
+        pick('second'),
+      ) - ms
+    );
+  } catch {
+    return 0;
+  }
+}
+
+/** 指定时区「当天零点」的毫秒值（夏令时切换日做一次偏移校正）。 */
+function startOfDayInZone(ms: number, timeZone: string): number {
+  const offset = zoneOffsetMs(ms, timeZone);
+  let start = Math.floor((ms + offset) / 86_400_000) * 86_400_000 - offset;
+  const refined = zoneOffsetMs(start, timeZone);
+  if (refined !== offset) {
+    start = Math.floor((ms + refined) / 86_400_000) * 86_400_000 - refined;
+  }
+  return start;
+}
+
+/** 指定时区的自然日索引（1970-01-01 起的天数），用于周 / 月 / 年推算。 */
+function dayIndexInZone(ms: number, timeZone: string): number {
+  return Math.floor((ms + zoneOffsetMs(ms, timeZone)) / 86_400_000);
+}
+
+/** 由「时区本地日索引」反解该日零点毫秒值。 */
+function msFromDayIndex(dayIndex: number, timeZone: string): number {
+  const guess = dayIndex * 86_400_000;
+  return guess - zoneOffsetMs(guess, timeZone);
+}
+
+/** 时区本地的年 / 月 / 日。 */
+function datePartsInZone(ms: number, timeZone: string): { year: number; month: number; day: number } {
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(new Date(ms));
+    const pick = (type: string): number =>
+      Number(parts.find((part) => part.type === type)?.value ?? '0');
+    return { year: pick('year'), month: pick('month'), day: pick('day') };
+  } catch {
+    const d = new Date(ms);
+    return { year: d.getFullYear(), month: d.getMonth() + 1, day: d.getDate() };
+  }
+}
+
+/** 一周中的第几天（0 = 周日），按指定时区的本地日期计算。 */
+function weekdayIndexInZone(ms: number, timeZone: string): number {
+  const offset = zoneOffsetMs(ms, timeZone);
+  return new Date(Math.floor((ms + offset) / 86_400_000) * 86_400_000).getUTCDay();
 }
 
 /**
@@ -123,7 +245,7 @@ function parseLine(raw: string, mode: InputMode, unit: TsUnit): number | null {
   }
   if (mode === 'timestamp') {
     if (RELATIVE_RE.test(token)) {
-      return parseRelative(token).getTime();
+      return parseRelative(token);
     }
     if (/^\d{10}$/.test(token)) {
       return Number(token) * 1000;
@@ -261,8 +383,10 @@ export function TimestampConverter({ initialInput = '' }: CommandProps): React.J
   const [text, setText] = React.useState<string>(initialInput);
   const [timezone, setTimezone] = React.useState<string>('Asia/Shanghai');
   const [fmt, setFmt] = React.useState<string>(FORMATS[0] ?? 'YYYY-MM-DD HH:mm:ss');
-  /** 相对偏移控件输入（如 +1h / -2d / +30m / +500ms）。 */
-  const [offsetInput, setOffsetInput] = React.useState<string>('');
+  /** 相对偏移：数值 + 单位 + 方向（原生支持 周 / 月 / 年，比手打 `+1h` 更好发现）。 */
+  const [offsetValue, setOffsetValue] = React.useState<string>('1');
+  const [offsetUnit, setOffsetUnit] = React.useState<string>('d');
+  const [offsetForward, setOffsetForward] = React.useState<boolean>(true);
 
   const lines = React.useMemo<string[]>(
     () => text.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0),
@@ -321,83 +445,121 @@ export function TimestampConverter({ initialInput = '' }: CommandProps): React.J
     };
   }, []);
 
-  const fillNow = React.useCallback((): void => {
-    if (mode === 'datetime') {
-      const formatted = formatInZone(Date.now(), timezone, 'YYYY-MM-DD HH:mm:ss');
-      if (formatted !== null) {
-        // 尊重当前 Tab：日期模式下填入当前日期字符串，不切走模式
+  // 快捷时间点统一走 fillMoment（尊重当前 Tab），不再单独维护「当前时间」填充逻辑。
+
+  /**
+   * 按**当前 Tab** 写入一个时刻 —— 绝不擅自切换 Tab。
+   * 时间戳 Tab 填 10 位秒，日期 Tab 填 `YYYY-MM-DD HH:mm:ss`。
+   */
+  const fillMoment = React.useCallback(
+    (ms: number): void => {
+      if (mode === 'datetime') {
+        const formatted = formatInZone(ms, timezone, 'YYYY-MM-DD HH:mm:ss');
+        if (formatted === null) {
+          toast.error(`时区「${timezone}」无效，无法格式化`);
+          return;
+        }
         setText(formatted);
         return;
       }
-      // 时区无效时退回 timestamp 填充
-    }
-    setMode('timestamp');
-    setUnit('seconds');
-    setText(String(Math.floor(Date.now() / 1000)));
-  }, [mode, timezone]);
+      setText(String(Math.floor(ms / 1000)));
+    },
+    [mode, timezone],
+  );
 
-  /** 应用相对偏移：从当前结果（或批量首行/当前时刻）出发，两种模式均可使用。 */
+  /**
+   * 应用相对偏移：基准取「当前解析结果 → 批量首行 → 此刻」，同样尊重当前 Tab。
+   * 单位覆盖 毫秒 / 秒 / 分钟 / 小时 / 天 / 周 / 月 / 年。
+   */
   const applyOffset = React.useCallback((): void => {
-    const token = offsetInput.trim();
-    if (!RELATIVE_RE.test(token)) {
-      toast.warning('偏移格式应为 +1h / -2d / +30m / +10s / +500ms');
+    const magnitude = Number(offsetValue);
+    if (!Number.isFinite(magnitude) || magnitude === 0) {
+      toast.warning('请输入非零的偏移数值（可为负数）');
       return;
     }
-    const sign = token[0] === '-' ? -1 : 1;
-    const unitTag = token.match(/(ms|s|m|h|d)$/)?.[0] ?? 's';
-    const value = Number.parseInt(token.slice(1).replace(/(ms|s|m|h|d)$/, ''), 10);
-    const delta =
-      unitTag === 'ms'
-        ? value
-        : unitTag === 's'
-          ? value * 1000
-          : unitTag === 'm'
-            ? value * 60_000
-            : unitTag === 'h'
-              ? value * 3_600_000
-              : value * 86_400_000;
     const base =
       single?.ms ??
       (batch && batch[0]?.valid ? parseLine(batch[0].input, mode, unit) : null) ??
       Date.now();
-    const newMs = base + sign * delta;
+    const newMs = addOffset(base, (offsetForward ? 1 : -1) * magnitude, offsetUnit);
     if (mode === 'datetime') {
-      setText(formatInZone(newMs, timezone, 'YYYY-MM-DD HH:mm:ss') ?? '');
-    } else {
-      setMode('timestamp');
-      setUnit('seconds');
-      setText(String(Math.floor(newMs / 1000)));
+      const formatted = formatInZone(newMs, timezone, 'YYYY-MM-DD HH:mm:ss');
+      if (formatted === null) {
+        toast.error(`时区「${timezone}」无效，无法格式化`);
+        return;
+      }
+      setText(formatted);
+      return;
     }
-  }, [offsetInput, single, batch, mode, unit, timezone]);
+    setText(String(Math.floor(newMs / 1000)));
+  }, [offsetValue, offsetForward, offsetUnit, single, batch, mode, unit, timezone]);
 
-  const fillTodayStart = React.useCallback((): void => {
-    try {
-      const datePart = new Intl.DateTimeFormat('en-CA', {
-        timeZone: timezone,
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-      }).format(new Date());
-      setMode('datetime');
-      setText(`${datePart} 00:00:00`);
-    } catch {
-      toast.error('当天零点计算失败');
-    }
-  }, [timezone]);
-
-  const fillTodayEnd = React.useCallback((): void => {
-    try {
-      const datePart = new Intl.DateTimeFormat('en-CA', {
-        timeZone: timezone,
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-      }).format(new Date());
-      setMode('datetime');
-      setText(`${datePart} 23:59:59`);
-    } catch {
-      toast.error('当天结束计算失败');
-    }
+  /**
+   * 快捷时间点（全部按**所选时区的本地日历**计算）。
+   *
+   * 关键行为修正：点击后**只填充输入框，绝不改当前 Tab**。此前在「时间戳」Tab
+   * 点「当天零点」会被强行切到「日期」Tab，正是 `setMode('datetime')` 造成的。
+   */
+  const quickMoments = React.useMemo<
+    ReadonlyArray<{ id: string; label: string; resolve: () => number }>
+  >(() => {
+    const DAY = 86_400_000;
+    /** 该时区今天零点 */
+    const todayStart = (): number => startOfDayInZone(Date.now(), timezone);
+    /** 本地年月日 */
+    const parts = (): { year: number; month: number; day: number } =>
+      datePartsInZone(Date.now(), timezone);
+    return [
+      { id: 'now', label: '此刻', resolve: () => Date.now() },
+      { id: 'today-start', label: '今天 00:00', resolve: todayStart },
+      { id: 'today-end', label: '今天 23:59:59', resolve: () => todayStart() + DAY - 1000 },
+      { id: 'yesterday', label: '昨天 00:00', resolve: () => todayStart() - DAY },
+      { id: 'tomorrow', label: '明天 00:00', resolve: () => todayStart() + DAY },
+      {
+        id: 'week-start',
+        label: '本周一 00:00',
+        resolve: () => {
+          const weekday = weekdayIndexInZone(Date.now(), timezone);
+          return todayStart() - ((weekday + 6) % 7) * DAY;
+        },
+      },
+      {
+        id: 'week-end',
+        label: '本周日 23:59:59',
+        resolve: () => {
+          const weekday = weekdayIndexInZone(Date.now(), timezone);
+          return todayStart() + ((7 - weekday) % 7) * DAY + DAY - 1000;
+        },
+      },
+      {
+        id: 'month-start',
+        label: '本月 1 号 00:00',
+        resolve: () => {
+          const { day } = parts();
+          return msFromDayIndex(dayIndexInZone(Date.now(), timezone) - (day - 1), timezone);
+        },
+      },
+      {
+        id: 'next-month-start',
+        label: '下月 1 号 00:00',
+        resolve: () => {
+          const { year, month, day } = parts();
+          const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+          const remain = daysInMonth - day;
+          return msFromDayIndex(dayIndexInZone(Date.now(), timezone) + remain, timezone);
+        },
+      },
+      {
+        id: 'year-start',
+        label: '今年 1 月 1 日',
+        resolve: () => {
+          const { year, month, day } = parts();
+          const localDayUtc = Date.UTC(year, month - 1, day);
+          const dayOfYear = Math.round((localDayUtc - Date.UTC(year, 0, 1)) / DAY);
+          return msFromDayIndex(dayIndexInZone(Date.now(), timezone) - dayOfYear, timezone);
+        },
+      },
+    ];
   }, [timezone]);
 
   const copyBatchCsv = React.useCallback(async (): Promise<void> => {
@@ -428,13 +590,52 @@ export function TimestampConverter({ initialInput = '' }: CommandProps): React.J
 
   const copyTextValue = isBatch ? (batch ? rowsToCsv(batch) : '') : (single?.report ?? '');
 
+  /**
+   * 切换 Tab 时**联动转换输入内容**（时间戳 ⇄ 日期）。
+   *
+   * 逐行转换，批量场景同样生效；无法解析的行原样保留，绝不吞掉用户输入。
+   * 这样「从日期切到时间戳 Tab 时输入框还留着日期字符串」的错位感就消失了。
+   */
+  const switchMode = React.useCallback(
+    (next: InputMode): void => {
+      if (next === mode) {
+        return;
+      }
+      const source = mode;
+      const converted = text
+        .split(/\r?\n/)
+        .map((line) => {
+          const token = line.trim();
+          if (token.length === 0) {
+            return line;
+          }
+          const ms = parseLine(token, source, unit);
+          if (ms === null) {
+            return line;
+          }
+          if (next === 'datetime') {
+            return formatInZone(ms, timezone, 'YYYY-MM-DD HH:mm:ss') ?? line;
+          }
+          return String(Math.floor(ms / 1000));
+        })
+        .join('\n');
+      setMode(next);
+      if (next === 'timestamp') {
+        // 转换结果统一为 10 位秒，单位选择器同步归位
+        setUnit('seconds');
+      }
+      setText(converted);
+    },
+    [mode, text, unit, timezone],
+  );
+
   const modeButton = (value: InputMode, label: string): React.JSX.Element => (
     <Button
       key={value}
       size="sm"
       variant={mode === value ? 'default' : 'ghost'}
       className="h-7 px-2.5 text-xs"
-      onClick={() => setMode(value)}
+      onClick={() => switchMode(value)}
     >
       {label}
     </Button>
@@ -457,10 +658,13 @@ export function TimestampConverter({ initialInput = '' }: CommandProps): React.J
       {/* V15：两列基准（≥1024px 并排）：左输入 / 选项，右结果，操作条通栏 */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <div className="flex min-w-0 flex-col gap-3">
-        {/* 模式切换 */}
-        <div className="flex items-center gap-1.5">
+        {/* 模式切换：切换时自动把输入内容换算到另一种表示 */}
+        <div className="flex flex-wrap items-center gap-1.5">
           {modeButton('timestamp', '时间戳 → 日期')}
           {modeButton('datetime', '日期 → 时间戳')}
+          <span className="ml-1 text-[11px] text-muted-foreground">
+            切换时输入框内容自动换算
+          </span>
         </div>
 
         {/* 输入区 */}
@@ -476,7 +680,7 @@ export function TimestampConverter({ initialInput = '' }: CommandProps): React.J
             value={text}
             placeholder={
               mode === 'timestamp'
-                ? '1704067200 / 1704067200000 / +1d / -2h\n（多行批量）'
+                ? '1704067200 / 1704067200000 / +1d / -2w / +1M / -1y\n（多行批量）'
                 : '2024-01-01 08:00:00 / 2024-01-01T00:00:00Z\n（多行批量）'
             }
             onChange={(event) => setText(event.target.value)}
@@ -600,40 +804,77 @@ export function TimestampConverter({ initialInput = '' }: CommandProps): React.J
         )}
         </div>
 
-        {/* 快捷操作（通栏） */}
-        <div className="flex flex-wrap items-center gap-2 lg:col-span-2">
-          <Button size="sm" onClick={fillNow}>
-            当前时间
-          </Button>
-          <Button size="sm" variant="secondary" onClick={fillTodayStart}>
-            当天零点
-          </Button>
-          <Button size="sm" variant="secondary" onClick={fillTodayEnd}>
-            当天结束
-          </Button>
-          {/* 相对偏移控件：独立、可发现的「应用偏移」输入 */}
-          <input
-            className="h-7 w-32 rounded-md border border-input bg-background px-2 font-mono text-xs text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-            placeholder="+1h / -2d / +30m / +500ms"
-            value={offsetInput}
-            onChange={(event) => setOffsetInput(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') {
-                applyOffset();
-              }
-            }}
-          />
-          <Button size="sm" variant="secondary" onClick={applyOffset}>
-            应用偏移
-          </Button>
-          <Button
-            size="sm"
-            variant="ghost"
-            className="ml-auto text-destructive"
-            onClick={() => setText('')}
-          >
-            清空
-          </Button>
+        {/* 快捷时间点 + 相对偏移（通栏）：一律只填输入框，绝不切换 Tab */}
+        <div className="flex flex-col gap-2 rounded-lg border border-border bg-muted/30 p-3 lg:col-span-2">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="mr-1 text-xs text-muted-foreground">快捷时间点</span>
+            {quickMoments.map((item) => (
+              <Button
+                key={item.id}
+                size="sm"
+                variant="secondary"
+                className="h-7 px-2.5 text-xs"
+                onClick={() => fillMoment(item.resolve())}
+              >
+                {item.label}
+              </Button>
+            ))}
+            <Button
+              size="sm"
+              variant="ghost"
+              className="ml-auto h-7 px-2.5 text-xs text-destructive"
+              onClick={() => setText('')}
+            >
+              清空
+            </Button>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="mr-1 text-xs text-muted-foreground">相对偏移</span>
+            <select
+              className="h-7 rounded-md border border-input bg-background px-2 text-xs text-foreground"
+              value={offsetForward ? 'forward' : 'backward'}
+              onChange={(event) => setOffsetForward(event.target.value === 'forward')}
+              aria-label="偏移方向"
+            >
+              <option value="forward">之后 +</option>
+              <option value="backward">之前 −</option>
+            </select>
+            <input
+              className="h-7 w-20 rounded-md border border-input bg-background px-2 font-mono text-xs text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              value={offsetValue}
+              onChange={(event) => setOffsetValue(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  applyOffset();
+                }
+              }}
+              aria-label="偏移数值"
+            />
+            <select
+              className="h-7 rounded-md border border-input bg-background px-2 text-xs text-foreground"
+              value={offsetUnit}
+              onChange={(event) => setOffsetUnit(event.target.value)}
+              aria-label="偏移单位"
+            >
+              {OFFSET_UNITS.map((unit) => (
+                <option key={unit.id} value={unit.id}>
+                  {unit.label}
+                </option>
+              ))}
+            </select>
+            <Button
+              size="sm"
+              variant="secondary"
+              className="h-7 px-2.5 text-xs"
+              onClick={applyOffset}
+            >
+              应用偏移
+            </Button>
+            <span className="text-[11px] text-muted-foreground">
+              在当前 Tab 内计算；月 / 年按自然月、自然年叠加
+            </span>
+          </div>
         </div>
       </div>
     </CommandShell>

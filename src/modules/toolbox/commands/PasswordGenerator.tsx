@@ -178,22 +178,66 @@ function hasSequentialOrRepeated(password: string): boolean {
 interface GenerateOptions {
   /** 最大符号占比（0–1） */
   maxSymbolRatio: number;
-  /** 首字符必须为字母 */
-  firstLetter: boolean;
-  /** 尾字符必须为字母 */
-  lastLetter: boolean;
+  /**
+   * 位置优化（推荐开启）：首尾收敛为字母，把符号与数字集中到中段。
+   *
+   * 好处：手动输入时不会在首尾漏掉符号；复制粘贴、命令行粘贴、
+   * 表格/表单填写时首尾符号更不容易被吞掉或与相邻内容粘连。
+   */
+  edgeLetter: boolean;
+}
+
+/** Fisher-Yates 原地洗牌（随机源为密码学安全的 `randomInt`）。 */
+function shuffleInPlace(items: string[]): void {
+  for (let i = items.length - 1; i > 0; i -= 1) {
+    const j = randomInt(i + 1);
+    const a = items[i];
+    const b = items[j];
+    if (a === undefined || b === undefined) {
+      continue;
+    }
+    items[i] = b;
+    items[j] = a;
+  }
+}
+
+/**
+ * 把第 `pos` 位换成满足 `accept` 的字符（与数组内任一合格位互换，保持字符组成不变）。
+ * 池中不存在合格字符时返回 `false`（由调用方的界面警告兜底，不抛错、不死循环）。
+ */
+function enforceAt(items: string[], pos: number, accept: (char: string) => boolean): boolean {
+  const current = items[pos];
+  if (current === undefined) {
+    return true;
+  }
+  if (accept(current)) {
+    return true;
+  }
+  for (let i = 0; i < items.length; i += 1) {
+    const candidate = items[i];
+    if (i !== pos && candidate !== undefined && accept(candidate)) {
+      items[pos] = candidate;
+      items[i] = current;
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
  * 生成单条密码。
  *
- * 逐位挑选：需要字母的位只从字母池取；符号数达到上限后只从非符号池取；
- * 池为空时回退到全集（并给出界面警告），保证永不死循环。
+ * 生成顺序（V18 重写，解决「勾了数字却一个数字都没有」「符号位置不可控」两个痛点）：
+ *   1. **各字符类先各占一位**：每个勾选的分类（大写 / 小写 / 数字 / 符号）先强制出现一次，
+ *      满足「必须同时包含数字与符号」类站点校验；
+ *   2. 余位从整池随机填充，受最大符号占比约束（非符号池为空时自动放宽，永不死循环）；
+ *   3. Fisher-Yates 洗牌，打散「先插入的分类总排在前几位」的痕迹；
+ *   4. **位置优化**：首尾收敛为字母，符号与数字自然集中在中段。
  */
 function generateOne(
   length: number,
   pool: string,
-  letters: string,
+  requiredSets: readonly string[],
   nonSymbols: string,
   options: GenerateOptions,
 ): string {
@@ -203,20 +247,39 @@ function generateOne(
   const maxSymbols = Math.floor(length * options.maxSymbolRatio);
   const out: string[] = [];
   let symbolCount = 0;
-  for (let i = 0; i < length; i += 1) {
-    const needLetter = (i === 0 && options.firstLetter) || (i === length - 1 && options.lastLetter);
-    let candidates = pool;
-    if (needLetter && letters.length > 0) {
-      candidates = letters;
-    } else if (!needLetter && symbolCount >= maxSymbols && nonSymbols.length > 0) {
-      candidates = nonSymbols;
+
+  // 1) 每个启用的字符类各先落一位
+  for (const set of requiredSets) {
+    if (out.length >= length) {
+      break;
     }
+    const char = set.charAt(randomInt(set.length));
+    if (!isAlphanumeric(char)) {
+      symbolCount += 1;
+    }
+    out.push(char);
+  }
+
+  // 2) 余位随机填充
+  while (out.length < length) {
+    const candidates = symbolCount >= maxSymbols && nonSymbols.length > 0 ? nonSymbols : pool;
     const char = candidates.charAt(randomInt(candidates.length));
     if (!isAlphanumeric(char)) {
       symbolCount += 1;
     }
     out.push(char);
   }
+
+  // 3) 洗牌
+  shuffleInPlace(out);
+
+  // 4) 位置优化：首尾为字母（池中无字母时自动跳过，界面会给出警告）
+  if (options.edgeLetter) {
+    const isLetter = (char: string): boolean => /[A-Za-z]/.test(char);
+    enforceAt(out, out.length - 1, isLetter);
+    enforceAt(out, 0, isLetter);
+  }
+
   return out.join('');
 }
 
@@ -314,8 +377,7 @@ export function PasswordGenerator(_props: CommandProps): React.JSX.Element {
   const [excludeAmbiguous, setExcludeAmbiguous] = React.useState<boolean>(false);
   const [customCharset, setCustomCharset] = React.useState<string>('');
   const [count, setCount] = React.useState<number>(1);
-  const [firstLetter, setFirstLetter] = React.useState<boolean>(false);
-  const [lastLetter, setLastLetter] = React.useState<boolean>(false);
+  const [edgeLetter, setEdgeLetter] = React.useState<boolean>(true);
   const [maxSymbolPercent, setMaxSymbolPercent] = React.useState<number>(100);
   const [advancedOpen, setAdvancedOpen] = React.useState<boolean>(false);
   const [visible, setVisible] = React.useState<boolean>(true);
@@ -362,6 +424,25 @@ export function PasswordGenerator(_props: CommandProps): React.JSX.Element {
     [pool],
   );
 
+  /**
+   * 各字符类的字符池（先落一位用）：保证「勾选了某类就一定出现该类字符」。
+   * 自定义字符集模式下退化为单类（池本身），不做分类保证。
+   */
+  const requiredSets = React.useMemo<string[]>(() => {
+    if (customMode) {
+      return [pool];
+    }
+    return CHAR_SETS.filter((set) => enabled[set.id])
+      .map((set) => (set.id === 'symbol' ? symbolChars : set.chars))
+      .map((chars) =>
+        pool
+          .split('')
+          .filter((char) => chars.includes(char))
+          .join(''),
+      )
+      .filter((chars) => chars.length > 0);
+  }, [customMode, pool, enabled, symbolChars]);
+
   /** 约束不可满足时的警告（界面提示，不阻断生成）。 */
   const warnings = React.useMemo<string[]>(() => {
     const list: string[] = [];
@@ -372,11 +453,8 @@ export function PasswordGenerator(_props: CommandProps): React.JSX.Element {
     if (customMode) {
       list.push('已启用自定义字符集：分类开关与符号分组不再生效');
     }
-    if (firstLetter && letters.length === 0) {
-      list.push('字符集不含字母，「首字符为字母」无法保证');
-    }
-    if (lastLetter && letters.length === 0) {
-      list.push('字符集不含字母，「尾字符为字母」无法保证');
+    if (edgeLetter && letters.length === 0) {
+      list.push('字符集不含字母，「首尾为字母」无法保证（已自动跳过）');
     }
     if (maxSymbolPercent === 0 && nonSymbols.length === 0) {
       list.push('字符集只剩符号，「最大符号占比 0%」无法保证');
@@ -385,7 +463,7 @@ export function PasswordGenerator(_props: CommandProps): React.JSX.Element {
       list.push('符号分组交集为空，已不含任何符号');
     }
     return list;
-  }, [pool.length, customMode, firstLetter, lastLetter, letters.length, maxSymbolPercent, nonSymbols.length, symbolChars.length, enabled.symbol]);
+  }, [pool.length, customMode, edgeLetter, letters.length, maxSymbolPercent, nonSymbols.length, symbolChars.length, enabled.symbol]);
 
   /** 批量生成结果。 */
   const passwords = React.useMemo<string[]>(() => {
@@ -394,17 +472,16 @@ export function PasswordGenerator(_props: CommandProps): React.JSX.Element {
     }
     const options: GenerateOptions = {
       maxSymbolRatio: maxSymbolPercent / 100,
-      firstLetter,
-      lastLetter,
+      edgeLetter,
     };
     const list: string[] = [];
     for (let i = 0; i < count; i += 1) {
-      list.push(generateOne(length, pool, letters, nonSymbols, options));
+      list.push(generateOne(length, pool, requiredSets, nonSymbols, options));
     }
     return list;
     // nonce 变化触发重新生成
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [length, pool, letters, nonSymbols, count, firstLetter, lastLetter, maxSymbolPercent, nonce]);
+  }, [length, pool, requiredSets, nonSymbols, count, edgeLetter, maxSymbolPercent, nonce]);
 
   /** 首条密码的强度（列表逐条强度单独计算）。 */
   const strength = React.useMemo<Strength>(
@@ -523,6 +600,24 @@ export function PasswordGenerator(_props: CommandProps): React.JSX.Element {
             ))}
           </div>
 
+          {/* 位置优化（V18）：默认开启，把结论直接摆在一级选项里，不必翻高级选项 */}
+          <label className="flex items-start justify-between gap-3 rounded-lg border border-brand/30 bg-brand-muted/40 px-3 py-2">
+            <span className="min-w-0">
+              <span className="block text-sm font-medium text-foreground">
+                位置优化
+                <span className="ml-1 text-[11px] font-normal text-brand">推荐</span>
+              </span>
+              <span className="mt-0.5 block text-[11px] leading-relaxed text-muted-foreground">
+                首尾固定为字母，符号与数字集中在中段；每类勾选的字符至少出现一次
+              </span>
+            </span>
+            <Switch
+              checked={edgeLetter}
+              onCheckedChange={(value) => setEdgeLetter(value === true)}
+              aria-label="位置优化（首尾为字母）"
+            />
+          </label>
+
           {/* 高级选项 */}
           <div className="rounded-lg border border-border bg-card">
             <button
@@ -575,8 +670,7 @@ export function PasswordGenerator(_props: CommandProps): React.JSX.Element {
                 <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                   {switchRow('排除相似字符', excludeSimilar, setExcludeSimilar, `(${SIMILAR_CHARS})`)}
                   {switchRow('排除模糊字符', excludeAmbiguous, setExcludeAmbiguous, `(${AMBIGUOUS_CHARS.slice(0, 8)}…)`)}
-                  {switchRow('首字符为字母', firstLetter, setFirstLetter)}
-                  {switchRow('尾字符为字母', lastLetter, setLastLetter)}
+                  {switchRow('位置优化（首尾为字母）', edgeLetter, setEdgeLetter, '推荐')}
                 </div>
 
                 {/* 自定义字符集 */}

@@ -59,6 +59,9 @@ export function GridOverlay(): React.JSX.Element {
   const [editMode, setEditMode] = useState(false);
   const [renamingId, setRenamingId] = useState<number | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
+  /** 正在用「填路径」方式添加条目的盒子 id（拖放之外的第二条入口） */
+  const [addingBoxId, setAddingBoxId] = useState<number | null>(null);
+  const [addPathDraft, setAddPathDraft] = useState('');
   const [dropTargetId, setDropTargetId] = useState<number | null>(null);
   const [scaleFactor, setScaleFactor] = useState(1);
 
@@ -68,6 +71,8 @@ export function GridOverlay(): React.JSX.Element {
   const interactionRef = useRef<Interaction | null>(null);
   const hintTimerRef = useRef<number | undefined>(undefined);
   const toolbarRef = useRef<HTMLDivElement | null>(null);
+  /** 空态卡片的 DOM 引用：它也要纳入命中区域，否则「创建第一个盒子」按钮点不到 */
+  const emptyRef = useRef<HTMLDivElement | null>(null);
 
   // boxesRef 镜像：拖放命中测试 / mouseup 落库时读取最新布局
   useEffect(() => {
@@ -150,10 +155,12 @@ export function GridOverlay(): React.JSX.Element {
       width: box.width * scaleFactor,
       height: box.height * scaleFactor,
     }));
-    // 工具栏常驻可交互（锁定态也要能点「隐藏挂件 / 解锁」）
-    const toolbar = toolbarRef.current;
-    if (toolbar) {
-      const rect = toolbar.getBoundingClientRect();
+    // 工具栏与空态卡片常驻可交互（锁定态也要能点「隐藏挂件 / 解锁」，空态要能直接建盒子）
+    for (const node of [toolbarRef.current, emptyRef.current]) {
+      if (!node) {
+        continue;
+      }
+      const rect = node.getBoundingClientRect();
       regions.push({
         x: rect.left * scaleFactor,
         y: rect.top * scaleFactor,
@@ -342,6 +349,29 @@ export function GridOverlay(): React.JSX.Element {
     },
     [showHint],
   );
+
+  /**
+   * 用输入框填写的路径添加条目（拖放之外的第二条入口）。
+   * 便于键盘操作、沙箱环境，以及从资源管理器复制路径的场景。
+   */
+  const commitAddPath = useCallback(
+    (boxId: number, rawPath: string): void => {
+      // 兼容从资源管理器复制的带引号路径
+      const path = rawPath.trim().replace(/^"(.*)"$/, '$1');
+      setAddingBoxId(null);
+      setAddPathDraft('');
+      if (path.length === 0) {
+        return;
+      }
+      addItem(boxId, path);
+    },
+    [addItem],
+  );
+
+  /** 打开「填路径」输入框 */
+  const beginAddPath = useCallback((boxId: number): void => {
+    setAddingBoxId(boxId);
+  }, []);
 
   // —— 文件拖放：drop 落点命中哪个盒子，就把文件登记为该盒子的引用 ——
 
@@ -557,6 +587,17 @@ export function GridOverlay(): React.JSX.Element {
                   {box.name}
                 </span>
               )}
+              {editMode ? (
+                <button
+                  type="button"
+                  title="填路径添加引用（也可直接把文件拖进盒子）"
+                  onMouseDown={(event) => event.stopPropagation()}
+                  onClick={() => beginAddPath(box.id)}
+                  className="shrink-0 rounded p-0.5 opacity-70 transition hover:bg-white/15 hover:opacity-100"
+                >
+                  <Plus className="h-3 w-3" />
+                </button>
+              ) : null}
               <span className="shrink-0 text-[10px] opacity-40">{boxItems.length}</span>
             </header>
 
@@ -565,6 +606,26 @@ export function GridOverlay(): React.JSX.Element {
               className="grid min-h-0 flex-1 content-start gap-1 overflow-y-auto p-2"
               style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(72px, 1fr))' }}
             >
+              {addingBoxId === box.id ? (
+                <div className="col-span-full flex items-center gap-1">
+                  <input
+                    autoFocus
+                    value={addPathDraft}
+                    onChange={(event) => setAddPathDraft(event.target.value)}
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        commitAddPath(box.id, addPathDraft);
+                      } else if (event.key === 'Escape') {
+                        setAddingBoxId(null);
+                        setAddPathDraft('');
+                      }
+                    }}
+                    placeholder="粘贴文件/文件夹完整路径后回车"
+                    className="min-w-0 flex-1 rounded bg-neutral-800 px-1.5 py-1 text-[11px] text-neutral-100 outline-none ring-1 ring-sky-400/60"
+                  />
+                </div>
+              ) : null}
               {boxItems.map((item) => (
                 <div
                   key={item.id}
@@ -618,10 +679,25 @@ export function GridOverlay(): React.JSX.Element {
         );
       })}
 
-      {/* 空态引导（非交互文本，不参与命中区域） */}
+      {/* 空态引导：卡片自身可交互（已纳入命中区域），可直接创建第一个盒子 */}
       {boxes.length === 0 && (
-        <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-lg bg-neutral-900/60 px-4 py-2 text-xs text-neutral-200 backdrop-blur">
-          桌面挂件还没有盒子：点击右下角「＋」添加第一个盒子
+        <div
+          ref={emptyRef}
+          style={{ pointerEvents: 'auto' }}
+          className="absolute left-1/2 top-1/2 flex -translate-x-1/2 -translate-y-1/2 flex-col items-center gap-3 rounded-xl bg-neutral-900/75 px-6 py-5 text-center shadow-2xl backdrop-blur"
+        >
+          <p className="text-sm font-medium text-neutral-100">桌面挂件还没有盒子</p>
+          <p className="max-w-xs text-xs leading-relaxed text-neutral-300">
+            盒子是桌面上的收纳格：把文件拖进去即建立引用，双击图标用默认程序打开原文件，
+            <span className="text-neutral-100">原文件不会被移动</span>。
+          </p>
+          <button
+            type="button"
+            onClick={addBox}
+            className="rounded-lg bg-sky-500/90 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-sky-400"
+          >
+            ＋ 创建第一个盒子
+          </button>
         </div>
       )}
 

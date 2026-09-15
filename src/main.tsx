@@ -4,6 +4,7 @@ import App, { type WindowRoot } from './App';
 import { bootstrap, bootstrapSync } from './core/bootstrap';
 import { useAppStore } from './stores/useAppStore';
 import { diagLog } from '@/lib/diag';
+import { ipc } from '@/lib/ipc';
 import './index.css';
 
 /**
@@ -47,6 +48,9 @@ function resolveWindow(search: string): WindowTarget {
     case 'grid-overlay':
       // 桌面网格挂件透明窗（Rust `grid_overlay_show` 以 ?window=grid-overlay 创建）
       return { windowRoot: 'grid-overlay' };
+    case 'workstation-bar':
+      // 常驻桌面顶部的工作台贴条（Rust `bar_show` 以 ?window=workstation-bar 创建）
+      return { windowRoot: 'workstation-bar' };
     default:
       return { windowRoot: 'main' };
   }
@@ -99,9 +103,29 @@ function start(): void {
     new Promise<void>((resolve) => {
       window.setTimeout(resolve, BOOTSTRAP_GUARD_MS);
     }),
-  ]).catch((error: unknown) => {
-    console.error('[Handy] 启动装配失败：', error);
-  });
+  ])
+    .then(() => {
+      // 贴条常驻：设置里开着就自动贴回桌面顶部（重启后依然可见，无需每次手点）
+      if (target.windowRoot === 'main' && useAppStore.getState().settings.barPinned) {
+        void ipc.barShow().catch(() => undefined);
+      }
+    })
+    .catch((error: unknown) => {
+      console.error('[Handy] 启动装配失败：', error);
+    });
+
+  // 3.1) 贴条显隐的唯一驱动点：**只由主窗口**订阅 `settings.barPinned`。
+  // 贴条窗自己也跑本文件，若不判断窗口就会「自己叫自己」再创建一次窗口，故限定 main。
+  // 这样「工作台按钮 / 设置中心开关」都会经由同一路径生效，行为一致。
+  if (target.windowRoot === 'main') {
+    useAppStore.subscribe((state, prev) => {
+      if (state.settings.barPinned === prev.settings.barPinned) {
+        return;
+      }
+      const task = state.settings.barPinned ? ipc.barShow() : ipc.barHide();
+      void task.catch(() => undefined);
+    });
+  }
 
   // 无头测试通道：Rust 侧 HANDY_AUTOTOOL 环境变量 → `autotool` 事件 → 自动打开
   // 指定命令（`cmd-id`）或模块视图（`module:module-id`）。用于自动化诊断/回归。
@@ -121,6 +145,24 @@ function start(): void {
     .then(() => {
       diagLog('autotool listener ready');
     })
+    .catch(() => {
+      /* 浏览器环境无 Tauri IPC，忽略 */
+    });
+
+  // 外部窗口 → 主窗口导航（如顶部贴条的「打开工作台」）：
+  // 视图状态是每窗口独立的，贴条改不了主窗口的 store，只能由 Rust 发事件、主窗口响应。
+  void import('@tauri-apps/api/event')
+    .then(({ listen }) =>
+      listen<string>('handy:navigate', (event) => {
+        const payload = event.payload;
+        diagLog(`navigate received: ${payload}`);
+        if (payload.startsWith('module:')) {
+          useAppStore.getState().setView({ kind: 'module', moduleId: payload.slice(7) });
+        } else if (payload !== '') {
+          useAppStore.getState().setView({ kind: 'command', commandId: payload });
+        }
+      }),
+    )
     .catch(() => {
       /* 浏览器环境无 Tauri IPC，忽略 */
     });

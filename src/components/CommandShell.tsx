@@ -45,6 +45,12 @@ export interface CommandShellProps {
   getCopyText?: () => string;
   /** 主操作（如「执行」） */
   primaryAction?: CommandShellPrimaryAction;
+  /**
+   * 撑满模式（编辑器 / 格式化类工具用）：
+   * 内容区**不再整体滚动**，改为 flex 纵向撑满，由内部子元素自行用 `flex-1` 分配高度，
+   * 使输入框与结果区随窗口大小同步伸缩，避免「上面挤着拉滚动条、下面留一大片空白」。
+   */
+  fill?: boolean;
   /** 底部快捷键提示条文案，如 "Enter 执行 · Esc 返回" */
   shortcutHint?: string;
   children: React.ReactNode;
@@ -71,6 +77,7 @@ export function CommandShell({
   copyText,
   getCopyText,
   primaryAction,
+  fill = false,
   shortcutHint = 'Enter 执行 · Esc 返回',
   children,
 }: CommandShellProps): React.JSX.Element {
@@ -228,9 +235,19 @@ export function CommandShell({
       <Separator />
 
       {/* 内容区：V15 —— 窗口放开到 1180×820 基准，内边距加大并限制最大宽度，
-          避免超宽屏（最大化 / 4K）把内容拉散 */}
-      <div className="min-h-0 flex-1 scrollbar-thin overflow-auto p-5">
-        <div className="mx-auto w-full max-w-[1400px]">{children}</div>
+          避免超宽屏（最大化 / 4K）把内容拉散；
+          fill 模式改为纵向 flex 撑满，由子元素自行分配高度（编辑器 / 格式化类工具） */}
+      <div
+        className={cn(
+          'min-h-0 flex-1 p-5',
+          fill ? 'flex flex-col overflow-hidden' : 'scrollbar-thin overflow-auto',
+        )}
+      >
+        <div
+          className={cn('mx-auto w-full max-w-[1400px]', fill && 'flex min-h-0 flex-1 flex-col')}
+        >
+          {children}
+        </div>
       </div>
 
       {/* 快捷键提示条 */}

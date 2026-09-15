@@ -178,10 +178,20 @@ fn clean_name(name: Option<String>) -> String {
     }
 }
 
-/// 同一盒子内下一个排序值。
-fn next_sort(conn: &Connection, sql: &str, bind: i64) -> Result<i64, String> {
-    conn.query_row(sql, params![bind], |row| row.get(0))
-        .map_err(|err| format!("读取排序值失败：{err}"))
+/// 读取「下一个排序值」。
+///
+/// `bind = Some(id)` 用于**带 `?1` 占位符**的 SQL（盒子内条目求最大值）；
+/// `bind = None` 用于**完全不带占位符**的 SQL（全表求最大值）。
+///
+/// 二者必须显式区分：对无占位符的 SQL 传入参数会触发 rusqlite
+/// `Wrong number of parameters passed to query. Got 1, needed 0`，
+/// 这正是此前「添加盒子 / 添加挂件条目一律失败」的根因。
+fn next_sort(conn: &Connection, sql: &str, bind: Option<i64>) -> Result<i64, String> {
+    let outcome = match bind {
+        Some(value) => conn.query_row(sql, params![value], |row| row.get(0)),
+        None => conn.query_row(sql, [], |row| row.get(0)),
+    };
+    outcome.map_err(|err| format!("读取排序值失败：{err}"))
 }
 
 // —— 盒子 CRUD ——
@@ -228,23 +238,28 @@ pub async fn grid_box_upsert(
     match box_id {
         None => {
             let now = now_iso();
-            let ms = chrono::Utc::now().timestamp_millis();
             let final_width = width.unwrap_or(320).max(MIN_W);
             let final_height = height.unwrap_or(220).max(MIN_H);
 
             let conn = connect(&app)?;
+            // 全表求最大值 → 该 SQL 无占位符，必须传 None
             let final_sort = match sort {
                 Some(s) => s,
-                None => next_sort(&conn, "SELECT COALESCE(MAX(sort) + 1, 0) FROM grid_boxes", 0)?,
+                None => next_sort(&conn, "SELECT COALESCE(MAX(sort) + 1, 0) FROM grid_boxes", None)?,
             };
+            // 已存在的盒子数 → 决定新盒子级联位置，避免多个新盒子完全重叠
+            let existing: i64 = conn
+                .query_row("SELECT COUNT(*) FROM grid_boxes", [], |row| row.get(0))
+                .unwrap_or(0);
+            let cascade = existing.max(0) as i64;
             conn.execute(
                 "INSERT INTO grid_boxes \
                  (name, pos_x, pos_y, width, height, sort, created_at, updated_at) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     clean_name(name),
-                    pos_x.unwrap_or(80 + (ms % 5) * 36),
-                    pos_y.unwrap_or(80 + (ms % 7) * 30),
+                    pos_x.unwrap_or(60 + (cascade % 6) * 340),
+                    pos_y.unwrap_or(60 + (cascade % 4) * 250),
                     final_width,
                     final_height,
                     final_sort,
@@ -372,7 +387,7 @@ pub async fn grid_item_add(
     let sort = next_sort(
         &conn,
         "SELECT COALESCE(MAX(sort) + 1, 0) FROM grid_items WHERE box_id = ?1",
-        box_id,
+        Some(box_id),
     )?;
     let created = now_iso();
 

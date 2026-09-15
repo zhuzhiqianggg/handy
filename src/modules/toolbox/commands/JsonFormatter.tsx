@@ -466,13 +466,14 @@ export function JsonFormatter({ initialInput = '' }: CommandProps): React.JSX.El
       onBack={shell.onBack}
       favorite={shell.favorite}
       onToggleFavorite={shell.onToggleFavorite}
+      fill
       copyText={mode === 'tree' ? '' : output}
       shortcutHint="粘贴 JSON 后自动处理；支持 JSONPath 如 $.store.book[0].title（Esc 返回）"
     >
-      {/* 1180×820 基准：两列并排，窄屏（<1280px）自动回退单列 */}
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+      {/* 撑满模式：两列并排（<1280px 回退单列），输入与结果区随窗口高度伸缩 */}
+      <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 xl:grid-cols-2">
         {/* ——— 左列：输入 ——— */}
-        <div className="flex min-w-0 flex-col gap-2">
+        <div className="flex min-h-0 min-w-0 flex-col gap-2">
           <div className="flex items-center justify-between gap-2">
             <label className="text-sm font-medium text-foreground" htmlFor="json-input">
               输入 JSON
@@ -499,7 +500,7 @@ export function JsonFormatter({ initialInput = '' }: CommandProps): React.JSX.El
             placeholder='{"name":"Handy","tags":["desktop","efficiency"]}'
             spellCheck={false}
             className={
-              'h-[420px] w-full resize-none rounded-lg border border-input bg-background p-3 font-mono text-xs ' +
+              'min-h-[200px] w-full flex-1 resize-none rounded-lg border border-input bg-background p-3 font-mono text-xs ' +
               'text-foreground placeholder:text-muted-foreground ' +
               'focus-visible:border-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/20'
             }
@@ -518,7 +519,7 @@ export function JsonFormatter({ initialInput = '' }: CommandProps): React.JSX.El
         </div>
 
         {/* ——— 右列：模式 / 查询 / 统计 / 输出 ——— */}
-        <div className="flex min-w-0 flex-col gap-2">
+        <div className="flex min-h-0 min-w-0 flex-col gap-2">
           <div className="flex flex-wrap items-center gap-1">
             {MODES.map((item) => (
               <TabButton
@@ -634,14 +635,14 @@ export function JsonFormatter({ initialInput = '' }: CommandProps): React.JSX.El
 
           {/* 输出区 */}
           {mode === 'tree' ? (
-            <div className="flex min-h-0 flex-col rounded-xl border border-border bg-card">
+            <div className="flex min-h-0 flex-1 flex-col rounded-xl border border-border bg-card">
               <div className="flex items-center justify-between border-b border-border px-4 py-2">
                 <span className="text-sm font-medium text-foreground">树视图</span>
                 <span className="text-[11px] text-muted-foreground">
                   点击箭头折叠 / 展开，hover 显示复制按钮
                 </span>
               </div>
-              <div className="scrollbar-thin h-[420px] overflow-auto p-3 font-mono text-xs">
+              <div className="scrollbar-thin min-h-[200px] flex-1 overflow-auto p-3 font-mono text-xs">
                 {parsed.ok ? (
                   <JsonTree value={parsed.value} onCopy={copyValue} />
                 ) : (
@@ -651,7 +652,7 @@ export function JsonFormatter({ initialInput = '' }: CommandProps): React.JSX.El
             </div>
           ) : (
             <>
-              <div className="flex h-[420px] min-h-0">
+              <div className="flex min-h-0 flex-1">
                 <ResultBox
                   title={outputTitle}
                   value={output}

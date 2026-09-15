@@ -23,6 +23,7 @@ import type {
   VaultItemPatch,
   VaultStatus,
 } from '@/types/vault';
+import type { SysAction } from '@/types/sys';
 
 /**
  * 统一的 invoke 封装。
@@ -192,6 +193,26 @@ export const ipc = {
   gridOverlayHide: (): Promise<void> => call<void>('grid_overlay_hide'),
   /** 打开条目原文件（Rust 侧 shell 插件 open；本地路径不受前端 open 作用域限制） */
   gridOpenPath: (path: string): Promise<void> => call<void>('grid_open_path', { path }),
+
+  // —— 工作台顶部贴条（常驻桌面顶部的今日概览）——
+
+  /** 显示（幂等）工作台顶部贴条：无边框 / 透明 / 始终置顶 / 顶部居中 */
+  barShow: (): Promise<void> => call<void>('bar_show'),
+  /** 隐藏贴条（不销毁，下次 bar_show 复用） */
+  barHide: (): Promise<void> => call<void>('bar_hide'),
+  /** 唤出主窗口并切到工作台模块（贴条上的「打开工作台」） */
+  barOpenWorkstation: (): Promise<void> => call<void>('bar_open_workstation'),
+
+  // —— 工作台「快捷入口」：系统级动作（Rust 侧白名单制）——
+
+  /**
+   * 系统快捷动作清单。
+   * 可执行目标与参数全部硬编码在 Rust 侧（`commands/sys.rs`），前端只负责渲染。
+   */
+  sysActionList: (): Promise<SysAction[]> => call<SysAction[]>('sys_action_list'),
+  /** 执行一个系统快捷动作（只传动作 id；未知 id 与非法动作由 Rust 侧拒绝） */
+  sysActionRun: (actionId: string): Promise<void> =>
+    call<void>('sys_action_run', { actionId }),
 
   // —— 工作台快捷入口（workstation）——
 

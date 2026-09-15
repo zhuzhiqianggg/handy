@@ -91,6 +91,13 @@ pub fn run() {
             commands::grid::grid_geometry_get,
             commands::grid::grid_geometry_set,
             commands::grid::grid_open_path,
+            // —— 系统快捷动作（工作台「快捷入口」；白名单制，前端只传动作 id）——
+            commands::sys::sys_action_list,
+            commands::sys::sys_action_run,
+            // —— 工作台顶部贴条（常驻桌面顶部的今日概览）——
+            commands::bar::bar_show,
+            commands::bar::bar_hide,
+            commands::bar::bar_open_workstation,
             // —— 设置中心 / 备份（M7 / V13）——
             commands::app::hotkey_update,
             commands::app::debug_log,
