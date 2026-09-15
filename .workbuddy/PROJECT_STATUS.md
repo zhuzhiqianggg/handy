@@ -14,7 +14,7 @@
 | 项 | 值 |
 | --- | --- |
 | 阶段 | Phase 1 收尾 + V18–V23 反馈修复（MVP 完成，待装机验收） |
-| git | **V23 批次 = 见 §1.9**（Cron 收敛 + 文本处理台 + 响应式审计工具）；V22 = `d49857c`（13 文件，+2614/−286）；V21 = `685b8a7`（31 文件，+3524/−522）；V20 = `f96a374`（37 文件，+6118/−999）；V19 = `64e3008`；`be1dc58` = V18 文档回填；`862d5bf` = V18 批次 |
+| git | **V23 = `f81a914`**（17 文件，+3334/−184：Cron 收敛 + 文本处理台 + 响应式审计工具，见 §1.9）；V22 = `d49857c`（13 文件，+2614/−286）；V21 = `685b8a7`（31 文件，+3524/−522）；V20 = `f96a374`（37 文件，+6118/−999）；V19 = `64e3008`；`be1dc58` = V18 文档回填；`862d5bf` = V18 批次 |
 | 安装包（**V23 已重新打包**） | `src-tauri/target/release/bundle/nsis/Handy_0.1.0_x64-setup.exe`（3.7 MB）<br>`src-tauri/target/release/bundle/msi/Handy_0.1.0_x64_en-US.msi`（4.7 MB）<br>`src-tauri/target/release/handy.exe`（9.3 MB，免安装可直接跑）<br>取证：`dist/index.html` 16:25:37 → `handy.exe` 16:30:45（晚于 dist，且 `beforeBuildCommand` 已覆盖为空操作 ⇒ 打进二进制的就是本批前端） |
 
 ---
