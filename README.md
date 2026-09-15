@@ -8,9 +8,11 @@
 | 项目代号 | `handy` |
 | 项目路径 | `D:\_Projects\ops\handy` |
 | 目标平台 | **Windows 10 1809+ / 11（x64、arm64）· macOS 12+（Apple Silicon / Intel）**，Linux 后续评估 |
-| 当前阶段 | **Phase 1 · MVP 进行中（V01–V07 已完成）**：脚手架 / 双平台基座 / 设计系统 / 模块框架（注册表 + 扩展点 + SQLite 持久化）/ 统一入口命令面板 / 工具箱 9 个子工具全部可用（时间戳·JSON·Base64·URL·JWT·文本对比·密码生成·哈希·二维码）。打包与安装测试进行中，GUI 运行时行为待人工验证。 |
+| 当前阶段 | **Phase 1 · MVP 已完成，待装机验收**：统一入口命令面板 + 工具箱 **23 个工具** + 桌面网格挂件 + 便签/待办 + 桌面工作台 + 密码存储器；Windows 安装包（`.exe`/`.msi`）已产出；`cargo check` / `tsc` 双绿，GUI 运行时行为待人工验证。详见 **[`.workbuddy/PROJECT_STATUS.md`](.workbuddy/PROJECT_STATUS.md)**。 |
 | 参考项目 | `../ops-tools`（网页版，**只读借鉴，禁止修改**） |
 
+> **🚀 开发上下文（从这里续接）**：现状、剩余任务、开发约束、环境命令 → **[`.workbuddy/PROJECT_STATUS.md`](.workbuddy/PROJECT_STATUS.md)**；长期约定与踩坑记录 → [`.workbuddy/memory/MEMORY.md`](.workbuddy/memory/MEMORY.md)；逐日进展 → `.workbuddy/memory/`。
+>
 > **命名说明**：最终采用 **Handy · 顺手**——主张「**方便，而不是全面**」，最贴合普通办公人群的使用动机。候选名 `万象 / OmniDesk` 及完整推演见 `docs/01-planning/PRD.md` §2 与 `docs/01-planning/DECISIONS.md`。
 >
 > **文档导航**：先看 [`docs/README.md`](docs/README.md)（文档索引与阅读顺序）。
