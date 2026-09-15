@@ -14,6 +14,17 @@ fn main_window(app: &AppHandle) -> Result<WebviewWindow, String> {
         .ok_or_else(|| "未找到主窗口（main）".to_string())
 }
 
+/// 设置主窗口置顶状态。
+///
+/// 主窗口**默认不置顶**（`tauri.conf.json` 里 `alwaysOnTop: false`）：置顶会盖住
+/// 系统弹框、浏览器、编辑器等窗口外的内容，只能先挪走 Handy 才能操作，很碍事。
+/// 因此把置顶收敛成一个**用户自选**的设置项（`settings.mainPinned`）。
+pub fn set_main_pinned(app: &AppHandle, pinned: bool) -> Result<(), String> {
+    main_window(app)?
+        .set_always_on_top(pinned)
+        .map_err(|e| format!("设置主窗口置顶失败：{e}"))
+}
+
 /// 显示并聚焦主面板（命令面板形态）。
 ///
 /// 主窗口若处于**最小化**态（历史遗留 `minimize()` 调用 / 系统级最小化），仅

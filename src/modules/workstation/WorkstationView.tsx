@@ -220,11 +220,11 @@ export default function WorkstationView(_props: WorkstationViewProps = {}): Reac
         </div>
       ) : null}
 
-      {/* —— 两栏聚合区 —— */}
+      {/* —— 主区：窄栏（日历 + 计划） + 宽区（笔记） —— */}
       <div className="min-h-0 flex-1 scrollbar-thin overflow-auto px-6 pb-6">
-        <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-2">
-          {/* 左：日历 + 计划 */}
-          <div className="flex flex-col gap-4">
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,330px)_minmax(0,1fr)]">
+          {/* 左（窄）：日历 + 计划 —— 日期与条目扫一眼即可，不需要宽度 */}
+          <div className="flex min-w-0 flex-col gap-4">
             <CalendarPanel anchorMs={anchorMs} onSelect={handleSelectDay} pendingByDay={pendingByDay} />
             <PlanPanel
               todos={todos}
@@ -237,11 +237,13 @@ export default function WorkstationView(_props: WorkstationViewProps = {}): Reac
             />
           </div>
 
-          {/* 右：笔记 + 快捷入口 */}
-          <div className="flex flex-col gap-4">
-            <NotesPanel />
-            <QuickActionsPanel />
-          </div>
+          {/* 右（宽）：笔记 —— 写作最吃宽度，给它整个主区（用户反馈「笔记需要更宽」） */}
+          <NotesPanel />
+        </div>
+
+        {/* 底部全宽：系统快捷入口（横排得多，独占一行才不至于挤成一条缝） */}
+        <div className="mt-4">
+          <QuickActionsPanel />
         </div>
       </div>
     </div>

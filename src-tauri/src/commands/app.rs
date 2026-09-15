@@ -52,6 +52,15 @@ pub async fn app_toggle_main(app: AppHandle) -> Result<(), String> {
     window::toggle_main_palette(&app)
 }
 
+/// 设置主窗口置顶（设置项「窗口置顶」的唯一执行点）。
+///
+/// 默认**不置顶**：置顶窗口会盖住系统弹框与其它程序（用户反馈的痛点）。
+/// 贴条（`workstation-bar`）的置顶由其形态本身决定，**不经本命令**、不受本开关影响。
+#[tauri::command]
+pub async fn app_set_pinned(app: AppHandle, pinned: bool) -> Result<(), String> {
+    window::set_main_pinned(&app, pinned)
+}
+
 /// 读取 `settings.json` → `settings` 对象（缺失时返回空对象）。
 fn load_settings(app: &AppHandle) -> Map<String, Value> {
     let Ok(store) = app.store(SETTINGS_STORE) else {

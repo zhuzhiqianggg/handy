@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { LayoutDashboard, X } from 'lucide-react';
+import { LayoutDashboard, Plus, X } from 'lucide-react';
 import { ipc } from '@/lib/ipc';
 import { useTodosStore } from '@/stores/useTodosStore';
 import { useAppStore } from '@/stores/useAppStore';
@@ -57,14 +57,20 @@ export function WorkstationBar(): React.JSX.Element {
     return () => window.clearInterval(timer);
   }, []);
 
-  /** 今天的待办（到期日 = 今天） + 无到期日的待办按「随时可做」计入 */
-  const todayPending = useMemo(() => {
+  /** 贴条上的「随手记一条」：内联输入态 + 草稿 */
+  const [adding, setAdding] = useState(false);
+  const [draft, setDraft] = useState('');
+
+  /**
+   * 今天的完整集合（含已完成）。
+   *
+   * 口径：**到期日在今天**的待办 + **无到期日**的（后者随时可做，不列出来就会一直被忽略）。
+   * 已完成的部分用来算进度，让「今天推进得怎么样」一眼可见。
+   */
+  const todayAll = useMemo(() => {
     const dayStart = startOfDay(now);
     const dayEnd = dayStart + DAY_MS;
     return todos.filter((todo) => {
-      if (todo.done) {
-        return false;
-      }
       if (todo.dueAt === null) {
         return true;
       }
@@ -72,10 +78,36 @@ export function WorkstationBar(): React.JSX.Element {
     });
   }, [todos, now]);
 
+  /** 今天尚未完成的（贴条只列这些） */
+  const todayPending = useMemo(
+    () => todayAll.filter((todo) => !todo.done),
+    [todayAll],
+  );
+
+  /** 今天已完成数（进度分母 = todayAll.length） */
+  const todayDone = todayAll.length - todayPending.length;
+
   const overdueCount = useMemo(() => {
     const dayStart = startOfDay(now);
     return todos.filter((todo) => !todo.done && todo.dueAt !== null && todo.dueAt < dayStart).length;
   }, [todos, now]);
+
+  /** 贴条内直接新建一条今日待办（09:00 或当前时间，取较晚者） */
+  const submitDraft = useCallback((): void => {
+    const title = draft.trim();
+    setDraft('');
+    setAdding(false);
+    if (title === '') {
+      return;
+    }
+    const dayStart = startOfDay(Date.now());
+    const nine = dayStart + 9 * 3600_000;
+    const dueAt = Math.max(nine, Date.now());
+    void useTodosStore
+      .getState()
+      .createTodo({ title, dueAt })
+      .catch(() => undefined);
+  }, [draft]);
 
   const toggle = useCallback((id: string): void => {
     void useTodosStore.getState().toggleDone(id).catch(() => undefined);
@@ -110,15 +142,51 @@ export function WorkstationBar(): React.JSX.Element {
             逾期 {overdueCount}
           </span>
         ) : null}
+        {/* 今日进度：静默地告诉你「今天推到哪了」，不用点开任何东西 */}
+        {todayAll.length > 0 ? (
+          <span
+            className="flex items-center gap-1 text-[10px] text-neutral-400"
+            title={`今日进度：已完成 ${todayDone} / 共 ${todayAll.length}`}
+          >
+            <span className="h-1.5 w-12 overflow-hidden rounded-full bg-white/15">
+              <span
+                className="block h-full rounded-full bg-emerald-400 transition-all"
+                style={{ width: `${Math.round((todayDone / todayAll.length) * 100)}%` }}
+              />
+            </span>
+            <span className="tabular-nums">
+              {todayDone}/{todayAll.length}
+            </span>
+          </span>
+        ) : null}
       </div>
 
       <span className="h-5 w-px shrink-0 bg-white/15" />
 
-      {/* 待办速览（点击即完成，划掉） */}
+      {/* 待办速览（点击即完成，划掉） / 内联快速新增 */}
       <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
-        {todayPending.length === 0 ? (
+        {adding ? (
+          <input
+            autoFocus
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                submitDraft();
+              }
+              if (event.key === 'Escape') {
+                setDraft('');
+                setAdding(false);
+              }
+            }}
+            onBlur={submitDraft}
+            placeholder="写点什么，回车加到今天…"
+            className="min-w-0 flex-1 rounded-md bg-white/10 px-2 py-1 text-[11px] text-neutral-100 outline-none placeholder:text-neutral-400"
+            aria-label="快速添加今日待办"
+          />
+        ) : todayPending.length === 0 ? (
           <span className="truncate text-[11px] text-neutral-300">
-            今天没有待办 —— 点右侧「打开工作台」安排一下
+            今天没有待办 —— 点「＋」随手记一条，或「打开工作台」安排一下
           </span>
         ) : (
           todayPending.slice(0, VISIBLE_LIMIT).map((todo: Todo) => (
@@ -134,7 +202,7 @@ export function WorkstationBar(): React.JSX.Element {
             </button>
           ))
         )}
-        {todayPending.length > VISIBLE_LIMIT ? (
+        {!adding && todayPending.length > VISIBLE_LIMIT ? (
           <span className="shrink-0 text-[10px] text-neutral-400">
             +{todayPending.length - VISIBLE_LIMIT}
           </span>
@@ -143,6 +211,14 @@ export function WorkstationBar(): React.JSX.Element {
 
       {/* 动作 */}
       <div className="flex shrink-0 items-center gap-1">
+        <button
+          type="button"
+          onClick={() => setAdding(true)}
+          title="快速添加一条今天的待办"
+          className="rounded-md bg-white/10 p-1 transition hover:bg-white/20"
+        >
+          <Plus className="h-3.5 w-3.5" />
+        </button>
         <button
           type="button"
           onClick={openWorkstation}

@@ -2,33 +2,38 @@ import type { ModuleMeta } from '@/core/types';
 import { desktopOrganizerCommands } from './commands';
 
 /**
- * 桌面挂件（原桌面整理 M2）模块元数据。
+ * 桌面整理（原「桌面挂件」）模块元数据。
  *
- * **注册策略（原地改名重定向，同 notes → 工作台）**：V12 的「建目录 + 移动文件」
- * 整理方案被用户否决，新方案为**文件引用型**桌面网格挂件（文件绝不移动，见
- * `../desktop-grid/`）。本模块沿用 id `desktop-organizer`（命令、路由、启停状态、
- * 备份兼容均无需迁移），仅重命名为「桌面挂件」并把 `loadView` 重定向到
- * `../desktop-grid/GridManagerView`：
- *   - 侧栏 / 命令面板 / 设置中心中「桌面整理」位置展示为「桌面挂件」；
- *   - 旧 V12 命令（organizer_scan / preview / apply / undo…）保留可用，
- *     旧前端 `OrganizerView` 就地休眠不删除；
- *   - 挂件本体是独立透明窗（label `grid-overlay`），由 Rust
- *     `grid_overlay_show / grid_overlay_hide` 创建与压回桌面层，
- *     不再走模块 windowSpec 开窗，故 surface 收敛为 panel。
+ * **注册策略（原地改名重定向，同 notes → 工作台）**：沿用模块 id `desktop-organizer`，
+ * 命令、路由、启停状态、备份兼容均无需迁移；`loadView` 指向
+ * `../desktop-grid/GridManagerView`（内页已升级为**整理主控台**）。
+ *
+ * V19 重新对齐用户预期：要的不是「挂件」，而是**桌面整理工具**那套体验 ——
+ * 一键把满屏图标按类型归置成格子、布局可备份可还原。格子条目仍是**文件引用**，
+ * 文件本体绝不移动，所以「还原布局」只是换一套摆法，不涉及文件回迁。
+ *
+ * 格子层是独立透明窗（label `grid-overlay`），由 Rust `grid_overlay_show / hide`
+ * 创建与压回桌面层，故 surface 收敛为 panel。
  */
 const desktopOrganizerModule = {
   id: 'desktop-organizer',
-  name: '桌面挂件',
-  description: '桌面网格挂件：盒子内是文件引用，双击打开原文件，绝不移动',
+  name: '桌面整理',
+  description: '一键把桌面图标归置成格子，布局可备份还原；文件本体不动，双击打开原文件',
   icon: 'LayoutGrid',
   order: 40,
   surface: ['panel'],
   tier: 'free',
   keywords: [
-    '桌面挂件',
-    '挂件',
-    '网格',
     '桌面整理',
+    '桌面挂件',
+    '一键整理',
+    '自动整理',
+    '格子',
+    '网格',
+    '挂件',
+    '备份布局',
+    '还原布局',
+    '图标',
     '快捷',
     '引用',
     'widget',

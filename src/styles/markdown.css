@@ -244,3 +244,113 @@
   color: hsl(var(--muted-foreground));
   opacity: 0.6;
 }
+
+/* ---------- 行内内联态（`.md-inline`） ----------
+ *
+ * 用于「列表行里显示一段 Markdown」的场景（如待办标题）：渲染结果要**跟着行内排**，
+ * 不能变成块级段落把行撑开。故把段落与标题都压成 inline。
+ */
+
+.md-preview.md-inline {
+  display: block;
+  line-height: inherit;
+  font-size: inherit;
+  overflow-wrap: anywhere;
+}
+
+.md-preview.md-inline p,
+.md-preview.md-inline h1,
+.md-preview.md-inline h2,
+.md-preview.md-inline h3,
+.md-preview.md-inline h4,
+.md-preview.md-inline h5,
+.md-preview.md-inline h6 {
+  display: inline;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  font-size: inherit;
+  font-weight: inherit;
+  line-height: inherit;
+}
+
+.md-preview.md-inline h1,
+.md-preview.md-inline h2,
+.md-preview.md-inline h3 {
+  font-weight: 650;
+}
+
+/* 多段之间补一个空格，避免两段文字黏成一坨 */
+.md-preview.md-inline > * + *::before {
+  content: ' ';
+}
+
+.md-preview.md-inline code {
+  padding: 0.05em 0.28em;
+}
+
+.md-preview.md-inline ol,
+.md-preview.md-inline ul {
+  display: inline;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.md-preview.md-inline li {
+  display: inline;
+}
+
+.md-preview.md-inline li + li::before {
+  content: ' · ';
+  opacity: 0.5;
+}
+
+/* ---------- 所见即所得编辑态（`.md-preview.wysiwyg`） ----------
+ *
+ * 复用上面整套预览排版 —— 这正是「所见即所得」的关键：**编辑区和预览区同一套 CSS**，
+ * 因此不存在「编辑时一个样、预览时另一个样」的割裂感。这里只补「可编辑」特有行为。
+ */
+
+.md-preview.wysiwyg {
+  cursor: text;
+  min-height: 1.75em;
+  caret-color: hsl(var(--primary));
+}
+
+.md-preview.wysiwyg:focus,
+.md-preview.wysiwyg:focus-visible {
+  outline: none;
+}
+
+/* 编辑态下复选框可点（预览态刻意禁用），点一下就是完成任务项 */
+.md-preview.wysiwyg li input[type='checkbox'] {
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+/* 空块（浏览器会塞 `<br>`）必须保住一行高度，否则光标「无处可站」 */
+.md-preview.wysiwyg p:empty,
+.md-preview.wysiwyg > div:empty,
+.md-preview.wysiwyg p:has(> br:only-child),
+.md-preview.wysiwyg > div:has(> br:only-child) {
+  min-height: 1.75em;
+  margin: 0.6em 0;
+}
+
+/* 编辑时标题不画底边线：那条线在排版上是分隔，在输入时只是干扰 */
+.md-preview.wysiwyg h1,
+.md-preview.wysiwyg h2 {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+/* 代码块在编辑态下不加暗底：暗底 + 光标在深色上很难看清，写代码时格外难受 */
+.md-preview.wysiwyg pre {
+  background: hsl(var(--muted));
+  color: hsl(var(--foreground));
+}
+
+.md-preview.wysiwyg pre code {
+  color: inherit;
+}

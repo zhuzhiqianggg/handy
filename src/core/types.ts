@@ -176,4 +176,19 @@ export interface AppSettings {
    * 实际窗口显隐由主窗口在 `main.tsx` 里订阅本字段驱动（见 `commands/bar.rs`）。
    */
   barPinned: boolean;
+  /**
+   * 主窗口是否置顶（默认 `false`）。
+   *
+   * 置顶是「强需求场景」才开的开关：默认关，避免主窗口盖住浏览器 / 编辑器 /
+   * 系统弹框等**窗口外的内容**（用户反馈：弹框被压住，只能先挪走 Handy）。
+   * `true` 时主窗口始终浮在最上层。实际生效由主窗口在 `main.tsx` 里订阅本字段驱动。
+   */
+  mainPinned: boolean;
+  /**
+   * 工作台「快捷入口」展示哪些系统动作（存动作 id 数组，顺序即展示顺序）。
+   *
+   * 默认值见 `DEFAULT_QUICK_ACTION_IDS`（只放常用项）；用户可在工作台里「自定义」增删。
+   * 服务端动作表若删除了某个 id，前端会自动忽略不存在的项（不做破坏性清理）。
+   */
+  quickActionIds: string[];
 }

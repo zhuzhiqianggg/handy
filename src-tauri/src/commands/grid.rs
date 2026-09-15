@@ -739,3 +739,574 @@ pub async fn grid_open_path(app: AppHandle, path: String) -> Result<(), String> 
         .open(path, None)
         .map_err(|err| format!("打开文件失败：{err}"))
 }
+
+// ————————————————————————————————————————————————————————————————
+// 一键整理 / 布局备份与还原（V19）
+//
+// 对标「桌面整理工具」的核心体验：**一键把满屏图标归置成几个格子**、
+// **布局可备份可还原**。与 V12「建目录 + 移动文件」的根本区别仍然是
+// **零磁盘副作用**：整理的是「桌面图标的呈现方式」，文件本体一个字节都不动。
+// 因此「还原布局」只是丢弃 / 重建格子，不涉及任何文件回迁，天然安全。
+// ————————————————————————————————————————————————————————————————
+
+/// 一键整理的格子排布：从左上角起、每行 [`ARRANGE_COLUMNS`] 个、按网格递进。
+const ARRANGE_COLUMNS: i64 = 3;
+const ARRANGE_ORIGIN_X: i64 = 40;
+const ARRANGE_ORIGIN_Y: i64 = 40;
+const ARRANGE_STEP_X: i64 = 344;
+const ARRANGE_STEP_Y: i64 = 268;
+const ARRANGE_BOX_W: i64 = 320;
+const ARRANGE_BOX_H: i64 = 244;
+
+/// 一键整理结果摘要（前端据此提示「收了几个格子、几个文件」）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoArrangeReport {
+    /// 桌面上扫描到的可见条目数（已排除隐藏 / 系统文件与符号链接）
+    pub scanned: usize,
+    /// 本次新建的格子数
+    pub boxes_created: usize,
+    /// 复用了同名已有格子的次数
+    pub boxes_reused: usize,
+    /// 新登记的条目引用数
+    pub items_added: usize,
+    /// 已在格子中、本次跳过的条目数
+    pub skipped: usize,
+}
+
+/// 把扫描结果归入「格子名」：文件夹单独一组，文件按扩展名类别分组。
+fn arrange_group_of(item: &crate::commands::organizer::OrganizerItem) -> String {
+    if item.is_dir {
+        return "文件夹".to_string();
+    }
+    if item.category.is_empty() {
+        return "其他".to_string();
+    }
+    item.category.clone()
+}
+
+/// 分组展示顺序：文件夹最前，「其他」最后，中间类别保持扫描自然顺序。
+fn arrange_group_rank(name: &str) -> i64 {
+    match name {
+        "文件夹" => 0,
+        "其他" => 2,
+        _ => 1,
+    }
+}
+
+/// 一键整理桌面：扫描 → 按类型分组 → 每组一个格子 + 登记引用。
+///
+/// - **不移动 / 不复制 / 不重命名任何文件**，只新建格子与引用；
+/// - 同名格子直接复用（再次整理是**增量补充**，不会越点越多格子）；
+/// - 已登记过的文件全局去重，不会在多个格子里重复出现。
+///
+/// `dir` 仅供测试 / 自定义目录，缺省为用户桌面。
+#[tauri::command]
+pub async fn grid_auto_arrange(
+    app: AppHandle,
+    dir: Option<String>,
+) -> Result<AutoArrangeReport, String> {
+    use std::collections::{HashMap, HashSet};
+    use std::path::PathBuf;
+
+    let root: PathBuf = match dir {
+        Some(value) if !value.trim().is_empty() => PathBuf::from(value.trim()),
+        _ => dirs::desktop_dir().ok_or_else(|| "无法定位桌面目录".to_string())?,
+    };
+
+    // 复用 organizer 的扫描：已排除隐藏 / 系统文件与 symlink，并带好 by-type 类别
+    let scanned = crate::commands::organizer::scan_items(&root)?;
+    let total_scanned = scanned.len();
+
+    let conn = connect(&app)?;
+
+    // 已登记的文件路径（跨全部格子）—— 同一文件不重复登记
+    let mut known: HashSet<String> = HashSet::new();
+    {
+        let mut stmt = conn
+            .prepare("SELECT file_path FROM grid_items")
+            .map_err(|err| format!("读取已有条目失败：{err}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|err| format!("读取已有条目失败：{err}"))?;
+        for row in rows {
+            known.insert(row.map_err(|err| format!("读取已有条目失败：{err}"))?);
+        }
+    }
+
+    // 已有格子：名称 → id；`occupied` 记录已占用的排布槽位，新格子往后排
+    let mut existing: HashMap<String, i64> = HashMap::new();
+    let mut occupied: i64 = 0;
+    {
+        let mut stmt = conn
+            .prepare("SELECT id, name FROM grid_boxes ORDER BY sort ASC, id ASC")
+            .map_err(|err| format!("读取格子失败：{err}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|err| format!("读取格子失败：{err}"))?;
+        for row in rows {
+            let (id, name) = row.map_err(|err| format!("读取格子失败：{err}"))?;
+            occupied += 1;
+            existing.insert(name, id);
+        }
+    }
+
+    // 按类别分组（保持扫描顺序，末尾统一排序把「文件夹」提前、「其他」压后）
+    let mut grouped: Vec<(String, Vec<usize>)> = Vec::new();
+    for (index, item) in scanned.iter().enumerate() {
+        let key = arrange_group_of(item);
+        match grouped.iter_mut().find(|(name, _)| *name == key) {
+            Some((_, bucket)) => bucket.push(index),
+            None => grouped.push((key, vec![index])),
+        }
+    }
+    grouped.sort_by_key(|(name, _)| arrange_group_rank(name));
+
+    let mut report = AutoArrangeReport {
+        scanned: total_scanned,
+        boxes_created: 0,
+        boxes_reused: 0,
+        items_added: 0,
+        skipped: 0,
+    };
+
+    for (label, indices) in grouped {
+        // 本组里还没被登记过的文件
+        let fresh: Vec<usize> = indices
+            .into_iter()
+            .filter(|index| {
+                scanned
+                    .get(*index)
+                    .map(|item| !known.contains(&item.path))
+                    .unwrap_or(false)
+            })
+            .collect();
+        if fresh.is_empty() {
+            report.skipped += 1;
+            continue;
+        }
+
+        let box_id: i64 = match existing.get(&label) {
+            Some(id) => {
+                report.boxes_reused += 1;
+                *id
+            }
+            None => {
+                let now = now_iso();
+                let pos_x = ARRANGE_ORIGIN_X + (occupied % ARRANGE_COLUMNS) * ARRANGE_STEP_X;
+                let pos_y = ARRANGE_ORIGIN_Y + (occupied / ARRANGE_COLUMNS) * ARRANGE_STEP_Y;
+                // 全表求最大值：该 SQL 无占位符，必须传 None
+                let sort = next_sort(
+                    &conn,
+                    "SELECT COALESCE(MAX(sort) + 1, 0) FROM grid_boxes",
+                    None,
+                )?;
+                conn.execute(
+                    "INSERT INTO grid_boxes \
+                     (name, pos_x, pos_y, width, height, sort, created_at, updated_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    params![
+                        label,
+                        pos_x,
+                        pos_y,
+                        ARRANGE_BOX_W,
+                        ARRANGE_BOX_H,
+                        sort,
+                        now,
+                        now,
+                    ],
+                )
+                .map_err(|err| format!("创建格子「{label}」失败：{err}"))?;
+                let id = conn.last_insert_rowid();
+                existing.insert(label.clone(), id);
+                occupied += 1;
+                report.boxes_created += 1;
+                id
+            }
+        };
+
+        let mut item_sort = next_sort(
+            &conn,
+            "SELECT COALESCE(MAX(sort) + 1, 0) FROM grid_items WHERE box_id = ?1",
+            Some(box_id),
+        )?;
+        let created = now_iso();
+        for index in fresh {
+            let Some(item) = scanned.get(index) else {
+                continue;
+            };
+            conn.execute(
+                "INSERT INTO grid_items (box_id, file_path, display_name, sort, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![box_id, item.path, item.name, item_sort, created],
+            )
+            .map_err(|err| format!("登记「{}」失败：{err}", item.name))?;
+            known.insert(item.path.clone());
+            item_sort += 1;
+            report.items_added += 1;
+        }
+    }
+
+    Ok(report)
+}
+
+/// 布局文件里的单条引用。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LayoutItem {
+    pub file_path: String,
+    pub display_name: String,
+    pub sort: i64,
+}
+
+/// 布局文件里的单个格子。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LayoutBox {
+    pub name: String,
+    pub pos_x: i64,
+    pub pos_y: i64,
+    pub width: i64,
+    pub height: i64,
+    pub sort: i64,
+    pub items: Vec<LayoutItem>,
+}
+
+/// 桌面布局快照（备份文件的内容；`version` 供将来结构升级时判断兼容性）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GridLayout {
+    pub version: i64,
+    pub exported_at: String,
+    pub boxes: Vec<LayoutBox>,
+}
+
+/// 布局还原结果摘要。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LayoutImportReport {
+    pub boxes: usize,
+    pub items: usize,
+    /// 快照里指向的文件当前已不存在（引用仍会恢复，打开时才提示 —— 不静默丢弃）
+    pub missing_files: usize,
+}
+
+/// 组装当前布局快照（内部原语：导出到文件与「备份到本机」共用）。
+fn build_layout(conn: &Connection) -> Result<GridLayout, String> {
+    let box_rows: Vec<GridBox> = {
+        let sql = format!(
+            "SELECT {BOX_COLUMNS}, \
+             (SELECT COUNT(*) FROM grid_items i WHERE i.box_id = b.id) AS item_count \
+             FROM grid_boxes b ORDER BY b.sort ASC, b.id ASC"
+        );
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|err| format!("导出布局失败：{err}"))?;
+        // 分两步绑定：`mapped` 必须比 `stmt` 后声明（drop 顺序倒过来），
+        // 否则借用中的迭代器会先于语句被释放 —— E0597。
+        let mapped = stmt
+            .query_map([], row_to_box_with_count)
+            .map_err(|err| format!("导出布局失败：{err}"))?;
+        mapped
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| format!("导出布局失败：{err}"))?
+    };
+
+    let mut boxes: Vec<LayoutBox> = Vec::with_capacity(box_rows.len());
+    for row in box_rows {
+        let mut stmt = conn
+            .prepare(
+                "SELECT file_path, display_name, sort FROM grid_items \
+                 WHERE box_id = ?1 ORDER BY sort ASC, id ASC",
+            )
+            .map_err(|err| format!("导出布局失败：{err}"))?;
+        let items = stmt
+            .query_map(params![row.id], |item| {
+                Ok(LayoutItem {
+                    file_path: item.get(0)?,
+                    display_name: item.get(1)?,
+                    sort: item.get(2)?,
+                })
+            })
+            .map_err(|err| format!("导出布局失败：{err}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| format!("导出布局失败：{err}"))?;
+        boxes.push(LayoutBox {
+            name: row.name,
+            pos_x: row.pos_x,
+            pos_y: row.pos_y,
+            width: row.width,
+            height: row.height,
+            sort: row.sort,
+            items,
+        });
+    }
+
+    Ok(GridLayout {
+        version: 1,
+        exported_at: now_iso(),
+        boxes,
+    })
+}
+
+/// 把一份布局快照落到库里（**替换式**：先清空现有格子，再按快照重建）。
+///
+/// 调用方 `grid_layout_restore` 会先把当前布局另存为「还原前自动备份」，
+/// 因此这一步虽是破坏性的，但始终有回退路径。
+fn apply_layout(conn: &mut Connection, layout: &GridLayout) -> Result<LayoutImportReport, String> {
+    if layout.version != 1 {
+        return Err(format!(
+            "布局快照版本不受支持（{0}，当前支持 1）",
+            layout.version
+        ));
+    }
+
+    let tx = conn
+        .transaction()
+        .map_err(|err| format!("还原布局失败：{err}"))?;
+
+    // 清空（grid_items 由外键 ON DELETE CASCADE 级联，这里显式删两遍更直观）
+    tx.execute("DELETE FROM grid_items", [])
+        .map_err(|err| format!("清空旧条目失败：{err}"))?;
+    tx.execute("DELETE FROM grid_boxes", [])
+        .map_err(|err| format!("清空旧格子失败：{err}"))?;
+
+    let created = now_iso();
+    let mut item_total = 0usize;
+    let mut missing = 0usize;
+
+    for (index, entry) in layout.boxes.iter().enumerate() {
+        tx.execute(
+            "INSERT INTO grid_boxes \
+             (name, pos_x, pos_y, width, height, sort, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                clean_name(Some(entry.name.clone())),
+                entry.pos_x,
+                entry.pos_y,
+                entry.width.max(160),
+                entry.height.max(120),
+                if entry.sort != 0 { entry.sort } else { index as i64 },
+                created,
+                created,
+            ],
+        )
+        .map_err(|err| format!("还原格子「{}」失败：{err}", entry.name))?;
+        let box_id = tx.last_insert_rowid();
+
+        for (item_index, item) in entry.items.iter().enumerate() {
+            if !std::path::Path::new(&item.file_path).exists() {
+                missing += 1;
+            }
+            tx.execute(
+                "INSERT INTO grid_items (box_id, file_path, display_name, sort, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    box_id,
+                    item.file_path,
+                    item.display_name,
+                    if item.sort != 0 { item.sort } else { item_index as i64 },
+                    created,
+                ],
+            )
+            .map_err(|err| format!("还原条目「{}」失败：{err}", item.display_name))?;
+            item_total += 1;
+        }
+    }
+
+    tx.commit()
+        .map_err(|err| format!("提交布局还原失败：{err}"))?;
+
+    Ok(LayoutImportReport {
+        boxes: layout.boxes.len(),
+        items: item_total,
+        missing_files: missing,
+    })
+}
+
+/// 导出当前桌面布局快照（供「导出到文件 / 分享给别人」等外部通道使用）。
+#[tauri::command]
+pub async fn grid_layout_export(app: AppHandle) -> Result<GridLayout, String> {
+    let conn = connect(&app)?;
+    build_layout(&conn)
+}
+
+/// 用一份外部布局快照覆盖当前布局（替换式；调用方需自行确认）。
+#[tauri::command]
+pub async fn grid_layout_import(
+    app: AppHandle,
+    layout: GridLayout,
+) -> Result<LayoutImportReport, String> {
+    let mut conn = connect(&app)?;
+    apply_layout(&mut conn, &layout)
+}
+
+// ————————————————————————————————————————————————————————————————
+// 布局快照（备份 / 还原布局）
+//
+// 存 `grid_meta`：`key = "layout:<uuid>"`，`value = 快照 JSON`。
+// 之所以不落成文件：备份/还原本就是「同一台机器上两种桌面摆放方式来回切」，
+// 放库里既省一次文件对话框，也天然跟着数据库备份走（见 commands/backup.rs）。
+// ————————————————————————————————————————————————————————————————
+
+/// `grid_meta` 中布局快照的键前缀。
+const META_KEY_LAYOUT_PREFIX: &str = "layout:";
+
+/// 还原前自动备份使用的固定 id（幂等覆盖，不随还原次数堆积）。
+const LAYOUT_AUTO_BACKUP_ID: &str = "auto-before-restore";
+
+/// 布局快照摘要（列表用；不带完整 layout，省往返体积）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LayoutSnapshotMeta {
+    pub id: String,
+    pub name: String,
+    pub saved_at: String,
+    pub box_count: usize,
+    pub item_count: usize,
+}
+
+/// 落库的快照完整内容。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LayoutSnapshot {
+    id: String,
+    name: String,
+    saved_at: String,
+    layout: GridLayout,
+}
+
+/// 快照 → 摘要。
+fn snapshot_meta(snapshot: &LayoutSnapshot) -> LayoutSnapshotMeta {
+    LayoutSnapshotMeta {
+        id: snapshot.id.clone(),
+        name: snapshot.name.clone(),
+        saved_at: snapshot.saved_at.clone(),
+        box_count: snapshot.layout.boxes.len(),
+        item_count: snapshot
+            .layout
+            .boxes
+            .iter()
+            .map(|box_item| box_item.items.len())
+            .sum(),
+    }
+}
+
+/// 写入一份快照（同 id 覆盖）。
+fn save_snapshot(conn: &Connection, snapshot: &LayoutSnapshot) -> Result<(), String> {
+    let value = serde_json::to_string(snapshot)
+        .map_err(|err| format!("序列化布局快照失败：{err}"))?;
+    conn.execute(
+        "INSERT INTO grid_meta (key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![format!("{META_KEY_LAYOUT_PREFIX}{}", snapshot.id), value],
+    )
+    .map_err(|err| format!("保存布局快照失败：{err}"))?;
+    Ok(())
+}
+
+/// 读一份快照（不存在返回中文错误）。
+fn load_snapshot(conn: &Connection, snapshot_id: &str) -> Result<LayoutSnapshot, String> {
+    let key = format!("{META_KEY_LAYOUT_PREFIX}{snapshot_id}");
+    let raw: String = conn
+        .query_row(
+            "SELECT value FROM grid_meta WHERE key = ?1",
+            params![key],
+            |row| row.get(0),
+        )
+        .map_err(|_| format!("找不到布局快照（{snapshot_id}）"))?;
+    serde_json::from_str(&raw).map_err(|err| format!("解析布局快照失败：{err}"))
+}
+
+/// 把当前桌面布局备份成一份本机快照。
+#[tauri::command]
+pub async fn grid_layout_save(
+    app: AppHandle,
+    name: Option<String>,
+) -> Result<LayoutSnapshotMeta, String> {
+    let conn = connect(&app)?;
+    let layout = build_layout(&conn)?;
+    let saved_at = now_iso();
+    let label = match name {
+        Some(raw) if !raw.trim().is_empty() => raw.trim().to_string(),
+        _ => format!("布局 {saved_at}"),
+    };
+    let snapshot = LayoutSnapshot {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: label,
+        saved_at,
+        layout,
+    };
+    save_snapshot(&conn, &snapshot)?;
+    Ok(snapshot_meta(&snapshot))
+}
+
+/// 列出全部布局快照（按保存时间倒序；含「还原前自动备份」）。
+#[tauri::command]
+pub async fn grid_layout_list(app: AppHandle) -> Result<Vec<LayoutSnapshotMeta>, String> {
+    let conn = connect(&app)?;
+    let mut stmt = conn
+        .prepare("SELECT value FROM grid_meta WHERE key LIKE ?1")
+        .map_err(|err| format!("读取布局快照失败：{err}"))?;
+    let rows = stmt
+        .query_map(params![format!("{META_KEY_LAYOUT_PREFIX}%")], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|err| format!("读取布局快照失败：{err}"))?;
+
+    let mut metas: Vec<LayoutSnapshotMeta> = Vec::new();
+    for row in rows {
+        let raw = row.map_err(|err| format!("读取布局快照失败：{err}"))?;
+        // 单条解析失败只跳过这一条，不让一份坏数据废掉整个列表
+        if let Ok(snapshot) = serde_json::from_str::<LayoutSnapshot>(&raw) {
+            metas.push(snapshot_meta(&snapshot));
+        }
+    }
+    metas.sort_by(|a, b| b.saved_at.cmp(&a.saved_at));
+    Ok(metas)
+}
+
+/// 从某份快照还原布局（替换式）。
+///
+/// **还原前自动备份**：先把当前布局另存为「还原前自动备份」（固定 id，覆盖式），
+/// 于是「还原错了」也能再还原回来 —— 破坏性操作必须有回退路径。
+#[tauri::command]
+pub async fn grid_layout_restore(
+    app: AppHandle,
+    snapshot_id: String,
+) -> Result<LayoutImportReport, String> {
+    let mut conn = connect(&app)?;
+    let snapshot = load_snapshot(&conn, &snapshot_id)?;
+
+    // 自动备份当前布局（失败不阻断还原：这是「额外保险」，不是前置条件）
+    if let Ok(current) = build_layout(&conn) {
+        let auto = LayoutSnapshot {
+            id: LAYOUT_AUTO_BACKUP_ID.to_string(),
+            name: "还原前自动备份".to_string(),
+            saved_at: now_iso(),
+            layout: current,
+        };
+        let _ = save_snapshot(&conn, &auto);
+    }
+
+    apply_layout(&mut conn, &snapshot.layout)
+}
+
+/// 删除一份布局快照。
+#[tauri::command]
+pub async fn grid_layout_delete(app: AppHandle, snapshot_id: String) -> Result<(), String> {
+    let conn = connect(&app)?;
+    let affected = conn
+        .execute(
+            "DELETE FROM grid_meta WHERE key = ?1",
+            params![format!("{META_KEY_LAYOUT_PREFIX}{snapshot_id}")],
+        )
+        .map_err(|err| format!("删除布局快照失败：{err}"))?;
+    if affected == 0 {
+        return Err("布局快照不存在或已被删除".to_string());
+    }
+    Ok(())
+}
+

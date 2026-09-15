@@ -80,12 +80,25 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_grid_items_box_path ON grid_items(box_id, 
 CREATE INDEX IF NOT EXISTS idx_grid_items_box_sort ON grid_items(box_id, sort);
 ";
 
+/// v5：待办「说明」字段（`todos.detail`）。
+///
+/// `title` 只够放一句短语（列表里要一行显示、系统提醒要念出来），但真实事项往往需要
+/// 补充上下文：链接、操作步骤、子清单。于是新增 `detail` 存 **Markdown** 说明，
+/// 由工作台以所见即所得方式编辑（见 `src/components/RichMarkdown.tsx`）。
+///
+/// `ADD COLUMN` 带**常量默认值**，SQLite 允许且无需回填；迁移只执行一次
+/// （`schema_migrations` 记录版本），因此不会出现「列已存在」的重复执行问题。
+pub const V5_TODO_DETAIL: &str = "
+ALTER TABLE todos ADD COLUMN detail TEXT NOT NULL DEFAULT '';
+";
+
 /// 全部迁移：(版本号, SQL)。新增结构在**末尾追加**；移除历史结构可追加 DROP 迁移。
 pub const MIGRATIONS: &[(i64, &str)] = &[
     (1, V1_SCHEMA),
     (2, V2_DROP_CLIP),
     (3, V3_VAULT),
     (4, V4_GRID),
+    (5, V5_TODO_DETAIL),
 ];
 
 /// 当前毫秒时间戳（用于 `applied_at`）。

@@ -64,3 +64,67 @@ export interface GridRegion {
   width: number;
   height: number;
 }
+
+// —— 一键整理 / 布局备份与还原（V19）——
+
+/** 一键整理结果摘要 */
+export interface AutoArrangeReport {
+  /** 桌面上扫描到的可见条目数（隐藏 / 系统文件与符号链接已排除） */
+  scanned: number;
+  /** 本次新建的格子数 */
+  boxesCreated: number;
+  /** 复用了同名已有格子的次数 */
+  boxesReused: number;
+  /** 新登记的条目引用数 */
+  itemsAdded: number;
+  /** 已在格子中、本次跳过的分组数 */
+  skipped: number;
+}
+
+/** 布局快照里的单条引用 */
+export interface LayoutItem {
+  filePath: string;
+  displayName: string;
+  sort: number;
+}
+
+/** 布局快照里的单个格子 */
+export interface LayoutBox {
+  name: string;
+  posX: number;
+  posY: number;
+  width: number;
+  height: number;
+  sort: number;
+  items: LayoutItem[];
+}
+
+/**
+ * 桌面布局快照（备份文件内容）。
+ *
+ * 语义：**只记录格子几何与文件引用**，不含文件内容 —— 还原布局不会回迁任何文件，
+ * 因为整理本身从未移动过文件。
+ */
+export interface GridLayout {
+  version: number;
+  exportedAt: string;
+  boxes: LayoutBox[];
+}
+
+/** 布局还原结果摘要 */
+export interface LayoutImportReport {
+  boxes: number;
+  items: number;
+  /** 快照指向的文件当前已不存在（引用照常恢复，打开时才提示） */
+  missingFiles: number;
+}
+
+/** 布局快照摘要（「备份布局」列表用，不含完整布局体） */
+export interface LayoutSnapshotMeta {
+  id: string;
+  name: string;
+  savedAt: string;
+  boxCount: number;
+  itemCount: number;
+}
+

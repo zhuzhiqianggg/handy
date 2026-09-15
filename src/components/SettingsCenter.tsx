@@ -483,6 +483,11 @@ export function SettingsCenter(): React.JSX.Element {
             description="在工作台/桌面顶部显示一条随时可见的待办速览，可直接勾掉完成项"
             field="barPinned"
           />
+          <BooleanRow
+            title="主窗口始终置顶"
+            description="开启后 Handy 会浮在所有窗口之上；默认关闭，避免挡住系统弹框与其它软件"
+            field="mainPinned"
+          />
         </section>
 
         <Separator />

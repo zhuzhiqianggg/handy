@@ -20,6 +20,8 @@ import { createNote as createNoteApi, type Note } from './notesService';
 export interface Todo {
   id: string;
   title: string;
+  /** Markdown 说明（任务名称之外的补充：步骤 / 链接 / 清单）；空串表示无 */
+  detail: string;
   done: boolean;
   /** 1 = 普通，2 = 重要，3 = 紧急 */
   priority: number;
@@ -50,6 +52,7 @@ export function priorityStyle(priority: number): { id: number; name: string; cla
 /** 增量更新补丁（仅传入键会被写入；`dueAt`/`remindAt` 传 null 表示清空） */
 export interface TodoPatch {
   title?: string;
+  detail?: string;
   done?: boolean;
   priority?: number;
   dueAt?: number | null;
@@ -61,6 +64,7 @@ export interface TodoPatch {
 /** 新建入参（全部可选） */
 export interface TodoCreateInput {
   title?: string;
+  detail?: string;
   priority?: number;
   dueAt?: number | null;
   remindAt?: number | null;
@@ -81,13 +85,14 @@ export interface TodoChangedPayload {
 }
 
 const TODO_COLUMNS =
-  'id, title, done, priority, due_at, remind_at, reminded, note_id, created_at, updated_at';
+  'id, title, detail, done, priority, due_at, remind_at, reminded, note_id, created_at, updated_at';
 
 /** DB 行（snake_case）→ 实体（camelCase） */
 function rowToTodo(row: Record<string, unknown>): Todo {
   return {
     id: String(row.id ?? ''),
     title: String(row.title ?? ''),
+    detail: String(row.detail ?? ''),
     done: Number(row.done ?? 0) !== 0,
     priority: Number(row.priority ?? 1),
     dueAt: row.due_at === null || row.due_at === undefined ? null : Number(row.due_at),
@@ -160,6 +165,7 @@ export async function createTodo(input: TodoCreateInput = {}): Promise<Todo> {
   const todo: Todo = {
     id: newTodoId(),
     title: input.title ?? '',
+    detail: input.detail ?? '',
     done: false,
     priority: input.priority ?? 1,
     dueAt: input.dueAt ?? null,
@@ -170,10 +176,11 @@ export async function createTodo(input: TodoCreateInput = {}): Promise<Todo> {
     updatedAt: now,
   };
   await execute(
-    `INSERT INTO todos (${TODO_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO todos (${TODO_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       todo.id,
       todo.title,
+      todo.detail,
       todo.done ? 1 : 0,
       todo.priority,
       todo.dueAt,
@@ -200,6 +207,10 @@ export async function updateTodo(id: string, patch: TodoPatch): Promise<void> {
   if (patch.title !== undefined) {
     sets.push('title = ?');
     params.push(patch.title);
+  }
+  if (patch.detail !== undefined) {
+    sets.push('detail = ?');
+    params.push(patch.detail);
   }
   if (patch.done !== undefined) {
     sets.push('done = ?');

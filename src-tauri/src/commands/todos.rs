@@ -1,8 +1,11 @@
 //! 待办（M3）数据命令：CRUD + 完成态切换（V09）。
 //!
-//! 数据契约：`db/schema.sql` 的 `todos` 表（**不可改表结构**）：
+//! 数据契约：`todos` 表（v1 建表 + `db/migrations.rs` v5 追加 `detail`）：
+//!   - `title` 一句话标题（列表显示 / 提醒播报用），`detail` 为 Markdown 说明；
 //!   - `due_at` 到期时间 / `remind_at` 提醒时间 / `reminded` 是否已提醒（前端调度器写）；
 //!   - `note_id` 外键关联 `notes(id)`（ON DELETE SET NULL），支撑便签↔待办互转。
+//!
+//! 表结构变更一律走**追加迁移**（只增不改），不得就地改动历史迁移 SQL。
 //!
 //! 双路径说明（与便签 `commands/notes.rs` 一致）：
 //!   - 前端日常读写走 `tauri-plugin-sql` 直连 SQLite（见 `src/core/data/todosService.ts`）；
@@ -24,6 +27,8 @@ use crate::db;
 pub struct Todo {
     pub id: String,
     pub title: String,
+    /// Markdown 说明（可为空串）
+    pub detail: String,
     pub done: bool,
     pub priority: i64,
     pub due_at: Option<i64>,
@@ -39,6 +44,7 @@ fn row_to_todo(row: &Row) -> rusqlite::Result<Todo> {
     Ok(Todo {
         id: row.get("id")?,
         title: row.get("title")?,
+        detail: row.get("detail")?,
         done: row.get::<_, i64>("done")? != 0,
         priority: row.get("priority")?,
         due_at: row.get("due_at")?,
@@ -66,7 +72,7 @@ fn now_ms() -> i64 {
 }
 
 const TODO_COLUMNS: &str =
-    "id, title, done, priority, due_at, remind_at, reminded, note_id, created_at, updated_at";
+    "id, title, detail, done, priority, due_at, remind_at, reminded, note_id, created_at, updated_at";
 
 /// 列表排序：未完成优先 → 优先级高优先 → 有到期时间优先、近者优先 → 最近更新优先。
 const TODO_ORDER: &str = "ORDER BY done ASC, priority DESC, \
@@ -106,6 +112,7 @@ pub async fn todos_list(app: AppHandle) -> Result<Vec<Todo>, String> {
 pub struct TodoCreateInput {
     pub id: Option<String>,
     pub title: Option<String>,
+    pub detail: Option<String>,
     pub priority: Option<i64>,
     pub due_at: Option<i64>,
     pub remind_at: Option<i64>,
@@ -127,6 +134,7 @@ pub async fn todos_create(app: AppHandle, input: Option<TodoCreateInput>) -> Res
     let todo = Todo {
         id: id.clone(),
         title: input.title.unwrap_or_default(),
+        detail: input.detail.unwrap_or_default(),
         done: false,
         priority: input.priority.unwrap_or(1),
         due_at: input.due_at,
@@ -139,11 +147,12 @@ pub async fn todos_create(app: AppHandle, input: Option<TodoCreateInput>) -> Res
 
     let conn = connect(&app)?;
     conn.execute(
-        "INSERT INTO todos (id, title, done, priority, due_at, remind_at, reminded, note_id, created_at, updated_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        "INSERT INTO todos (id, title, detail, done, priority, due_at, remind_at, reminded, note_id, created_at, updated_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             todo.id,
             todo.title,
+            todo.detail,
             todo.done as i64,
             todo.priority,
             todo.due_at,
@@ -166,6 +175,7 @@ pub async fn todos_create(app: AppHandle, input: Option<TodoCreateInput>) -> Res
 #[serde(rename_all = "camelCase", default)]
 pub struct TodoPatch {
     pub title: Option<String>,
+    pub detail: Option<String>,
     pub done: Option<bool>,
     pub priority: Option<i64>,
     pub due_at: Option<i64>,
@@ -181,6 +191,10 @@ pub async fn todos_update(app: AppHandle, todo_id: String, patch: TodoPatch) -> 
     let mut values: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
     if let Some(v) = &patch.title {
         sets.push("title = ?");
+        values.push(Box::new(v.clone()));
+    }
+    if let Some(v) = &patch.detail {
+        sets.push("detail = ?");
         values.push(Box::new(v.clone()));
     }
     if let Some(v) = patch.done {

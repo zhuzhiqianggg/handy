@@ -89,6 +89,19 @@ function start(): void {
     } else if (deepModule !== null && deepModule !== '') {
       useAppStore.getState().setView({ kind: 'module', moduleId: deepModule });
     }
+
+    // 2.2) 开发调试入口 `?demo=richmarkdown`：直接挂载所见即所得输入框做浏览器回归。
+    // 工作台里的笔记 / 计划依赖 SQLite，浏览器预览下是空的 —— 没有这个入口就测不到该组件。
+    if (deepLink.get('demo') === 'richmarkdown') {
+      void import('./dev/RichMarkdownDemo').then(({ default: Demo }) => {
+        ReactDOM.createRoot(rootElement).render(
+          <React.StrictMode>
+            <Demo />
+          </React.StrictMode>,
+        );
+      });
+      return;
+    }
   }
 
   ReactDOM.createRoot(rootElement).render(
@@ -109,21 +122,28 @@ function start(): void {
       if (target.windowRoot === 'main' && useAppStore.getState().settings.barPinned) {
         void ipc.barShow().catch(() => undefined);
       }
+      // 主窗口置顶：默认关，设置里开着才应用（否则会盖住系统弹框与其它软件）
+      if (target.windowRoot === 'main' && useAppStore.getState().settings.mainPinned) {
+        void ipc.appSetPinned(true).catch(() => undefined);
+      }
     })
     .catch((error: unknown) => {
       console.error('[Handy] 启动装配失败：', error);
     });
 
-  // 3.1) 贴条显隐的唯一驱动点：**只由主窗口**订阅 `settings.barPinned`。
+  // 3.1) 窗口形态设置（贴条显隐 / 主窗口置顶）的唯一驱动点：**只由主窗口**订阅。
   // 贴条窗自己也跑本文件，若不判断窗口就会「自己叫自己」再创建一次窗口，故限定 main。
   // 这样「工作台按钮 / 设置中心开关」都会经由同一路径生效，行为一致。
   if (target.windowRoot === 'main') {
     useAppStore.subscribe((state, prev) => {
-      if (state.settings.barPinned === prev.settings.barPinned) {
-        return;
+      if (state.settings.barPinned !== prev.settings.barPinned) {
+        const task = state.settings.barPinned ? ipc.barShow() : ipc.barHide();
+        void task.catch(() => undefined);
       }
-      const task = state.settings.barPinned ? ipc.barShow() : ipc.barHide();
-      void task.catch(() => undefined);
+      // 置顶默认关：开着才让主窗口浮在最上层（否则会盖住系统弹框 / 其它软件）
+      if (state.settings.mainPinned !== prev.settings.mainPinned) {
+        void ipc.appSetPinned(state.settings.mainPinned).catch(() => undefined);
+      }
     });
   }
 

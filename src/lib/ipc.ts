@@ -11,11 +11,15 @@ import type {
 } from '@/types/organizer';
 import type { BackupReport, ImportOutcome } from '@/types/backup';
 import type {
+  AutoArrangeReport,
   GridBox,
   GridBoxInput,
   GridGeometry,
   GridItem,
+  GridLayout,
   GridRegion,
+  LayoutImportReport,
+  LayoutSnapshotMeta,
 } from '@/types/grid';
 import type {
   VaultItem,
@@ -168,6 +172,32 @@ export const ipc = {
     }),
   /** 删除盒子（级联删除其条目引用；文件本体不受影响） */
   gridBoxDelete: (boxId: number): Promise<void> => call<void>('grid_box_delete', { boxId }),
+
+  // —— 桌面整理：一键整理 / 布局备份与还原（V19）——
+
+  /**
+   * 一键整理桌面：扫描 → 按类型分组 → 建格子并登记文件引用。
+   * **不移动 / 不复制 / 不重命名任何文件**（整理的是桌面图标的呈现方式）。
+   */
+  gridAutoArrange: (dir?: string | null): Promise<AutoArrangeReport> =>
+    call<AutoArrangeReport>('grid_auto_arrange', { dir: dir ?? null }),
+  /** 导出当前桌面布局快照（备份用；只含几何与路径引用，不含文件内容） */
+  gridLayoutExport: (): Promise<GridLayout> => call<GridLayout>('grid_layout_export'),
+  /** 从布局快照还原（替换式：先清空现有格子，再按快照重建） */
+  gridLayoutImport: (layout: GridLayout): Promise<LayoutImportReport> =>
+    call<LayoutImportReport>('grid_layout_import', { layout }),
+  /** 把当前布局备份成一份本机快照 */
+  gridLayoutSave: (name?: string | null): Promise<LayoutSnapshotMeta> =>
+    call<LayoutSnapshotMeta>('grid_layout_save', { name: name ?? null }),
+  /** 列出全部布局快照（含「还原前自动备份」） */
+  gridLayoutList: (): Promise<LayoutSnapshotMeta[]> =>
+    call<LayoutSnapshotMeta[]>('grid_layout_list'),
+  /** 从某份快照还原布局（还原前会自动备份当前布局） */
+  gridLayoutRestore: (snapshotId: string): Promise<LayoutImportReport> =>
+    call<LayoutImportReport>('grid_layout_restore', { snapshotId }),
+  /** 删除一份布局快照 */
+  gridLayoutDelete: (snapshotId: string): Promise<void> =>
+    call<void>('grid_layout_delete', { snapshotId }),
   /** 添加条目：仅登记原文件路径引用（displayName 缺省 = 文件名） */
   gridItemAdd: (boxId: number, filePath: string, displayName?: string): Promise<GridItem> =>
     call<GridItem>('grid_item_add', { boxId, filePath, displayName: displayName ?? null }),
@@ -202,6 +232,11 @@ export const ipc = {
   barHide: (): Promise<void> => call<void>('bar_hide'),
   /** 唤出主窗口并切到工作台模块（贴条上的「打开工作台」） */
   barOpenWorkstation: (): Promise<void> => call<void>('bar_open_workstation'),
+
+  // —— 主窗口置顶（默认关；置顶会盖住其它程序，收敛为设置项由用户自选）——
+
+  /** 设置主窗口是否始终置顶 */
+  appSetPinned: (pinned: boolean): Promise<void> => call<void>('app_set_pinned', { pinned }),
 
   // —— 工作台「快捷入口」：系统级动作（Rust 侧白名单制）——
 

@@ -9,16 +9,18 @@
 //!
 //! # 三类启动方式
 //!
-//! - [`Launch::Open`]：交给系统默认程序打开（`ms-settings:` 协议、`.cpl`、文件、目录）；
-//! - [`Launch::Spawn`]：直接启动固定程序（参数固定）；
+//! - [`Launch::Open`]：交给系统 shell 打开（`ms-settings:` 协议、`.cpl` 控制面板小程序、
+//!   `.msc` 管理单元、文件、目录）——底层为 Win32 `ShellExecuteW`；
+//! - [`Launch::Spawn`]：直接启动固定程序（**仅限真 PE 可执行文件**，如 `taskmgr.exe`）；
 //! - [`Launch::Elevated`]：经 PowerShell `Start-Process -Verb RunAs` 触发 UAC 提权后启动。
+//!
+//! ⚠️ `.cpl` / `.msc` / 目录**绝不能**用 `Launch::Spawn`：它们不是可执行文件，
+//! `std::process::Command` 会报 `os error 193`（曾是「网络连接」等入口点不开的根因）。
 //!
 //! 平台边界：本模块为 Windows 系统管理面板而设，非 Windows 平台返回明确的中文错误
 //! （不静默失败）。全部命令均为 `async fn`（项目 P0 约定）。
 
 use serde::Serialize;
-
-use tauri::AppHandle;
 
 /// 动作元数据（前端渲染按钮用；`table()` 的顺序即展示顺序）。
 #[derive(Debug, Clone, Serialize)]
@@ -159,7 +161,7 @@ fn table() -> Vec<Entry> {
             description: "ncpa.cpl：网卡属性 / IP / DNS 在这里改",
             group: "网络",
             elevated: false,
-            launch: || spawn(system32("ncpa.cpl")),
+            launch: || open(system32("ncpa.cpl")),
         },
         Entry {
             id: "dns-flush",
@@ -190,7 +192,7 @@ fn table() -> Vec<Entry> {
             description: "定位到 drivers\\etc 目录",
             group: "网络",
             elevated: false,
-            launch: || spawn(drivers_etc("")),
+            launch: || open(drivers_etc("")),
         },
         Entry {
             id: "network-settings",
@@ -231,7 +233,7 @@ fn table() -> Vec<Entry> {
             description: "services.msc：服务启停与启动类型",
             group: "系统管理",
             elevated: false,
-            launch: || spawn(system32("services.msc")),
+            launch: || open(system32("services.msc")),
         },
         Entry {
             id: "device-mgr",
@@ -239,7 +241,7 @@ fn table() -> Vec<Entry> {
             description: "devmgmt.msc：驱动与硬件",
             group: "系统管理",
             elevated: false,
-            launch: || spawn(system32("devmgmt.msc")),
+            launch: || open(system32("devmgmt.msc")),
         },
         Entry {
             id: "disk-mgr",
@@ -247,7 +249,7 @@ fn table() -> Vec<Entry> {
             description: "diskmgmt.msc：分区与盘符",
             group: "系统管理",
             elevated: false,
-            launch: || spawn(system32("diskmgmt.msc")),
+            launch: || open(system32("diskmgmt.msc")),
         },
         Entry {
             id: "event-viewer",
@@ -255,7 +257,7 @@ fn table() -> Vec<Entry> {
             description: "eventvwr.msc：系统与应用日志",
             group: "系统管理",
             elevated: false,
-            launch: || spawn(system32("eventvwr.msc")),
+            launch: || open(system32("eventvwr.msc")),
         },
         Entry {
             id: "firewall",
@@ -263,7 +265,7 @@ fn table() -> Vec<Entry> {
             description: "wf.msc：高级安全 Windows 防火墙",
             group: "系统管理",
             elevated: false,
-            launch: || spawn(system32("wf.msc")),
+            launch: || open(system32("wf.msc")),
         },
         Entry {
             id: "registry",
@@ -287,7 +289,7 @@ fn table() -> Vec<Entry> {
             description: "perfmon：性能计数器",
             group: "系统管理",
             elevated: false,
-            launch: || spawn(system32("perfmon.msc")),
+            launch: || open(system32("perfmon.msc")),
         },
         Entry {
             id: "env-vars",
@@ -308,7 +310,7 @@ fn table() -> Vec<Entry> {
             description: "sysdm.cpl：计算机名 / 远程 / 还原",
             group: "系统管理",
             elevated: false,
-            launch: || spawn(system32("sysdm.cpl")),
+            launch: || open(system32("sysdm.cpl")),
         },
         Entry {
             id: "programs",
@@ -316,7 +318,7 @@ fn table() -> Vec<Entry> {
             description: "appwiz.cpl：卸载 / 修复软件",
             group: "系统管理",
             elevated: false,
-            launch: || spawn(system32("appwiz.cpl")),
+            launch: || open(system32("appwiz.cpl")),
         },
         Entry {
             id: "windows-update",
@@ -356,7 +358,7 @@ fn table() -> Vec<Entry> {
             description: "powercfg.cpl：电源计划",
             group: "系统管理",
             elevated: false,
-            launch: || spawn(system32("powercfg.cpl")),
+            launch: || open(system32("powercfg.cpl")),
         },
         Entry {
             id: "date-time",
@@ -364,7 +366,7 @@ fn table() -> Vec<Entry> {
             description: "timedate.cpl：时区与校时",
             group: "系统管理",
             elevated: false,
-            launch: || spawn(system32("timedate.cpl")),
+            launch: || open(system32("timedate.cpl")),
         },
         Entry {
             id: "sound",
@@ -372,7 +374,7 @@ fn table() -> Vec<Entry> {
             description: "mmsys.cpl：播放 / 录音设备",
             group: "系统管理",
             elevated: false,
-            launch: || spawn(system32("mmsys.cpl")),
+            launch: || open(system32("mmsys.cpl")),
         },
         Entry {
             id: "control-panel",
@@ -393,7 +395,7 @@ fn table() -> Vec<Entry> {
             elevated: false,
             launch: || {
                 let dir = std::env::temp_dir();
-                spawn(dir.to_string_lossy().to_string())
+                open(dir.to_string_lossy().to_string())
             },
         },
     ]
@@ -457,32 +459,73 @@ fn launch_spawn(program: &str, args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// 交给系统默认程序打开。
-fn launch_open(app: &AppHandle, target: &str) -> Result<(), String> {
-    use tauri_plugin_shell::ShellExt;
-    // shell::open 自 2.1 起标记 deprecated（官方建议迁移 tauri-plugin-opener）；
-    // 本项目沿用已集成的 shell 插件，暂不引入新依赖，显式压掉弃用告警。
-    #[allow(deprecated)]
-    app.shell()
-        .open(target.to_string(), None)
-        .map_err(|err| format!("打开失败：{err}"))
+/// 交给系统 shell「打开」一个目标（协议 / 文件 / 目录 / 控制面板小程序）。
+///
+/// # 为什么必须用 `ShellExecuteW` 而不是 `Command::new`
+///
+/// `.cpl`（控制面板小程序）、`.msc`（管理单元）**不是 PE 可执行文件**，
+/// 用 `std::process::Command` 直接执行会失败并报
+/// `%1 不是有效的 Win32 应用程序 (os error 193)`。`ShellExecuteW` 走的才是
+/// 资源管理器双击那条路（由注册表关联决定真实处理程序），因此
+/// `ncpa.cpl` / `services.msc` / 目录 / `ms-settings:` 协议全部由此统一处理。
+///
+/// 也刻意不经 `tauri-plugin-shell::open`（该 API 自 2.1 起已废弃），
+/// 直接用已启用的 `Win32_UI_Shell` 绑定，行为完全自主可控。
+#[cfg(target_os = "windows")]
+fn launch_open(target: &str) -> Result<(), String> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows::core::PCWSTR;
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    /// UTF-16 + NUL 结尾（Win32 宽字符约定）
+    fn wide(value: &str) -> Vec<u16> {
+        OsStr::new(value).encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    let operation = wide("open");
+    let file = wide(target);
+    // SAFETY: 两个 PCWSTR 均指向本函数内仍存活的 NUL 结尾宽字符串；
+    // 其余参数为固定字面量（无 lpParameters / lpDirectory），无别名与生命周期问题。
+    let handle = unsafe {
+        ShellExecuteW(
+            None,
+            PCWSTR(operation.as_ptr()),
+            PCWSTR(file.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+
+    // ShellExecuteW 的约定：返回值 <= 32 表示失败（32 以上是成功实例句柄）
+    let code = handle.0 as isize;
+    if code <= 32 {
+        return Err(format!("系统未能打开「{target}」（ShellExecute 代码 {code}）"));
+    }
+    Ok(())
+}
+
+/// 非 Windows 平台：明确报错，不静默失败。
+#[cfg(not(target_os = "windows"))]
+fn launch_open(target: &str) -> Result<(), String> {
+    Err(format!("「{target}」的打开方式仅支持 Windows 系统"))
 }
 
 /// 执行一个快捷动作（`actionId` 必须在白名单内，否则报错）。
 #[tauri::command]
-pub async fn sys_action_run(app: AppHandle, action_id: String) -> Result<(), String> {
+pub async fn sys_action_run(action_id: String) -> Result<(), String> {
     let Some(entry) = table().into_iter().find(|item| item.id == action_id) else {
         return Err(format!("未知的快捷动作：{action_id}"));
     };
     if !cfg!(target_os = "windows") {
-        return Err(format!(
-            "「{}」目前仅支持 Windows 系统",
-            entry.name
-        ));
+        return Err(format!("「{}」目前仅支持 Windows 系统", entry.name));
     }
     let name = entry.name;
     match (entry.launch)() {
-        Launch::Open(target) => launch_open(&app, &target),
+        Launch::Open(target) => launch_open(&target),
         Launch::Spawn { program, args } => launch_spawn(&program, &args),
         Launch::Elevated { program, args } => launch_elevated(&program, &args),
     }

@@ -46,6 +46,7 @@ pub fn run() {
             commands::app::app_show_main,
             commands::app::app_hide_main,
             commands::app::app_toggle_main,
+            commands::app::app_set_pinned,
             commands::app::module_list_state,
             commands::app::module_set_enabled,
             // —— 便签（M3 / V08）——
@@ -91,6 +92,14 @@ pub fn run() {
             commands::grid::grid_geometry_get,
             commands::grid::grid_geometry_set,
             commands::grid::grid_open_path,
+            // —— 桌面整理：一键整理 / 布局备份与还原（V19）——
+            commands::grid::grid_auto_arrange,
+            commands::grid::grid_layout_export,
+            commands::grid::grid_layout_import,
+            commands::grid::grid_layout_save,
+            commands::grid::grid_layout_list,
+            commands::grid::grid_layout_restore,
+            commands::grid::grid_layout_delete,
             // —— 系统快捷动作（工作台「快捷入口」；白名单制，前端只传动作 id）——
             commands::sys::sys_action_list,
             commands::sys::sys_action_run,

@@ -29,6 +29,9 @@ _tmp_*
 # 验收截图（本地留证用，不入库）
 /_shots/
 
+# Vite 每次构建在根目录留下的配置临时产物
+vite.config.ts.timestamp-*.mjs
+
 # 日志
 *.log
 npm-debug.log*

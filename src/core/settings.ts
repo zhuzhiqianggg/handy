@@ -21,6 +21,24 @@ export const APP_VERSION = '0.1.0';
 /** 最近使用最大条数 */
 export const RECENT_LIMIT = 20;
 
+/**
+ * 工作台「快捷入口」默认展示的动作 id。
+ *
+ * id 契约来自 Rust 白名单表 `src-tauri/src/commands/sys.rs`（那里是唯一事实源），
+ * 这里只挑**高频且路径深**的几项：管理员终端、网络三件套（网络连接 / 刷新 DNS /
+ * 编辑 hosts）、任务管理器、服务、临时目录。其余动作由工作台里的「自定义」自行勾选。
+ */
+export const DEFAULT_QUICK_ACTION_IDS: readonly string[] = [
+  'powershell-admin',
+  'cmd-admin',
+  'ncpa',
+  'dns-flush',
+  'hosts-edit',
+  'taskmgr',
+  'services',
+  'temp-folder',
+];
+
 /** 默认应用设置（首次运行时以此为基线） */
 export const DEFAULT_SETTINGS: AppSettings = {
   hotkey: 'Alt+Space',
@@ -38,4 +56,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   onboarded: false,
   // 默认不常驻：贴条属于「需要了才贴」的可选增强，由工作台里的「贴到桌面顶部」开启
   barPinned: false,
+  // 默认不置顶：主窗口压在最上层会挡住系统弹框与其他软件，按需再开
+  mainPinned: false,
+  // 快捷入口默认只显示「常用」这几项，不把 30+ 个系统面板一股脑铺满界面
+  quickActionIds: [...DEFAULT_QUICK_ACTION_IDS],
 };

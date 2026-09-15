@@ -1,19 +1,42 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Eye, EyeOff, Info, LayoutGrid, Plus, RefreshCw, Trash2 } from 'lucide-react';
+import {
+  Eye,
+  EyeOff,
+  History,
+  Info,
+  LayoutGrid,
+  Loader2,
+  Pencil,
+  Plus,
+  RefreshCw,
+  RotateCcw,
+  Sparkles,
+  Trash2,
+} from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { toast } from '@/components/ui/toast';
 import { ipc } from '@/lib/ipc';
-import type { GridBox } from '@/types/grid';
+import { cn } from '@/lib/utils';
+import type { GridBox, LayoutSnapshotMeta } from '@/types/grid';
 
 /**
- * 桌面挂件管理视图（主面板内页，模块 `desktop-organizer` 原地重定向至此）。
+ * 桌面整理（内页）。
  *
- * 职责：
- *   - 说明新语义：**文件不会被移动，仅创建引用**；双击挂件条目即打开原文件；
- *   - 挂件显隐开关（`gridOverlayShow / gridOverlayHide`，幂等）；
- *   - 盒子列表（名称 / 条目数 / 几何 / 更新时间）+ 删除盒子（级联移除引用）。
+ * # 定位（V19 重新对齐用户预期）
  *
- * 盒子的增删改与条目管理主要在挂件窗内完成（拖放 / 右键 / 工具栏），本视图
- * 提供应用内的盘点与清理入口。
+ * 用户要的是「像桌面整理工具那样：**一键把满屏图标归置成几个格子**，布局能备份能还原」。
+ * 因此本视图从「挂件盘点页」升级为**整理主控台**：
+ *
+ *   - **一键整理**：扫描桌面 → 按类型分组 → 每组一个格子 + 登记引用；
+ *   - **备份 / 还原布局**：把当前摆法存成本机快照，随时切回来（还原前还会自动再备份一次）；
+ *   - **格子重命名 / 删除**：格子是「图标的归置方式」，不是文件夹；
+ *   - **显示 / 隐藏格子层**：格子层浮在桌面之上、普通窗口之下，平时不打扰。
+ *
+ * # 与文件系统的关系（一定要说清楚）
+ *
+ * **文件不会被移动、复制或重命名**。格子里的条目只是原文件路径的**引用**，
+ * 双击即用系统默认程序打开原文件。所以「还原布局」只是换一套格子摆法，
+ * 不涉及任何文件回迁 —— 这正是它敢叫「备份 / 还原」的底气。
  */
 export function GridManagerView(): React.JSX.Element {
   const [boxes, setBoxes] = useState<GridBox[]>([]);
@@ -21,6 +44,15 @@ export function GridManagerView(): React.JSX.Element {
   const [error, setError] = useState<string | null>(null);
   const [overlayVisible, setOverlayVisible] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [arranging, setArranging] = useState(false);
+
+  /** 布局快照列表 + 是否展开该面板 */
+  const [snapshots, setSnapshots] = useState<LayoutSnapshotMeta[]>([]);
+  const [showSnapshots, setShowSnapshots] = useState(false);
+
+  /** 行内重命名：正在编辑的格子 id + 草稿 */
+  const [renamingId, setRenamingId] = useState<number | null>(null);
+  const [renameDraft, setRenameDraft] = useState('');
 
   const refresh = useCallback(async (): Promise<void> => {
     setLoading(true);
@@ -34,9 +66,19 @@ export function GridManagerView(): React.JSX.Element {
     }
   }, []);
 
+  const refreshSnapshots = useCallback(async (): Promise<void> => {
+    try {
+      setSnapshots(await ipc.gridLayoutList());
+    } catch {
+      // 快照列表只作辅助展示，读失败不打断主流程
+      setSnapshots([]);
+    }
+  }, []);
+
   useEffect(() => {
     void refresh();
-  }, [refresh]);
+    void refreshSnapshots();
+  }, [refresh, refreshSnapshots]);
 
   const toggleOverlay = useCallback((): void => {
     setBusy(true);
@@ -53,17 +95,17 @@ export function GridManagerView(): React.JSX.Element {
   const addBox = useCallback((): void => {
     setBusy(true);
     void ipc
-      // 显式给出级联位置：多个新盒子依次错开，不会叠在同一处
+      // 显式给出级联位置：多个新格子依次错开，不会叠在同一处
       .gridBoxUpsert({
-        name: `新盒子 ${boxes.length + 1}`,
-        posX: 60 + (boxes.length % 6) * 340,
-        posY: 60 + (boxes.length % 4) * 250,
+        name: `新格子 ${boxes.length + 1}`,
+        posX: 40 + (boxes.length % 3) * 344,
+        posY: 40 + Math.floor(boxes.length / 3) * 268,
         width: 320,
-        height: 220,
+        height: 244,
       })
       .then(async () => {
         await refresh();
-        // 新建后立刻把挂件窗显示出来：让「添加盒子」有立刻可见的结果
+        // 新建后立刻把格子层显示出来：让「添加格子」有马上看得见的结果
         if (!overlayVisible) {
           await ipc.gridOverlayShow();
           setOverlayVisible(true);
@@ -75,9 +117,106 @@ export function GridManagerView(): React.JSX.Element {
       .finally(() => setBusy(false));
   }, [refresh, boxes.length, overlayVisible]);
 
+  /** 一键整理：扫描桌面 → 分组建格子 → 登记引用（不移动任何文件） */
+  const autoArrange = useCallback((): void => {
+    setArranging(true);
+    void ipc
+      .gridAutoArrange()
+      .then(async (report) => {
+        await refresh();
+        if (!overlayVisible) {
+          await ipc.gridOverlayShow();
+          setOverlayVisible(true);
+        }
+        if (report.scanned === 0) {
+          toast.warning('桌面已经很干净了', { description: '没有扫描到可整理的图标' });
+          return;
+        }
+        const created = report.boxesCreated > 0 ? `新建 ${report.boxesCreated} 个格子、` : '';
+        toast.success(`整理完成：${created}收进 ${report.itemsAdded} 个图标`, {
+          description:
+            report.itemsAdded === 0
+              ? '桌面上的图标都已经在格子里了，没有重复收纳'
+              : '文件本体没有被移动，格子只是桌面图标的归置方式',
+        });
+      })
+      .catch((err: unknown) => {
+        toast.error('一键整理失败', {
+          description: err instanceof Error ? err.message : String(err),
+        });
+      })
+      .finally(() => setArranging(false));
+  }, [refresh, overlayVisible]);
+
+  const saveLayout = useCallback((): void => {
+    setBusy(true);
+    void ipc
+      .gridLayoutSave()
+      .then(async (meta) => {
+        await refreshSnapshots();
+        setShowSnapshots(true);
+        toast.success(`已备份布局：${meta.name}`, {
+          description: `${meta.boxCount} 个格子 · ${meta.itemCount} 个图标`,
+        });
+      })
+      .catch((err: unknown) => {
+        toast.error('备份布局失败', {
+          description: err instanceof Error ? err.message : String(err),
+        });
+      })
+      .finally(() => setBusy(false));
+  }, [refreshSnapshots]);
+
+  const restoreLayout = useCallback(
+    (snapshot: LayoutSnapshotMeta): void => {
+      const ok = window.confirm(
+        `还原布局「${snapshot.name}」？\n\n` +
+          `当前布局会先自动备份为「还原前自动备份」，因此随时可以再换回来。\n` +
+          `文件本体不会被移动或删除。`,
+      );
+      if (!ok) {
+        return;
+      }
+      setBusy(true);
+      void ipc
+        .gridLayoutRestore(snapshot.id)
+        .then(async (report) => {
+          await refresh();
+          await refreshSnapshots();
+          const extra =
+            report.missingFiles > 0 ? `（其中 ${report.missingFiles} 个文件已不在原位置）` : '';
+          toast.success(`已还原：${report.boxes} 个格子 · ${report.items} 个图标${extra}`);
+        })
+        .catch((err: unknown) => {
+          toast.error('还原布局失败', {
+            description: err instanceof Error ? err.message : String(err),
+          });
+        })
+        .finally(() => setBusy(false));
+    },
+    [refresh, refreshSnapshots],
+  );
+
+  const deleteSnapshot = useCallback(
+    (snapshot: LayoutSnapshotMeta): void => {
+      if (!window.confirm(`删除备份「${snapshot.name}」？此操作不可撤销。`)) {
+        return;
+      }
+      void ipc
+        .gridLayoutDelete(snapshot.id)
+        .then(() => refreshSnapshots())
+        .catch((err: unknown) => {
+          toast.error('删除备份失败', {
+            description: err instanceof Error ? err.message : String(err),
+          });
+        });
+    },
+    [refreshSnapshots],
+  );
+
   const deleteBox = useCallback(
     (box: GridBox): void => {
-      const message = `删除盒子「${box.name}」？\n\n将同时移除其中 ${box.itemCount} 个条目引用（不影响任何文件本体）。`;
+      const message = `删除格子「${box.name}」？\n\n将同时移除其中 ${box.itemCount} 个图标引用（不影响任何文件本体）。`;
       if (!window.confirm(message)) {
         return;
       }
@@ -93,86 +232,184 @@ export function GridManagerView(): React.JSX.Element {
     [refresh],
   );
 
+  const commitRename = useCallback(
+    (box: GridBox): void => {
+      const name = renameDraft.trim();
+      setRenamingId(null);
+      if (name === '' || name === box.name) {
+        return;
+      }
+      void ipc
+        .gridBoxUpsert({ boxId: box.id, name })
+        .then(() => refresh())
+        .catch((err: unknown) => {
+          toast.error('重命名失败', {
+            description: err instanceof Error ? err.message : String(err),
+          });
+        });
+    },
+    [refresh, renameDraft],
+  );
+
   const totalItems = boxes.reduce((sum, box) => sum + box.itemCount, 0);
 
   return (
     <div className="flex h-full flex-col overflow-hidden">
       {/* 头部 */}
-      <header className="flex shrink-0 items-center gap-3 border-b border-border px-6 py-4">
+      <header className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border px-6 py-4">
         <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-brand/10 text-brand">
           <LayoutGrid className="h-5 w-5" />
         </div>
         <div className="min-w-0 flex-1">
-          <h1 className="text-base font-semibold text-foreground">桌面挂件</h1>
+          <h1 className="text-base font-semibold text-foreground">桌面整理</h1>
           <p className="truncate text-xs text-muted-foreground">
-            桌面网格挂件：把文件拖进盒子建立引用，双击打开原文件
+            一键把桌面图标归置成格子 · 布局可备份可还原 · 文件本体不动
           </p>
         </div>
         <Button variant="outline" size="sm" onClick={refresh} disabled={loading}>
-          <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
+          <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} />
           刷新
         </Button>
         <Button variant="outline" size="sm" onClick={addBox} disabled={busy}>
           <Plus className="h-3.5 w-3.5" />
-          添加盒子
+          新建格子
         </Button>
-        <Button size="sm" onClick={toggleOverlay} disabled={busy}>
+        <Button size="sm" onClick={autoArrange} disabled={arranging}>
+          {arranging ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Sparkles className="h-3.5 w-3.5" />
+          )}
+          一键整理
+        </Button>
+        <Button variant="secondary" size="sm" onClick={toggleOverlay} disabled={busy}>
           {overlayVisible ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-          {overlayVisible ? '隐藏挂件' : '显示挂件'}
+          {overlayVisible ? '隐藏格子' : '显示格子'}
         </Button>
       </header>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5 scrollbar-thin">
+      <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto px-6 py-5">
         {/* 语义说明卡 */}
         <div className="mb-5 flex gap-3 rounded-xl border border-border bg-muted/40 px-4 py-3">
           <Info className="mt-0.5 h-4 w-4 shrink-0 text-brand" />
           <div className="space-y-1 text-xs leading-relaxed text-muted-foreground">
             <p>
               <span className="font-medium text-foreground">文件不会被移动</span>
-              ：与旧版「按类型归类」不同，挂件盒子里的条目只是原文件路径的
-              <span className="font-medium text-foreground">引用</span>
-              ，桌面文件保持原位，零磁盘副作用。
+              ：格子里的图标只是原文件路径的<span className="font-medium text-foreground">引用</span>
+              ，桌面文件保持原位。双击格子里的图标即用系统默认程序打开原文件。
             </p>
             <p>
-              双击挂件条目即用系统默认程序打开原文件；把文件拖到盒子上即可登记引用；
-              悬停条目点「×」仅移除引用，不删文件。锁定布局后挂件自动让出点击
-              （穿透到桌面），光标移到盒子 / 工具栏上才恢复交互。
+              「一键整理」会扫描桌面并按类型分好格子（文件夹 / 文档 / 图片 / 压缩包 …），
+              已经收进格子的不会重复收。「备份布局」记下当前这套摆法，随时能「还原」回来。
             </p>
           </div>
         </div>
 
-        {error && (
+        {/* 布局备份区 */}
+        <div className="mb-5 rounded-xl border border-border">
+          <div className="flex flex-wrap items-center gap-2 px-4 py-2.5">
+            <History className="h-3.5 w-3.5 text-muted-foreground" />
+            <span className="text-xs font-medium text-foreground">布局备份</span>
+            <span className="text-xs text-muted-foreground">
+              {snapshots.length > 0 ? `共 ${snapshots.length} 份` : '还没有备份'}
+            </span>
+            <div className="ml-auto flex items-center gap-1">
+              <Button variant="outline" size="sm" className="h-7 px-2.5 text-xs" onClick={saveLayout} disabled={busy}>
+                备份当前布局
+              </Button>
+              <button
+                type="button"
+                onClick={() => setShowSnapshots((prev) => !prev)}
+                className="rounded-md px-2 py-1 text-[11px] text-muted-foreground transition hover:bg-accent hover:text-accent-foreground"
+              >
+                {showSnapshots ? '收起' : '展开'}
+              </button>
+            </div>
+          </div>
+
+          {showSnapshots ? (
+            snapshots.length === 0 ? (
+              <p className="border-t border-border px-4 py-4 text-xs text-muted-foreground">
+                点「备份当前布局」把现在这套摆法存下来；以后调整乱了可以一键还原。
+              </p>
+            ) : (
+              <ul className="divide-y divide-border border-t border-border">
+                {snapshots.map((snapshot) => (
+                  <li
+                    key={snapshot.id}
+                    className="flex flex-wrap items-center gap-2 px-4 py-2 text-xs"
+                  >
+                    <span className="font-medium text-foreground">{snapshot.name}</span>
+                    <span className="text-muted-foreground">
+                      {snapshot.boxCount} 格 · {snapshot.itemCount} 项
+                    </span>
+                    <span className="tabular-nums text-muted-foreground/70">{snapshot.savedAt}</span>
+                    <div className="ml-auto flex items-center gap-1">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 px-2 text-xs"
+                        onClick={() => restoreLayout(snapshot)}
+                        disabled={busy}
+                      >
+                        <RotateCcw className="h-3.5 w-3.5" />
+                        还原
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 px-2 text-xs text-destructive hover:bg-destructive/10 hover:text-destructive"
+                        onClick={() => deleteSnapshot(snapshot)}
+                        disabled={busy}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )
+          ) : null}
+        </div>
+
+        {error !== null ? (
           <p className="mb-4 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
             {error}
           </p>
-        )}
+        ) : null}
 
-        {/* 盒子列表 */}
+        {/* 格子列表 */}
         {loading ? (
           <p className="py-10 text-center text-sm text-muted-foreground">加载中…</p>
         ) : boxes.length === 0 ? (
           <div className="py-14 text-center">
-            <p className="text-sm font-medium text-foreground">还没有盒子</p>
+            <p className="text-sm font-medium text-foreground">还没有格子</p>
             <p className="mx-auto mt-1 max-w-md text-xs leading-relaxed text-muted-foreground">
-              盒子是桌面上的半透明收纳格。点下面的按钮即可创建第一个盒子 ——
-              挂件窗会自动出现，把桌面文件拖进盒子就建立引用（文件本体不会被移动）。
+              点「一键整理」让程序扫描桌面、按类型自动分好格子；也可以点「新建格子」自己摆。
+              格子层会浮在桌面之上，把图标拖进去即登记引用（文件本体不会被移动）。
             </p>
-            <Button className="mt-4" size="sm" onClick={addBox} disabled={busy}>
-              <Plus className="h-3.5 w-3.5" />
-              创建第一个盒子并显示挂件
-            </Button>
+            <div className="mt-4 flex justify-center gap-2">
+              <Button size="sm" onClick={autoArrange} disabled={arranging}>
+                <Sparkles className="h-3.5 w-3.5" />
+                一键整理桌面
+              </Button>
+              <Button variant="outline" size="sm" onClick={addBox} disabled={busy}>
+                <Plus className="h-3.5 w-3.5" />
+                手动新建格子
+              </Button>
+            </div>
           </div>
         ) : (
           <>
             <p className="mb-2 text-xs text-muted-foreground">
-              共 {boxes.length} 个盒子 · {totalItems} 个条目引用
+              共 {boxes.length} 个格子 · {totalItems} 个图标引用
             </p>
             <div className="overflow-hidden rounded-xl border border-border">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-border bg-muted/40 text-left text-xs text-muted-foreground">
-                    <th className="px-4 py-2.5 font-medium">盒子</th>
-                    <th className="px-4 py-2.5 font-medium">条目数</th>
+                    <th className="px-4 py-2.5 font-medium">格子</th>
+                    <th className="px-4 py-2.5 font-medium">图标数</th>
                     <th className="px-4 py-2.5 font-medium">位置 / 尺寸</th>
                     <th className="px-4 py-2.5 font-medium">更新时间</th>
                     <th className="px-4 py-2.5 text-right font-medium">操作</th>
@@ -181,19 +418,62 @@ export function GridManagerView(): React.JSX.Element {
                 <tbody>
                   {boxes.map((box) => (
                     <tr key={box.id} className="border-b border-border/60 last:border-b-0">
-                      <td className="px-4 py-2.5 font-medium text-foreground">{box.name}</td>
+                      <td className="px-4 py-2.5">
+                        {renamingId === box.id ? (
+                          <input
+                            // 自动聚焦：进入重命名即可直接打字
+                            autoFocus
+                            value={renameDraft}
+                            onChange={(event) => setRenameDraft(event.target.value)}
+                            onBlur={() => commitRename(box)}
+                            onKeyDown={(event) => {
+                              if (event.key === 'Enter') {
+                                commitRename(box);
+                              }
+                              if (event.key === 'Escape') {
+                                setRenamingId(null);
+                              }
+                            }}
+                            className="h-7 w-full rounded-md border border-brand/50 bg-background px-2 text-sm outline-none"
+                            aria-label="格子名称"
+                          />
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setRenamingId(box.id);
+                              setRenameDraft(box.name);
+                            }}
+                            className="rounded px-1 py-0.5 font-medium text-foreground transition hover:bg-accent"
+                            title="点击重命名"
+                          >
+                            {box.name}
+                          </button>
+                        )}
+                      </td>
                       <td className="px-4 py-2.5 text-muted-foreground">{box.itemCount}</td>
                       <td className="px-4 py-2.5 text-xs text-muted-foreground">
                         ({box.posX}, {box.posY}) · {box.width}×{box.height}
                       </td>
-                      <td className="px-4 py-2.5 text-xs text-muted-foreground">
-                        {box.updatedAt}
-                      </td>
+                      <td className="px-4 py-2.5 text-xs text-muted-foreground">{box.updatedAt}</td>
                       <td className="px-4 py-2.5 text-right">
                         <Button
                           variant="ghost"
                           size="sm"
-                          className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                          className="h-7 px-2 text-xs"
+                          onClick={() => {
+                            setRenamingId(box.id);
+                            setRenameDraft(box.name);
+                          }}
+                          disabled={busy}
+                        >
+                          <Pencil className="h-3.5 w-3.5" />
+                          重命名
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 px-2 text-xs text-destructive hover:bg-destructive/10 hover:text-destructive"
                           onClick={() => deleteBox(box)}
                           disabled={busy}
                         >

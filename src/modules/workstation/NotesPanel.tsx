@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { FilePlus2, NotebookPen, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { MarkdownEditor } from '@/components/MarkdownEditor';
+import { RichMarkdown } from '@/components/RichMarkdown';
 import { toast } from '@/components/ui/toast';
 import { useNotesStore } from '@/stores/useNotesStore';
 import { stripMarkdown } from '@/lib/markdown';
@@ -11,9 +11,11 @@ import { cn } from '@/lib/utils';
 /**
  * 工作台「笔记」面板 —— 取代原「便签」卡片与桌面悬浮便签窗。
  *
- * 设计要点（对应反馈：「不要便签了 / 便签该放进工作台 / 编辑时要能自动渲染」）：
+ * 设计要点（对应反馈：「不要便签了 / 便签该放进工作台 / 编辑时要能自动渲染 / 笔记要更宽」）：
  *   - **不再开独立悬浮窗**：笔记就在工作台里读写，桌面保持干净；
- *   - **默认分屏（split）模式**：左侧写、右侧实时渲染，边写边看效果；
+ *   - **所见即所得**（V19 改版）：正文改用 `RichMarkdown`，敲 `**重点**` 当场变粗体、
+ *     `# 标题` 当场变大标题，**不再有「左写右看」的分屏与工具栏** ——
+ *     用户要的是「屏幕上的字就是最终效果」，不是「左边语法右边效果」；
  *   - 输入停止 700ms 后自动落库（复用 notes 表与 `useNotesStore`，数据零迁移）；
  *   - 切换笔记 / 卸载面板前强制 flush，绝不丢字。
  *
@@ -169,7 +171,7 @@ export function NotesPanel(): React.JSX.Element {
   };
 
   return (
-    <section className="flex max-h-[620px] min-h-[460px] flex-col gap-3 rounded-xl border border-border bg-card p-4 shadow-panel">
+    <section className="flex h-full min-h-[460px] flex-col gap-3 rounded-2xl border border-border bg-card p-4 shadow-panel">
       <header className="flex items-center gap-2">
         <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-sky-100 text-sky-700">
           <NotebookPen className="h-4 w-4" />
@@ -208,7 +210,7 @@ export function NotesPanel(): React.JSX.Element {
       ) : (
         <div className="flex min-h-0 flex-1 gap-3">
           {/* 左：笔记列表 */}
-          <div className="scrollbar-thin flex w-40 shrink-0 flex-col gap-0.5 overflow-y-auto rounded-lg border border-border p-1">
+          <div className="scrollbar-thin flex w-44 shrink-0 flex-col gap-0.5 overflow-y-auto rounded-lg border border-border p-1">
             {notes.map((note) => {
               const excerpt = stripMarkdown(note.body).replace(/\s+/g, ' ').trim();
               const active = note.id === selectedId;
@@ -258,19 +260,17 @@ export function NotesPanel(): React.JSX.Element {
               className="h-8 text-sm font-medium"
               aria-label="笔记标题"
             />
-            <div className="flex min-h-[220px] flex-1 flex-col overflow-hidden rounded-lg border border-border">
-              <MarkdownEditor
+            <div className="min-h-[300px] flex-1 overflow-hidden rounded-lg border border-border bg-background">
+              <RichMarkdown
                 value={body}
-                onChange={(next) => {
+                onChange={(next: string) => {
                   setBody(next);
                   schedule(activeId, title, next);
                 }}
                 onBlur={flush}
-                showToolbar
-                showStatusBar={false}
-                defaultMode="split"
-                placeholder="支持 Markdown：标题、列表、表格、代码块…（左侧写，右侧即时渲染）"
-                className="min-h-0 flex-1"
+                placeholder="直接写就行：**重点** 会变粗体、- 开头变列表、# 开头变标题、`代码` 高亮……语法敲完立刻渲染，不用切预览。"
+                className="px-3 py-2 text-sm"
+                ariaLabel="笔记正文"
               />
             </div>
           </div>
