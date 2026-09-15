@@ -604,7 +604,13 @@ export function analyzeCron(input: string, from: number = Date.now()): CronAnaly
     }
     const expanded = MACROS[lower];
     if (!expanded) {
-      return { ...empty, error: `未知宏「${raw}」（可用：@yearly @monthly @weekly @daily @hourly @reboot）` };
+      // 形态仍标成 macro：`@everyday` 是**写错的宏**，不是「段数不合法的一般表达式」。
+      // 平台判定（platformOf）据此给「未知宏不会生效」的警告，而不是误判成标准 5 段。
+      return {
+        ...empty,
+        form: 'macro',
+        error: `未知宏「${raw}」（可用：@yearly @monthly @weekly @daily @hourly @reboot）`,
+      };
     }
     const analysis = analyzeCron(expanded, from);
     return { ...analysis, form: 'macro', normalized: `${lower} → ${expanded}` };
@@ -890,4 +896,124 @@ export function humanRunTime(ms: number): string {
     return WEEKDAY_CN[target.getDay()] ?? `${diffDays} 天后`;
   }
   return `${diffDays} 天后`;
+}
+
+// ————————————————————————————————————————————————————————————————
+// 宏展开 & 平台判定（V23）
+// ————————————————————————————————————————————————————————————————
+
+/**
+ * 把宏展开成标准 5 段表达式（不是宏则返回 null）。
+ *
+ * 界面用：`@daily` 这种写法没法逐段编辑（它只有 1 段），展开后就能落到
+ * 那排逐段输入框里接着改 —— 比让用户自己背「@daily = 0 0 * * *」友好。
+ */
+export function expandMacro(input: string): string | null {
+  return MACROS[input.trim().toLowerCase()] ?? null;
+}
+
+/** 表达式归属的调度平台 */
+export type CronPlatform = 'unix' | 'quartz';
+
+/** 平台判定结果（界面据此显示「适用哪儿 / 贴错地方会怎样」） */
+export interface CronPlatformInfo {
+  platform: CronPlatform;
+  /** 形态标签（徽标文案） */
+  title: string;
+  /** 一句话：这套写法是喂给谁的 */
+  summary: string;
+  /** 会真的报错 / 不生效的兼容性坑（空数组 = 没坑） */
+  warnings: string[];
+  /** 是否需要在界面上用警示色（有坑即 true） */
+  risky: boolean;
+}
+
+/**
+ * 从字段原始文本里挑出**只有 Quartz 认**的 token。
+ *
+ * 不能简单地 `/[LW#]/i.test(raw)` —— 月份别名 `JUL` 含 `L`、星期别名 `WED` 含 `W`，
+ * 那样会把最普通的 `0 9 * * WED` 误报成 Quartz 扩展。所以按「逗号切分后的整段」
+ * 逐个精确匹配：`L` / `5L` / `15W` / `1#2`。
+ */
+function quartzOnlyTokens(raw: string): string[] {
+  const out: string[] = [];
+  for (const piece of raw.split(',')) {
+    const token: string = piece.trim().toUpperCase();
+    if (token.length === 0) {
+      continue;
+    }
+    if (/^\d*W$/.test(token) || /^\d*#\d+$/.test(token) || token === 'L' || /^\d+L$/.test(token)) {
+      out.push(piece.trim());
+    }
+  }
+  return out;
+}
+
+/**
+ * 判定表达式的适用平台，并给出「贴错地方会不会报错」的结论。
+ *
+ * 这是 V23 针对用户疑问「Quartz 语法究竟是什么、在什么场景下会被实际使用、
+ * 如果不属于常用语法是否应当移除以免造成误解」给出的**代码级依据**：
+ * 结论是**保留但必须标清适用平台** —— Quartz 不是冷门语法（Java 系与 XXL-JOB 天天用），
+ * 但它和 Linux crontab / K8s CronJob 的 5 段写法**不互通**，混用会直接不生效，
+ * 所以工具必须主动把这件事说清楚，而不是把它当作 5 段的「增强版」并排展示。
+ */
+export function platformOf(analysis: CronAnalysis): CronPlatformInfo {
+  if (analysis.form === 'macro') {
+    return {
+      platform: 'unix',
+      title: '宏写法',
+      summary:
+        'Linux cron 的简写：@daily @hourly @weekly @monthly @yearly @reboot。只有 cronie / Vixie cron（绝大多数发行版的 `crontab -e`）支持，systemd timer 与 Quartz 都不认。',
+      warnings: analysis.ok ? [] : ['未知宏不会生效，可用的是上面那 6 个。'],
+      risky: !analysis.ok,
+    };
+  }
+
+  const quartzTokens: string[] = analysis.fields.flatMap((field) => quartzOnlyTokens(field.raw));
+
+  if (analysis.form === 'quartz') {
+    return {
+      platform: 'quartz',
+      title: 'Quartz 6 / 7 段',
+      summary:
+        'Java 系的写法：Quartz Scheduler、Spring `@Scheduled(cron=…)`、XXL-JOB、ElasticJob 用这一套。它比标准 5 段多了「秒」这一格，以及 `?`（不指定）/ `L`（最后一天）/ `15W`（最近工作日）/ `1#2`（第 2 个周一）。',
+      warnings: [
+        '这段表达式不能贴进 `crontab -e`、`/etc/cron.d` 或 Kubernetes CronJob 的 `schedule:` —— 它们只接受 5 段，多一段会直接报错、任务不生效（不是「写法不规范」那么轻）。',
+        '`?` 是 Quartz 专有的「不指定」；标准 cron 里没有这个字符，需要「不指定」时写 `*`。',
+      ],
+      risky: true,
+    };
+  }
+
+  if (quartzTokens.length > 0) {
+    return {
+      platform: 'unix',
+      title: '标准 5 段（含 Quartz 专用符号）',
+      summary:
+        '段数是标准 5 段，但字段里出现了只有 Quartz 认识的写法，Linux crontab 会拒绝执行。',
+      warnings: [
+        `字段里的 ${quartzTokens.map((token) => `\`${token}\``).join('、')} 是 Quartz 扩展（\`L\` 最后一天 / \`15W\` 最近工作日 / \`1#2\` 第 2 个周一），Linux cron 不支持 —— 要么改成具体数字，要么把这条任务交给 Java 侧的调度器。`,
+      ],
+      risky: true,
+    };
+  }
+
+  const questionMarks: string[] = analysis.fields
+    .filter((field) => field.raw.trim() === '?')
+    .map((field) => field.label);
+
+  return {
+    platform: 'unix',
+    title: '标准 5 段',
+    summary:
+      'Linux `crontab -e`、`/etc/cron.d`、cronie、BusyBox crond，以及 Kubernetes CronJob 的 `schedule` 都是这一套。最小粒度 1 分钟，没有「秒」这一格。',
+    warnings:
+      questionMarks.length > 0
+        ? [
+            `第 ${questionMarks.join('、')} 段写的是 \`?\` —— 标准 cron 没有这个字符（Quartz 用它表示「不指定」）。K8s 的解析器能容忍，但 Linux crontab 不认，请改成 \`*\`。`,
+          ]
+        : [],
+    risky: questionMarks.length > 0,
+  };
 }

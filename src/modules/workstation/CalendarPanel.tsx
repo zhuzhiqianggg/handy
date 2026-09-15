@@ -178,7 +178,7 @@ export function CalendarPanel({ anchorMs, onSelect, pendingByDay }: CalendarPane
   const gz = ganZhi(view.year);
 
   return (
-    <section className="scrollbar-thin flex h-full min-h-0 flex-col gap-3 overflow-y-auto rounded-xl border border-border bg-card p-4 shadow-panel">
+    <section className="scrollbar-thin flex flex-col gap-3 rounded-xl border border-border bg-card p-4 shadow-panel lg:h-full lg:min-h-0 lg:overflow-y-auto">
       <header className="flex shrink-0 items-center gap-2">
         <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-brand-muted text-brand">
           <CalendarDays className="h-4 w-4" />
@@ -215,8 +215,15 @@ export function CalendarPanel({ anchorMs, onSelect, pendingByDay }: CalendarPane
         ))}
       </div>
 
-      {/* 42 格固定网格：每格两行（公历日 / 农历+休班），行高固定保证翻月不跳动 */}
-      <div className="grid flex-1 grid-cols-7 gap-1">
+      {/*
+        * 42 格固定网格：每格两行（公历日 / 农历+休班），行高固定保证翻月不跳动。
+        *
+        * ⚠️ V23：`flex-1` 只在 `lg`（两栏并排）下加。
+        * 窄窗口下这里是单栏，面板高度由内容决定；此时若还挂 `flex-1`
+        * （`flex-basis: 0%`），浏览器会把 6 行日历压进「剩余高度」里，
+        * 结果就是**月末两周被裁掉**（V23 无头实测在 680px 宽复现：日历只显示到 20 号）。
+        */}
+      <div className="grid grid-cols-7 gap-1 lg:flex-1">
         {cells.map((dayMs) => {
           const date = new Date(dayMs);
           const inMonth = date.getMonth() === view.month && date.getFullYear() === view.year;

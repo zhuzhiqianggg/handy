@@ -1,5 +1,14 @@
 import * as React from 'react';
-import { CalendarClock, Check, Copy, Info, Wand2, X } from 'lucide-react';
+import {
+  CalendarClock,
+  Check,
+  ChevronDown,
+  Copy,
+  Info,
+  TriangleAlert,
+  Wand2,
+  X,
+} from 'lucide-react';
 import { CommandShell } from '@/components/CommandShell';
 import { Button } from '@/components/ui/button';
 import { toast } from '@/components/ui/toast';
@@ -9,13 +18,16 @@ import {
   CRON_PRESETS,
   analyzeCron,
   buildCron,
+  expandMacro,
   fieldLayout,
   formatRunTime,
   humanRunTime,
+  platformOf,
   type CronBuildInput,
   type CronBuildMode,
   type CronFieldResult,
   type CronFieldSpec,
+  type CronPlatformInfo,
 } from '@/lib/cron';
 import { cn } from '@/lib/utils';
 import type { CommandProps } from '@/core/types';
@@ -23,42 +35,59 @@ import type { CommandProps } from '@/core/types';
 const COMMAND_ID = 'cron-descriptor';
 
 /**
- * Cron 表达式解析（V21）。
+ * Cron 表达式解析（V21 重做 → V23 收敛）。
  *
- * # 用户反馈
+ * # V23 用户反馈（两条）
  *
- * 「既然你下面加了分时日月周，为什么没有和前面的表达式对齐呢？要对齐展示或者更好的方式
- *   清晰直观。缺少 `*` 斜杠 5 这样的吗？最小到分钟吗、如果每 5 分钟呢？注意齐全点。」
+ * 1. 「看图片中字段拆解的展示内容，它其实和前面已有的部分是重复的，请评估是否可以去掉或合并」
+ *    —— 确认重复，**已删除**独立的「字段拆解」面板。原来它和「逐段编辑」都在渲染
+ *    `label / raw / text`，属于同一份数据的两种排版；现在把拆解表**独有**的两样东西
+ *    （① 展开后的取值 `0, 5, 10 …`，② 出错时的定位）**并进了逐段编辑的每个格子**，
+ *    信息一条不少，纵向少一整块。仅当逐段编辑无法渲染（宏写法 / 段数非法）时，
+ *    才退化成一张紧凑的「展开后分段含义」小表 —— 那种情况下它是唯一的信息载体。
+ * 2. 「请说明 Quartz 语法究竟是什么、在什么场景下会被实际使用，如果不属于常用语法，
+ *    请判断是否应当从当前内容中移除以免造成误解」
+ *    —— **结论：保留，但必须标清适用平台**（判定逻辑在 `cron.ts::platformOf`）。
+ *    理由与界面呈现见下面这段说明，界面上落实为输入框下方那条**平台提示条**。
  *
- * # 这一版怎么改的
+ * # 关于 Quartz：为什么保留、怎么防止误解
  *
- * 1. **逐段编辑**（回答「对齐」）—— 原来那行「分 时 日 月 周」只是挂在输入框下面的
- *    装饰性文字，跟表达式里的每一段对不上，属于「看着像对齐，其实没关系」。现在
- *    改成**真的逐段输入框**：每段一个格子，标签压在各自格子上方、解析含义贴在格子
- *    下方，改哪段点哪段，上方表达式实时同步 —— 对齐是布局意义上的对齐，不是画一排字。
- * 2. **预设铺全**（回答「齐全点」）—— 高频组按 2/3/5/6/10/15/20/30 分钟铺满，补上
- *    秒级（Quartz 6 段）与多日 / 季度写法；生成器加了「每 N 秒」「星期区间」「多日期」
- *    「每月最后一天」四种模式，并给间隔加了常用值的快选按钮。
- * 3. **粒度说清** —— 界面里明写：标准 5 段最小粒度是 **1 分钟**（没有秒段），
- *    要秒级必须切 6 段（第 1 段就是秒）。
+ * | | 标准 5 段 | Quartz 6 / 7 段 |
+ * | --- | --- | --- |
+ * | 长相 | `分 时 日 月 周` | `秒 分 时 日 月 周 [年]` |
+ * | 谁在用 | Linux `crontab`、`/etc/cron.d`、cronie、BusyBox crond、**Kubernetes CronJob** | Quartz Scheduler、Spring `@Scheduled`、**XXL-JOB**、ElasticJob |
+ * | 最小粒度 | 1 分钟（没有「秒」这一格） | 1 秒 |
+ * | 扩展符号 | 无 | `?` 不指定 / `L` 最后一天 / `15W` 最近工作日 / `1#2` 第 2 个周一 |
  *
- * 看得懂 / 算得出 / 不用背 / 能反着来（V20 已交付）：字段拆解表、未来 8 次执行时间、
- * 20+ 条运维预设、参数化反向生成。
- * 状态（表达式 + 生成器参数）经 `useToolState` 持久化：关掉工具再打开还在。
+ * 判断依据：
+ * - **它不是冷门语法，不能删。** 国内 Java 生态里 XXL-JOB 是分布式任务调度的常见选择，
+ *   Spring 的 `@Scheduled(cron=…)` 也是 6 段 —— 把这些用户的需求砍掉，工具就废了一半。
+ * - **但它跟 5 段不互通，混用会「静默不生效」。** 把 `0 0/5 * * * ?` 贴进 `crontab -e`，
+ *   cron 不会给你一个友好提示，它只是不跑。这才是「造成误解」的真正来源 ——
+ *   不是「Quartz 存在」这件事，而是**工具没有标清哪套写法喂给谁**。
+ * - 所以这一版做了三件事：① 把 Quartz 从标题里降级（标题只写「标准 5 段」为准）；
+ *   ② 输入框正下方常驻一条**平台提示条**，说明「当前这套写法是喂给谁的」；
+ *   ③ 一旦检测到 6/7 段、或 5 段里混进了 `L` / `W` / `#` / `?`，提示条**自动变警示色**
+ *   并直接写明「贴进 crontab / K8s CronJob 会报错」，把坑摊在明面上。
+ *
+ * # V21 已交付、本版保留的能力
+ *
+ * 逐段编辑（与表达式逐段对齐的输入框）、20+ 条运维预设、参数化反向生成、
+ * 未来 8 次执行时间、宏写法展开。状态经 `useToolState` 持久化。
  */
 
 /** 生成器模式选项 */
 const BUILD_MODES: ReadonlyArray<{ value: CronBuildMode; label: string; hint: string }> = [
-  { value: 'seconds', label: '每 N 秒', hint: 'Quartz 6 段：0/N * * * * ?（最小到秒）' },
   { value: 'minutes', label: '每 N 分钟', hint: '标准写法 */N * * * *' },
   { value: 'hours', label: '每 N 小时', hint: '0 */N * * *' },
   { value: 'daily', label: '每天固定时刻', hint: 'M H * * *' },
+  { value: 'weekdays', label: '工作日固定时刻', hint: 'M H * * 1-5' },
   { value: 'weekly', label: '每周某天', hint: 'M H * * D' },
   { value: 'weeklyRange', label: '每周某区间', hint: 'M H * * 1-5' },
-  { value: 'weekdays', label: '工作日固定时刻', hint: 'M H * * 1-5' },
   { value: 'monthly', label: '每月某号', hint: 'M H D * *' },
   { value: 'dayList', label: '每月多号', hint: 'M H 1,15 * *' },
-  { value: 'lastDay', label: '每月最后一天', hint: 'Quartz：M H L * ?' },
+  { value: 'seconds', label: '每 N 秒（Quartz）', hint: '6 段：0/N * * * * ? —— 只能给 Java 侧调度器用' },
+  { value: 'lastDay', label: '每月最后一天（Quartz）', hint: '6 段：M H L * ? —— crontab 不支持 L' },
 ];
 
 /** 生成器里各「间隔」组的常用值快选（省得一个个敲数字） */
@@ -68,11 +97,7 @@ const STEP_SUGGESTIONS: Record<'seconds' | 'minutes' | 'hours', readonly number[
   hours: [2, 3, 4, 6, 8, 12],
 };
 
-/**
- * 「间隔」类模式的元信息：单位、上限、以及去 `STEP_SUGGESTIONS` 取常用值的键。
- *
- * 不在表里的模式（每天 / 每周 / 每月…）走的是「时 + 分」参数，不需要间隔数值。
- */
+/** 「间隔」类模式的元信息：单位、上限、以及去 `STEP_SUGGESTIONS` 取常用值的键 */
 const STEP_MODE_INFO: Partial<
   Record<CronBuildMode, { unit: string; max: number; key: 'seconds' | 'minutes' | 'hours' }>
 > = {
@@ -87,6 +112,8 @@ interface CronToolState {
   input: string;
   showBuild: boolean;
   showPresets: boolean;
+  /** 平台说明的「详情」是否展开（默认收起，避免首屏太满） */
+  showPlatform: boolean;
   build: CronBuildInput;
 }
 
@@ -111,42 +138,12 @@ const DEFAULT_BUILD: CronBuildInput = {
 const INITIAL_STATE: CronToolState = {
   input: '0 9 * * 1-5',
   showBuild: false,
-  showPresets: true,
+  showPresets: false,
+  showPlatform: false,
   build: { ...DEFAULT_BUILD },
 };
 
-/** 字段拆解表的一行 */
-function FieldRow({ field }: { field: CronFieldResult }): React.JSX.Element {
-  return (
-    <div
-      className={cn(
-        'grid grid-cols-[64px_minmax(0,140px)_minmax(0,1fr)] items-start gap-2 rounded-md px-2 py-1.5 text-xs',
-        field.ok ? 'hover:bg-accent/40' : 'bg-destructive/5',
-      )}
-    >
-      <span className="font-medium text-muted-foreground">{field.label}</span>
-      <code
-        className={cn(
-          'truncate rounded bg-muted px-1.5 py-0.5 font-mono text-[11px]',
-          field.ok ? 'text-foreground' : 'bg-destructive/10 text-destructive',
-        )}
-        title={field.raw}
-      >
-        {field.raw}
-      </code>
-      <span className={field.ok ? 'text-foreground' : 'text-destructive'}>
-        {field.ok ? field.text : `⚠ ${field.error ?? '格式错误'}`}
-        {field.ok && field.values !== null && field.values.length > 0 && field.values.length <= 12 ? (
-          <span className="ml-1 text-[11px] text-muted-foreground">
-            （{field.values.join(', ')}）
-          </span>
-        ) : null}
-      </span>
-    </div>
-  );
-}
-
-/** 小圆点徽标 */
+/** 小徽标 */
 function Badge({
   tone,
   children,
@@ -170,8 +167,43 @@ function Badge({
 }
 
 /**
- * Cron 描述 + 分析：把标准 5 段 / Quartz 6-7 段翻译成中文，
- * 推算下次执行时间，并支持预设与反向生成。
+ * 行内富文本：把 `` `code` `` 渲染成等宽小片。
+ *
+ * 平台说明里到处是 `crontab -e`、`@Scheduled`、`L` 这类关键字，纯文本一坨读起来很糊；
+ * 这里做最小实现（只认反引号，不引入 markdown 渲染器），既保住可读性，
+ * 又不会像 V22 以前那样把 `**加粗**` 的星号原样漏到界面上。
+ */
+function InlineText({ text }: { text: string }): React.JSX.Element {
+  const parts: string[] = text.split('`');
+  return (
+    <>
+      {parts.map((part: string, index: number) =>
+        index % 2 === 1 ? (
+          <code key={index} className="mx-0.5 rounded bg-black/5 px-1 font-mono text-[10.5px]">
+            {part}
+          </code>
+        ) : (
+          <React.Fragment key={index}>{part}</React.Fragment>
+        ),
+      )}
+    </>
+  );
+}
+
+/** 字段取值展开文案（格子下方那行小字） */function valuesLine(field: CronFieldResult | undefined): { text: string; full: string } | null {
+  if (field === undefined || !field.ok || field.values === null || field.values.length === 0) {
+    return null;
+  }
+  const all: number[] = field.values;
+  const text: string =
+    all.length <= 8
+      ? all.join(' ')
+      : `${all.slice(0, 6).join(' ')} … 共 ${all.length} 个`;
+  return { text, full: `展开取值（${all.length} 个）：${all.join(', ')}` };
+}
+
+/**
+ * Cron 表达式解析：逐段编辑 + 中文描述 + 下次执行时间 + 反向生成 + 平台兼容提示。
  */
 export function CronDescriptor({ initialInput = '' }: CommandProps): React.JSX.Element {
   const shell = useCommandShell(COMMAND_ID);
@@ -181,14 +213,16 @@ export function CronDescriptor({ initialInput = '' }: CommandProps): React.JSX.E
   });
 
   const analysis = React.useMemo(() => analyzeCron(state.input), [state.input]);
-  const hasSeconds = analysis.form === 'quartz';
+  const hasSeconds: boolean = analysis.form === 'quartz';
+  const platform: CronPlatformInfo = React.useMemo(() => platformOf(analysis), [analysis]);
+  const macroExpanded: string | null = React.useMemo(() => expandMacro(state.input), [state.input]);
 
   /** 生成器参数（补齐旧草稿缺失的字段，见 `DEFAULT_BUILD`） */
   const build: CronBuildInput = React.useMemo(
     () => ({ ...DEFAULT_BUILD, ...state.build }),
     [state.build],
   );
-  const generated = React.useMemo(() => buildCron(build), [build]);
+  const generated: string = React.useMemo(() => buildCron(build), [build]);
 
   /** 按空白切段；逐段编辑器与生成的表达式都基于它 */
   const segments: string[] = React.useMemo(
@@ -200,7 +234,7 @@ export function CronDescriptor({ initialInput = '' }: CommandProps): React.JSX.E
     () => fieldLayout(segments.length),
     [segments.length],
   );
-  const isMacro = state.input.trim().startsWith('@');
+  const isMacro: boolean = state.input.trim().startsWith('@');
 
   /**
    * 改写第 index 段并重组成完整表达式。
@@ -232,25 +266,23 @@ export function CronDescriptor({ initialInput = '' }: CommandProps): React.JSX.E
   return (
     <CommandShell
       title="Cron 表达式解析"
-      description="逐段编辑 · 5 / 6 / 7 段 · Quartz 扩展 · 字段拆解 · 下次执行时间"
+      description="标准 5 段（crontab / K8s）逐段编辑 · 中文描述 · 下次执行时间 · 反向生成"
       icon={<CalendarClock className="h-4 w-4" />}
       onBack={shell.onBack}
       favorite={shell.favorite}
       onToggleFavorite={shell.onToggleFavorite}
       copyText={analysis.ok ? analysis.summary : ''}
-      shortcutHint="逐段编辑：每个格子改一段，上方表达式实时同步；预设里 2/3/5/6/10/15/20/30 分钟都齐了"
+      shortcutHint="逐段编辑：每个格子改一段，上方表达式实时同步；Esc 返回"
     >
       <div className="flex flex-col gap-4">
         {/* ——— 表达式输入 ——— */}
         <div className="flex flex-col gap-2">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <label className="text-sm font-medium text-foreground" htmlFor="cron-input">
               Cron 表达式
             </label>
             {analysis.ok ? (
-              <Badge tone={analysis.form === 'quartz' ? 'info' : 'ok'}>
-                {analysis.form === 'macro' ? '宏' : analysis.form === 'quartz' ? 'Quartz 6/7 段' : '标准 5 段'}
-              </Badge>
+              <Badge tone={platform.platform === 'quartz' ? 'warn' : 'ok'}>{platform.title}</Badge>
             ) : (
               <Badge tone="error">
                 <X className="h-3 w-3" />
@@ -270,22 +302,110 @@ export function CronDescriptor({ initialInput = '' }: CommandProps): React.JSX.E
             id="cron-input"
             value={state.input}
             spellCheck={false}
-            placeholder="0 9 * * 1-5   或   0/30 * * * * ?"
+            placeholder="0 9 * * 1-5   （标准 5 段：分 时 日 月 周）"
             onChange={(event) => patch({ input: event.target.value })}
             className="w-full rounded-md border border-input bg-transparent px-3 py-2 font-mono text-base tracking-wide shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
           />
 
-          {/* ——— 逐段编辑：标签压在各自输入框上方，与表达式**逐段对齐** ——— */}
+          {/* ——— 平台提示条（V23 新增）———
+              这是「避免 Quartz 造成误解」的主入口：常驻一行说清「这套写法喂给谁」，
+              有坑时变警示色并把坑直接写出来；详情默认收起，需要时展开看完整对照。 */}
+          {analysis.ok ? (
+            <div
+              className={cn(
+                'rounded-lg border px-3 py-2 text-[11.5px] leading-relaxed',
+                platform.risky
+                  ? 'border-amber-300 bg-amber-50 text-amber-900'
+                  : 'border-border bg-muted/40 text-muted-foreground',
+              )}
+            >
+              <div className="flex flex-wrap items-start gap-x-2 gap-y-1">
+                <span className="shrink-0 font-medium">
+                  {platform.risky ? (
+                    <TriangleAlert className="mr-1 inline h-3.5 w-3.5 align-[-2px]" />
+                  ) : (
+                    <Info className="mr-1 inline h-3.5 w-3.5 align-[-2px]" />
+                  )}
+                  适用：{platform.title}
+                </span>
+                <span className="min-w-0 flex-1">
+                  <InlineText text={platform.summary} />
+                </span>
+                <button
+                  type="button"
+                  onClick={() => patch({ showPlatform: !state.showPlatform })}
+                  className="inline-flex shrink-0 items-center gap-0.5 rounded px-1.5 py-0.5 transition hover:bg-black/5"
+                >
+                  {state.showPlatform ? '收起详情' : '详情'}
+                  <ChevronDown
+                    className={cn('h-3 w-3 transition-transform', state.showPlatform && 'rotate-180')}
+                  />
+                </button>
+              </div>
+
+              {platform.warnings.length > 0 ? (
+                <ul className="mt-1.5 flex flex-col gap-1">
+                  {platform.warnings.map((warning) => (
+                    <li key={warning} className="flex gap-1.5">
+                      <span className="mt-[3px] h-1 w-1 shrink-0 rounded-full bg-current" />
+                      <span className="min-w-0">
+                        <InlineText text={warning} />
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+
+              {state.showPlatform ? (
+                <div className="mt-2 grid grid-cols-1 gap-2 border-t border-border/60 pt-2 sm:grid-cols-2">
+                  <div>
+                    <p className="font-medium">标准 5 段 · 分 时 日 月 周</p>
+                    <p className="mt-0.5">
+                      Linux <code className="rounded bg-black/5 px-1">crontab -e</code>、
+                      <code className="mx-1 rounded bg-black/5 px-1">/etc/cron.d</code>、cronie、BusyBox
+                      crond、Kubernetes CronJob 的 <code className="rounded bg-black/5 px-1">schedule</code>{' '}
+                      都是这一套。最小粒度 <b>1 分钟</b>，没有「秒」这一格。
+                    </p>
+                  </div>
+                  <div>
+                    <p className="font-medium">Quartz 6 / 7 段 · 秒 分 时 日 月 周 [年]</p>
+                    <p className="mt-0.5">
+                      用 Quartz 的地方才会认：Quartz Scheduler、Spring{' '}
+                      <code className="rounded bg-black/5 px-1">@Scheduled</code>、XXL-JOB、
+                      ElasticJob。多了「秒」以及 <code className="rounded bg-black/5 px-1">?</code>（不指定）
+                      / <code className="rounded bg-black/5 px-1">L</code>（最后一天）/
+                      <code className="rounded bg-black/5 px-1">15W</code>（最近工作日）/
+                      <code className="rounded bg-black/5 px-1">1#2</code>（第 2 个周一）。
+                    </p>
+                  </div>
+                  <p className="sm:col-span-2">
+                    一句话记法：<b>给服务器写任务（crontab / K8s）用 5 段；给 Java 应用写任务（XXL-JOB / Spring）才用 6 段。</b>
+                    需要秒级但只有 crontab 可用时，正确做法是放宽到「每 1 分钟」或改用 systemd timer，
+                    而不是把 6 段塞进去。
+                  </p>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
+          {/* ——— 逐段编辑（V23：取值与出错定位已内联到这里，「字段拆解」面板随之删除） ——— */}
           {layout !== null && !isMacro ? (
             <div className="rounded-xl border border-border bg-card p-3">
               <div className="mb-2.5 flex flex-wrap items-center gap-x-2 gap-y-1">
                 <span className="text-xs font-medium text-foreground">逐段编辑</span>
                 <span className="text-[11px] text-muted-foreground">
-                  改哪段点哪段，上面的表达式实时同步
+                  改哪段点哪段，上面的表达式实时同步；格子下方的灰字是该段含义，再下一行是<b>展开后的取值</b>
                 </span>
-                <span className="ml-auto rounded bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
-                  最小粒度：标准 5 段 = 1 分钟（无秒段）；要秒级请用 6 段，第 1 段就是「秒」
-                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const first: HTMLInputElement | null = document.querySelector('#cron-seg-0');
+                    first?.focus();
+                  }}
+                  className="ml-auto rounded-md px-2 py-0.5 text-[11px] text-muted-foreground transition hover:bg-accent hover:text-foreground"
+                >
+                  跳到第 1 段
+                </button>
               </div>
               <div
                 className="grid gap-2"
@@ -295,6 +415,7 @@ export function CronDescriptor({ initialInput = '' }: CommandProps): React.JSX.E
                   const field: CronFieldResult | undefined = analysis.fields[index];
                   const value: string = segments[index] ?? '';
                   const bad: boolean = field !== undefined && !field.ok;
+                  const values: { text: string; full: string } | null = valuesLine(field);
                   return (
                     <div key={spec.key} className="flex min-w-0 flex-col items-stretch gap-1">
                       <span
@@ -304,6 +425,7 @@ export function CronDescriptor({ initialInput = '' }: CommandProps): React.JSX.E
                         {spec.label}
                       </span>
                       <input
+                        id={`cron-seg-${index}`}
                         value={value}
                         spellCheck={false}
                         aria-label={`${spec.label} 段`}
@@ -327,6 +449,19 @@ export function CronDescriptor({ initialInput = '' }: CommandProps): React.JSX.E
                             ? field.text
                             : `⚠ ${field.error ?? '格式错误'}`}
                       </span>
+                      {values !== null ? (
+                        <span
+                          className="truncate text-center font-mono text-[10px] text-muted-foreground/70"
+                          title={values.full}
+                        >
+                          {values.text}
+                        </span>
+                      ) : (
+                        // 占位：让有取值 / 无取值的格子行高一致，避免整排参差
+                        <span aria-hidden className="select-none text-center text-[10px] text-transparent">
+                          ·
+                        </span>
+                      )}
                     </div>
                   );
                 })}
@@ -335,7 +470,7 @@ export function CronDescriptor({ initialInput = '' }: CommandProps): React.JSX.E
           ) : (
             <p className="rounded-md border border-border bg-muted/40 px-3 py-2 text-[11px] text-muted-foreground">
               {isMacro
-                ? '这是宏写法（@daily 等），展开后的分段含义见下方「字段拆解」。'
+                ? '这是宏写法（@daily 等），本身只有 1 段，没法逐段编辑 —— 下面列出了它展开后的分段含义，也可以点「展开成 5 段继续编辑」。'
                 : `当前 ${segments.length} 段，不是 5 / 6 / 7 段，没法逐段编辑 —— 先在上面的输入框里把段数补齐。`}
             </p>
           )}
@@ -347,6 +482,51 @@ export function CronDescriptor({ initialInput = '' }: CommandProps): React.JSX.E
           ) : null}
         </div>
 
+        {/* ——— 宏：展开后的分段含义（仅在逐段编辑不可用时出现） ——— */}
+        {isMacro && analysis.fields.length > 0 ? (
+          <div className="rounded-xl border border-border bg-card p-3">
+            <div className="mb-2 flex flex-wrap items-center gap-2">
+              <span className="text-xs font-medium text-foreground">展开后的分段含义</span>
+              {macroExpanded !== null ? (
+                <button
+                  type="button"
+                  onClick={() => patch({ input: macroExpanded })}
+                  className="rounded-md border border-border px-2 py-0.5 text-[11px] text-muted-foreground transition hover:border-brand/40 hover:bg-accent/40 hover:text-foreground"
+                >
+                  展开成 5 段继续编辑（{macroExpanded}）
+                </button>
+              ) : null}
+            </div>
+            <div className="flex flex-col gap-1">
+              {analysis.fields.map((field: CronFieldResult) => {
+                const values: { text: string; full: string } | null = valuesLine(field);
+                return (
+                  <div
+                    key={field.key}
+                    className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-[11.5px]"
+                  >
+                    <span className="w-8 shrink-0 text-muted-foreground">{field.label}</span>
+                    <code className="shrink-0 rounded bg-muted px-1 font-mono text-[11px]">
+                      {field.raw}
+                    </code>
+                    <span className="min-w-0 flex-1 text-foreground">
+                      {field.ok ? field.text : `⚠ ${field.error ?? '格式错误'}`}
+                    </span>
+                    {values !== null ? (
+                      <span
+                        className="truncate font-mono text-[10px] text-muted-foreground/70"
+                        title={values.full}
+                      >
+                        {values.text}
+                      </span>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ) : null}
+
         {/* ——— 中文描述 ——— */}
         {analysis.ok ? (
           <div className="rounded-xl border border-border bg-card p-4 shadow-panel">
@@ -357,45 +537,30 @@ export function CronDescriptor({ initialInput = '' }: CommandProps): React.JSX.E
               </p>
             ) : null}
             {analysis.dayOrWeek ? (
-              <p className="mt-2 flex items-start gap-1.5 rounded-md bg-amber-50 px-2 py-1.5 text-[11px] text-amber-800">
+              <p className="mt-2 flex items-start gap-1.5 rounded-md bg-amber-50 px-2 py-1.5 text-[11px] leading-relaxed text-amber-800">
                 <Info className="mt-0.5 h-3 w-3 shrink-0" />
                 <span>
-                  日与周**同时**限定：「日」和「周」是**或**的关系（传统 Vixie cron 语义），
-                  例如 1 号或周一都会触发，不是「1 号且周一」。要表达「且」，请用 Quartz 的
-                  <code className="mx-1 rounded bg-amber-100 px-1">?</code>把其中一段设为不指定。
+                  「日」和「周」<b>同时</b>限定时，两者是<b>或</b>的关系（传统 Vixie cron 语义）：
+                  例如「每月 1 日 或 每周一」都会触发，不是「1 日且是周一」。
+                  要表达「且」，在 Quartz 写法里把其中一段设为{' '}
+                  <code className="rounded bg-amber-100 px-1">?</code>（不指定）；
+                  标准 5 段语法本身无法表达「且」。
                 </span>
               </p>
             ) : null}
           </div>
         ) : null}
 
-        {/* ——— 字段拆解 ——— */}
-        {analysis.fields.length > 0 ? (
-          <div className="rounded-xl border border-border bg-card">
-            <div className="flex items-center justify-between border-b border-border px-4 py-2">
-              <span className="text-sm font-medium text-foreground">字段拆解</span>
-              <span className="text-[11px] text-muted-foreground">
-                {analysis.ok ? '逐段校验通过' : '红色即出错的那一段'}
-              </span>
-            </div>
-            <div className="p-2">
-              {analysis.fields.map((field) => (
-                <FieldRow key={field.key} field={field} />
-              ))}
-            </div>
-          </div>
-        ) : null}
-
         {/* ——— 下次执行时间 ——— */}
         {analysis.ok && analysis.next.length > 0 ? (
           <div className="rounded-xl border border-border bg-card">
-            <div className="flex items-center justify-between border-b border-border px-4 py-2">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-2">
               <span className="text-sm font-medium text-foreground">接下来 8 次执行</span>
               <span className="text-[11px] text-muted-foreground">本机时区 · 由当前时间起算</span>
             </div>
             <div className="flex flex-wrap gap-2 p-3">
               {analysis.next.map((time, index) => {
-                const isFirst = index === 0;
+                const isFirst: boolean = index === 0;
                 return (
                   <span
                     key={time}
@@ -419,11 +584,13 @@ export function CronDescriptor({ initialInput = '' }: CommandProps): React.JSX.E
           </p>
         ) : null}
 
-        {/* ——— 预设 —— */}
+        {/* ——— 预设 ——— */}
         <div className="rounded-xl border border-border bg-card">
-          <div className="flex items-center gap-2 border-b border-border px-4 py-2">
+          <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2">
             <span className="text-sm font-medium text-foreground">常用表达式</span>
-            <span className="text-[11px] text-muted-foreground">点一下填进输入框</span>
+            <span className="text-[11px] text-muted-foreground">
+              点一下填进输入框；带「Quartz」的只能给 Java 侧调度器用
+            </span>
             <button
               type="button"
               onClick={() => patch({ showPresets: !state.showPresets })}
@@ -472,8 +639,8 @@ export function CronDescriptor({ initialInput = '' }: CommandProps): React.JSX.E
 
         {/* ——— 反向生成器 ——— */}
         <div className="rounded-xl border border-border bg-card">
-          <div className="flex items-center gap-2 border-b border-border px-4 py-2">
-            <Wand2 className="h-3.5 w-3.5 text-muted-foreground" />
+          <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2">
+            <Wand2 className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
             <span className="text-sm font-medium text-foreground">说人话生成表达式</span>
             <span className="text-[11px] text-muted-foreground">
               {BUILD_MODES.find((item) => item.value === build.mode)?.hint ?? ''}
@@ -668,7 +835,7 @@ export function CronDescriptor({ initialInput = '' }: CommandProps): React.JSX.E
                   </label>
                 ) : null}
 
-                <div className="ml-auto flex items-center gap-2">
+                <div className="ml-auto flex flex-wrap items-center gap-2">
                   <code className="rounded-md bg-muted px-2 py-1 font-mono text-sm text-foreground">
                     {generated}
                   </code>
@@ -677,6 +844,17 @@ export function CronDescriptor({ initialInput = '' }: CommandProps): React.JSX.E
                   </Button>
                 </div>
               </div>
+
+              {build.mode === 'seconds' || build.mode === 'lastDay' ? (
+                <p className="flex items-start gap-1.5 rounded-md bg-amber-50 px-2 py-1.5 text-[11px] leading-relaxed text-amber-800">
+                  <TriangleAlert className="mt-0.5 h-3 w-3 shrink-0" />
+                  <span>
+                    这个模式生成的是 <b>Quartz 6 段</b>表达式，只能给 Quartz / Spring / XXL-JOB
+                    这类 Java 侧调度器用；贴进 <code className="rounded bg-amber-100 px-1">crontab</code> 或
+                    K8s CronJob 会不生效。
+                  </span>
+                </p>
+              ) : null}
             </div>
           ) : null}
         </div>

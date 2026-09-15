@@ -29,6 +29,7 @@ import {
   Star,
   StickyNote,
   Table2,
+  TextCursorInput,
   Trash2,
   Wrench,
   type LucideIcon,
@@ -73,6 +74,7 @@ export const ICONS: Record<string, LucideIcon> = {
   Star,
   StickyNote,
   Table2,
+  TextCursorInput,
   Trash2,
   Wrench,
 };

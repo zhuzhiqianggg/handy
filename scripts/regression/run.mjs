@@ -15,7 +15,14 @@ import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
-const SUITES = ['test-cron.mjs', 'test-lunar.mjs', 'test-holidays.mjs', 'test-sql.mjs'];
+const SUITES = [
+  'test-cron.mjs',
+  'test-cron-platform.mjs',
+  'test-lunar.mjs',
+  'test-holidays.mjs',
+  'test-sql.mjs',
+  'test-textlab.mjs',
+];
 
 let failed = 0;
 for (const suite of SUITES) {

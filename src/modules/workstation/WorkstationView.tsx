@@ -281,8 +281,16 @@ export default function WorkstationView(_props: WorkstationViewProps = {}): Reac
           * 而不是让面板各自的 min-h 撑破格子、互相盖住（V22 修复用户截图里的重叠）。
           */}
         <div className="scrollbar-thin flex min-h-0 min-w-0 flex-1 flex-col gap-4 overflow-y-auto pr-1">
-          {/* 上排：日历（左） | 计划（右）—— **真正等高**，一起撑满剩余高度 */}
-          <div className="grid min-h-[440px] flex-1 grid-cols-1 gap-4 lg:grid-cols-[minmax(0,380px)_minmax(0,1fr)]">
+          {/*
+            * 上排：日历（左） | 计划（右）—— `lg` 起两栏并排且等高、一起撑满剩余高度。
+            *
+            * ⚠️ V23：`flex-1` / `min-h-[440px]` 都**只在 `lg` 起生效**。
+            * 窄窗口下这里是单栏，若还挂着 `flex-1`（`flex: 1 1 0%`），
+            * 外层内容列虽写了 `overflow-y-auto`，但 flex 子项会**先被压缩**而不是溢出，
+            * 于是「计划」面板被挤成 19px 高的空壳（V23 无头实测在 680px 复现）。
+            * 单栏时一律按内容高度排布，滚动交给外层内容列。
+            */}
+          <div className="grid grid-cols-1 gap-4 lg:min-h-[440px] lg:flex-1 lg:grid-cols-[minmax(0,380px)_minmax(0,1fr)]">
             <CalendarPanel anchorMs={anchorMs} onSelect={handleSelectDay} pendingByDay={pendingByDay} />
             <PlanPanel
               todos={todos}
@@ -295,8 +303,9 @@ export default function WorkstationView(_props: WorkstationViewProps = {}): Reac
             />
           </div>
 
-          {/* 下排：便签（固定高度，面板内部滚动，全屏时不会把上排挤走） */}
-          <div className="h-[300px] shrink-0">
+          {/* 下排：便签（固定高度，面板内部滚动，全屏时不会把上排挤走）
+              V23：窄窗口下这里更矮更窄，编辑器会被压得只剩两三行 —— 给窄屏多留 80px */}
+          <div className="h-[380px] shrink-0 lg:h-[300px]">
             <NotesPanel />
           </div>
         </div>
