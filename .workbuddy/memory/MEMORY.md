@@ -26,7 +26,7 @@
 ## 3. 状态快照（2026-09-15 · V19 后）
 
 - Phase 1（MVP）功能全部交付；**Windows 安装包已产出**（V19 后重新打包）；待用户装机验收 GUI 行为。
-- git：**HEAD `64e3008`** = V19 批次（31 文件 +3112/−372）；`be1dc58`（V18 文档回填）、`862d5bf` = V18（34 文件 +3061/−687）、`b3b46a8`（文档归位）、`ff6ebb2`（release 关 devtools）。
+- git：V19 批次 = **`64e3008`**（31 文件 +3112/−372），其后 `e09d25b` 为文档回填；`be1dc58`（V18 文档回填）、`862d5bf` = V18（34 文件 +3061/−687）、`b3b46a8`（文档归位）、`ff6ebb2`（release 关 devtools）。
 - 工具箱 **23 个命令**；模块：toolbox / notes(入口重定向→工作台) / workstation(日历+计划+笔记+快捷入口，**V19 双栏**) / todos / desktop-organizer(重定向→桌面整理) / desktop-grid(挂件 + **整理主控台**) / vault / settings。
 - **独立窗口 6 个**：main / note / settings / organizer / grid-overlay / workstation-bar（桌面顶部常驻贴条）。
 - **DB 迁移链**：v1 schema → v2 移除剪贴板表 → v3 vault → v4 grid → **v5 `todos.detail`**。
