@@ -57,6 +57,20 @@ function formatUpdated(ms: number): string {
   return `${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+/** 列表里用的极简时间：今天只给 `HH:mm`，其它天给 `M/D` —— 列表一行就那么点宽 */
+function formatUpdatedShort(ms: number): string {
+  const d = new Date(ms);
+  const pad = (n: number): string => String(n).padStart(2, '0');
+  const now = new Date();
+  const sameDay =
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate();
+  return sameDay
+    ? `${pad(d.getHours())}:${pad(d.getMinutes())}`
+    : `${d.getMonth() + 1}/${d.getDate()}`;
+}
+
 export function NotesPanel(): React.JSX.Element {
   const notes = useNotesStore((state) => state.notes);
   const loaded = useNotesStore((state) => state.loaded);
@@ -199,16 +213,20 @@ export function NotesPanel(): React.JSX.Element {
   };
 
   return (
-    <section className="flex h-full min-h-[420px] flex-col gap-3 rounded-2xl border border-border bg-card p-4 shadow-panel">
-      <header className="flex items-center gap-2">
+    <section className="flex h-full min-h-0 flex-col gap-3 overflow-hidden rounded-2xl border border-border bg-card p-4 shadow-panel">
+      <header className="flex shrink-0 items-center gap-2">
         <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-sky-100 text-sky-700">
           <NotebookPen className="h-4 w-4" />
         </span>
-        <h3 className="text-sm font-semibold text-foreground">便签</h3>
-        <span className="text-xs text-muted-foreground">
-          Markdown · 边写边渲染 · 右键可贴到桌面
+        <h3 className="shrink-0 text-sm font-semibold text-foreground">便签</h3>
+        <span className="shrink-0 rounded-md bg-muted px-1.5 py-0.5 text-[10px] tabular-nums text-muted-foreground">
+          {notes.length}
         </span>
-        <div className="ml-auto flex items-center gap-1">
+        {/* 说明文字可伸缩可截断：之前是定宽长句，窄窗口下会顶到右侧按钮上 */}
+        <span className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground">
+          Markdown 边写边渲染 · 右键可贴到桌面
+        </span>
+        <div className="flex shrink-0 items-center gap-1">
           <MarkdownHelp />
           <Button size="sm" className="h-7 px-2.5 text-xs" onClick={handleCreate}>
             <FilePlus2 className="h-3.5 w-3.5" />
@@ -241,7 +259,7 @@ export function NotesPanel(): React.JSX.Element {
       {!loaded ? (
         <p className="py-8 text-center text-sm text-muted-foreground">加载中…</p>
       ) : notes.length === 0 ? (
-        <div className="flex flex-1 flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border py-10 text-center">
+        <div className="flex flex-1 flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border py-6 text-center">
           <NotebookPen className="h-6 w-6 text-muted-foreground/40" />
           <p className="text-sm text-muted-foreground">还没有便签</p>
           <Button size="sm" onClick={handleCreate}>
@@ -252,7 +270,7 @@ export function NotesPanel(): React.JSX.Element {
       ) : (
         <div className="flex min-h-0 flex-1 gap-3">
           {/* 左：便签列表（右键 → 贴到桌面） */}
-          <div className="scrollbar-thin flex w-44 shrink-0 flex-col gap-0.5 overflow-y-auto rounded-lg border border-border p-1">
+          <div className="scrollbar-thin flex w-48 shrink-0 flex-col gap-0.5 overflow-y-auto rounded-lg border border-border p-1">
             {notes.map((note) => {
               const excerpt = stripMarkdown(note.body).replace(/\s+/g, ' ').trim();
               const active = note.id === selectedId;
@@ -268,25 +286,34 @@ export function NotesPanel(): React.JSX.Element {
                     event.preventDefault();
                     setMenu({ x: event.clientX, y: event.clientY, noteId: note.id });
                   }}
-                  title="右键：贴到桌面 / 删除"
+                  title={`${note.title.trim() || '未命名便签'} · 更新于 ${formatUpdated(note.updatedAt)}（右键：贴到桌面 / 删除）`}
                   className={cn(
-                    'flex flex-col gap-0.5 rounded-md px-2 py-1.5 text-left transition',
+                    'flex flex-col gap-1 rounded-md px-2 py-1.5 text-left transition',
                     active ? 'bg-brand-muted' : 'hover:bg-accent',
                   )}
                 >
+                  {/* 第一行：标题 + 更新时间（时间右贴，省下一行） */}
+                  <span className="flex w-full items-baseline gap-1.5">
+                    <span
+                      className={cn(
+                        'min-w-0 flex-1 truncate text-xs font-medium',
+                        active ? 'text-brand' : 'text-foreground',
+                      )}
+                    >
+                      {note.title.trim() || '未命名便签'}
+                    </span>
+                    <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground/60">
+                      {formatUpdatedShort(note.updatedAt)}
+                    </span>
+                  </span>
+                  {/* 第二行：正文摘要（已剥掉 Markdown 记号，不会再露星号） */}
                   <span
                     className={cn(
-                      'truncate text-xs font-medium',
-                      active ? 'text-brand' : 'text-foreground',
+                      'truncate text-[10px] leading-4',
+                      active ? 'text-brand/70' : 'text-muted-foreground',
                     )}
                   >
-                    {note.title.trim() || '未命名便签'}
-                  </span>
-                  <span className="truncate text-[10px] text-muted-foreground">
-                    {excerpt.length > 0 ? excerpt : '（空）'}
-                  </span>
-                  <span className="text-[10px] tabular-nums text-muted-foreground/70">
-                    {formatUpdated(note.updatedAt)}
+                    {excerpt.length > 0 ? excerpt : '空便签'}
                   </span>
                 </button>
               );
@@ -304,10 +331,10 @@ export function NotesPanel(): React.JSX.Element {
               }}
               onBlur={flush}
               placeholder="便签标题"
-              className="h-8 text-sm font-medium"
+              className="h-8 shrink-0 text-sm font-medium"
               aria-label="便签标题"
             />
-            <div className="min-h-[280px] flex-1 overflow-hidden rounded-lg border border-border bg-background">
+            <div className="min-h-0 flex-1 overflow-hidden rounded-lg border border-border bg-background">
               <RichMarkdown
                 value={body}
                 onChange={(next: string) => {
@@ -315,13 +342,13 @@ export function NotesPanel(): React.JSX.Element {
                   schedule(activeId, title, next);
                 }}
                 onBlur={flush}
-                placeholder="直接写就行：**重点** 变粗体、- 开头变列表、# 开头变标题；敲 ```shell 回车就能粘代码并自动高亮。点右上角「?」看全部语法。"
-                className="min-h-[280px] px-3 py-2 text-sm"
+                placeholder="直接写：**重点** 变粗体、- 开头变列表、# 开头变标题；敲 ``` 再回车就能粘代码并自动高亮。点右上角「?」看全部语法。"
+                className="h-full px-3 py-2 text-sm"
                 ariaLabel="便签正文"
               />
             </div>
-            <p className="text-[11px] text-muted-foreground">
-              语法敲完立刻渲染并自动保存；代码块里回车换行，末行空着再回车（或按 Esc）跳出。
+            <p className="shrink-0 truncate text-[11px] text-muted-foreground">
+              敲完立刻渲染并自动保存 · 代码块里回车换行，末行空着再回车（或 Esc）跳出
             </p>
           </div>
         </div>

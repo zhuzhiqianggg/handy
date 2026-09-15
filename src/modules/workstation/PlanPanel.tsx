@@ -5,6 +5,7 @@ import { Input } from '@/components/ui/input';
 import { toast } from '@/components/ui/toast';
 import { MdText } from '@/components/MdText';
 import { RichMarkdown } from '@/components/RichMarkdown';
+import { stripMarkdown } from '@/lib/markdown';
 import { useTodosStore } from '@/stores/useTodosStore';
 import { TODO_PRIORITIES, priorityStyle, type Todo, type TodoPatch } from '@/core/data/todosService';
 import { cn } from '@/lib/utils';
@@ -80,10 +81,19 @@ export function PlanPanel({
     () => filterTodos(todos, scope, anchorMs, hideDone),
     [todos, scope, anchorMs, hideDone],
   );
-  const pendingInScope = useMemo(
-    () => visible.filter((todo: Todo): boolean => !todo.done).length,
+  /**
+   * 分两组渲染：未完成在上、已完成压到列表末尾（带分隔）。
+   * 之前是一锅乱炖，勾掉的和没做长的混在一起，用户反馈「列表太乱」。
+   */
+  const pendingRows = useMemo(
+    () => visible.filter((todo: Todo): boolean => !todo.done),
     [visible],
   );
+  const doneRows = useMemo(
+    () => visible.filter((todo: Todo): boolean => todo.done),
+    [visible],
+  );
+  const pendingInScope = pendingRows.length;
 
   /** 统一写入口：出错统一提示，避免每处都写一遍 try/catch */
   const patch = useCallback((id: string, next: TodoPatch): void => {
@@ -136,39 +146,65 @@ export function PlanPanel({
       });
   };
 
+  /**
+   * 输入框提示：placeholder 只留最短的一句（面板窄的时候会被截断），
+   * 完整的「挂到哪一天」挂在 title 上，鼠标停一下就能看到。
+   */
   const addHint =
+    scope === 'undated' ? '写一条不设日期的事，回车即入' : '写一条计划，回车即入（默认 09:00）';
+  const addHintTitle =
     scope === 'undated'
       ? '写一条不设日期的事，回车即入'
-      : `写一条并回车，挂到 ${relativeDayLabel(anchorMs)}（默认 09:00）`;
+      : `写一条并回车，挂到 ${relativeDayLabel(anchorMs)} 09:00`;
+
+  /** 行渲染：未完成与已完成共用同一套行组件，先后顺序由上面的分组决定 */
+  const renderRow = (todo: Todo): React.JSX.Element => (
+    <TodoRow
+      key={todo.id}
+      todo={todo}
+      anchorMs={anchorMs}
+      expanded={expandedId === todo.id}
+      onToggleExpand={() =>
+        setExpandedId((prev: string | null): string | null => (prev === todo.id ? null : todo.id))
+      }
+      onToggleDone={() => handleToggle(todo.id)}
+      onDelete={() => handleDelete(todo.id)}
+      onPatch={(next: TodoPatch) => patch(todo.id, next)}
+    />
+  );
 
   return (
-    <section className="flex min-h-[320px] flex-col gap-3 rounded-2xl border border-border bg-card p-4 shadow-panel">
-      <header className="flex flex-wrap items-center gap-2">
+    <section className="flex min-h-0 flex-col gap-3 overflow-hidden rounded-2xl border border-border bg-card p-4 shadow-panel">
+      <header className="flex shrink-0 items-center gap-2">
         <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-emerald-100 text-emerald-700">
           <ListTodo className="h-4 w-4" />
         </span>
-        <h3 className="text-sm font-semibold text-foreground">
+        <h3 className="shrink-0 text-sm font-semibold text-foreground">
           计划 · {relativeDayLabel(anchorMs)}
         </h3>
-        <span className="text-xs text-muted-foreground">
-          未完成 {pendingInScope} / 共 {visible.length}
+        <span
+          className="shrink-0 rounded-md bg-muted px-1.5 py-0.5 text-[10px] tabular-nums text-muted-foreground"
+          title={`未完成 ${pendingInScope} 条 · 共 ${visible.length} 条`}
+        >
+          未完成 {pendingInScope} · 共 {visible.length}
         </span>
         <button
           type="button"
           onClick={() => onHideDoneChange(!hideDone)}
           className={cn(
-            'ml-auto rounded-md px-2 py-1 text-[11px] transition',
+            'ml-auto shrink-0 rounded-md px-2 py-1 text-[11px] transition',
             hideDone
               ? 'bg-brand-muted text-brand'
               : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground',
           )}
+          title={hideDone ? '显示已完成的条目' : '把已完成的条目折叠起来'}
         >
           {hideDone ? '已隐藏完成项' : '隐藏完成项'}
         </button>
       </header>
 
       {/* 范围切换 */}
-      <div className="flex flex-wrap items-center gap-1">
+      <div className="flex shrink-0 flex-wrap items-center gap-1">
         {SCOPE_ORDER.map((item) => (
           <button
             key={item}
@@ -187,7 +223,7 @@ export function PlanPanel({
       </div>
 
       {/* 新增 */}
-      <div className="flex items-center gap-2">
+      <div className="flex shrink-0 items-center gap-2">
         <Input
           ref={inputRef}
           value={draft}
@@ -198,6 +234,7 @@ export function PlanPanel({
             }
           }}
           placeholder={addHint}
+          title={addHintTitle}
           className="h-9 text-sm"
           aria-label="新增事件"
         />
@@ -208,7 +245,7 @@ export function PlanPanel({
       </div>
 
       {/* 列表 */}
-      <div className="scrollbar-thin flex min-h-[140px] flex-1 flex-col gap-1 overflow-y-auto pr-0.5">
+      <div className="scrollbar-thin flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto pr-0.5">
         {visible.length === 0 ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-1 rounded-xl border border-dashed border-border py-10 text-center">
             <ListTodo className="h-6 w-6 text-muted-foreground/40" />
@@ -216,22 +253,27 @@ export function PlanPanel({
             <p className="text-xs text-muted-foreground/70">在上方输入框写一条，回车即入</p>
           </div>
         ) : (
-          visible.map((todo) => (
-            <TodoRow
-              key={todo.id}
-              todo={todo}
-              anchorMs={anchorMs}
-              expanded={expandedId === todo.id}
-              onToggleExpand={() =>
-                setExpandedId((prev: string | null): string | null =>
-                  prev === todo.id ? null : todo.id,
-                )
-              }
-              onToggleDone={() => handleToggle(todo.id)}
-              onDelete={() => handleDelete(todo.id)}
-              onPatch={(next: TodoPatch) => patch(todo.id, next)}
-            />
-          ))
+          <>
+            {pendingRows.length > 0 ? (
+              pendingRows.map(renderRow)
+            ) : (
+              <p className="rounded-xl border border-dashed border-border px-3 py-4 text-center text-xs text-muted-foreground">
+                这个范围的未完成项都清空了
+              </p>
+            )}
+
+            {doneRows.length > 0 ? (
+              <>
+                <div className="mt-1 flex shrink-0 items-center gap-2 px-0.5 pt-1">
+                  <span className="text-[10px] tracking-wide text-muted-foreground/70">
+                    已完成 {doneRows.length}
+                  </span>
+                  <span className="h-px flex-1 bg-border" />
+                </div>
+                {doneRows.map(renderRow)}
+              </>
+            ) : null}
+          </>
         )}
       </div>
     </section>
@@ -257,7 +299,8 @@ function TodoRow({
   onPatch: (next: TodoPatch) => void;
 }): React.JSX.Element {
   const priority = priorityStyle(todo.priority);
-  const summary: string = firstLineOf(todo.detail);
+  /** 摘要要剥掉 Markdown 记号：之前直接把 `**重点**` 原样显示，列表里全是星号 */
+  const summary: string = useMemo(() => stripMarkdown(firstLineOf(todo.detail)), [todo.detail]);
 
   return (
     <div
@@ -325,21 +368,26 @@ function TodoRow({
           )}
         </div>
 
+        {/* 优先级在前、时间在后：优先级是「要不要现在看」的信号，比时间更该先被扫到 */}
+        {todo.priority > 1 ? (
+          <span
+            className={cn('shrink-0 rounded px-1.5 py-0.5 text-[10px]', priority.className)}
+            title={`优先级：${priority.name}`}
+          >
+            {priority.name}
+          </span>
+        ) : null}
+
         {todo.dueAt !== null ? (
           <span
             className={cn(
               'flex shrink-0 items-center gap-1 text-[11px] tabular-nums',
               isOverdue(todo) ? 'text-destructive' : 'text-muted-foreground',
             )}
+            title={isOverdue(todo) ? `已逾期 · ${dueLabel(todo.dueAt)}` : dueLabel(todo.dueAt)}
           >
             <CalendarClock className="h-3 w-3" />
             {dueLabel(todo.dueAt)}
-          </span>
-        ) : null}
-
-        {todo.priority > 1 ? (
-          <span className={cn('shrink-0 rounded px-1.5 py-0.5 text-[10px]', priority.className)}>
-            {priority.name}
           </span>
         ) : null}
 

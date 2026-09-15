@@ -275,9 +275,14 @@ export default function WorkstationView(_props: WorkstationViewProps = {}): Reac
 
       {/* —— 主区：内容列 + 右侧快捷入口图标栏 —— */}
       <div className="flex min-h-0 flex-1 gap-4 px-6 pb-6">
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-4">
+        {/*
+          * 内容列**自身可滚动**：窗口够高时上排 flex-1 撑满（日历与计划保持等高），
+          * 窗口被压矮时上排退到 min-h 保底、由这一层出滚动条 ——
+          * 而不是让面板各自的 min-h 撑破格子、互相盖住（V22 修复用户截图里的重叠）。
+          */}
+        <div className="scrollbar-thin flex min-h-0 min-w-0 flex-1 flex-col gap-4 overflow-y-auto pr-1">
           {/* 上排：日历（左） | 计划（右）—— **真正等高**，一起撑满剩余高度 */}
-          <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 lg:grid-cols-[minmax(0,380px)_minmax(0,1fr)]">
+          <div className="grid min-h-[440px] flex-1 grid-cols-1 gap-4 lg:grid-cols-[minmax(0,380px)_minmax(0,1fr)]">
             <CalendarPanel anchorMs={anchorMs} onSelect={handleSelectDay} pendingByDay={pendingByDay} />
             <PlanPanel
               todos={todos}
@@ -291,7 +296,7 @@ export default function WorkstationView(_props: WorkstationViewProps = {}): Reac
           </div>
 
           {/* 下排：便签（固定高度，面板内部滚动，全屏时不会把上排挤走） */}
-          <div className="h-[260px] shrink-0">
+          <div className="h-[300px] shrink-0">
             <NotesPanel />
           </div>
         </div>
