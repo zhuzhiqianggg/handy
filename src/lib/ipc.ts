@@ -22,6 +22,7 @@ import type {
   GridRegion,
   LayoutImportReport,
   LayoutSnapshotMeta,
+  OverlayStatus,
 } from '@/types/grid';
 import type {
   VaultItem,
@@ -30,6 +31,8 @@ import type {
   VaultStatus,
 } from '@/types/vault';
 import type { SysAction } from '@/types/sys';
+// 仅类型引用（`import type` 编译期擦除，不引入运行期循环依赖）
+import type { Todo } from '@/core/data/todosService';
 
 /**
  * 统一的 invoke 封装。
@@ -157,29 +160,45 @@ export const ipc = {
   /** 删除条目 */
   vaultDelete: (itemId: number): Promise<void> => call<void>('vault_delete', { itemId }),
 
-  // —— 桌面网格挂件（M2 改版：文件引用型，绝不移动文件）——
+  // —— 待办（桌面日历挂件「今日计划」用；同一张 todos 表，与工作台共用） ——
 
-  /** 盒子列表（含条目计数） */
+  /** 待办列表（未完成优先、优先级高优先、到期近者优先） */
+  todosList: (): Promise<Todo[]> => call<Todo[]>('todos_list'),
+  /** 切换待办完成态 */
+  todosToggleDone: (todoId: string, done: boolean): Promise<Todo> =>
+    call<Todo>('todos_toggle_done', { todoId, done }),
+  /** 新建待办 */
+  todosCreate: (title: string, dueAt?: number | null): Promise<Todo> =>
+    call<Todo>('todos_create', { input: { title, dueAt: dueAt ?? null } }),
+
+  // —— 桌面格子（V33 真实收纳：拖进去 = 真把文件移进 桌面/Handy整理/<格子名>/）——
+
+  /** 格子列表（含条目计数） */
   gridBoxList: (): Promise<GridBox[]> => call<GridBox[]>('grid_box_list'),
-  /** 创建（boxId 缺省）或更新盒子（几何 / 名称 / 排序），返回落库后的完整实体 */
+  /** 创建（boxId 缺省）或更新格子（名称 / 类型 / 挂件数据 / 几何 / 排序） */
   gridBoxUpsert: (input: GridBoxInput): Promise<GridBox> =>
     call<GridBox>('grid_box_upsert', {
       boxId: input.boxId ?? null,
       name: input.name ?? null,
+      kind: input.kind ?? null,
+      content: input.content ?? null,
       posX: input.posX ?? null,
       posY: input.posY ?? null,
       width: input.width ?? null,
       height: input.height ?? null,
       sort: input.sort ?? null,
     }),
-  /** 删除盒子（级联删除其条目引用；文件本体不受影响） */
+  /** 删除格子（收纳目录里还有文件则原样保留，只有空目录才顺手删掉） */
   gridBoxDelete: (boxId: number): Promise<void> => call<void>('grid_box_delete', { boxId }),
+  /** 写挂件数据（便签正文 / 日历配置 JSON） */
+  gridBoxSetContent: (boxId: number, content: string): Promise<void> =>
+    call<void>('grid_box_set_content', { boxId, content }),
 
   // —— 桌面整理：一键整理 / 布局备份与还原（V19）——
 
   /**
-   * 一键整理桌面：扫描 → 按类型分组 → 建格子并登记文件引用。
-   * **不移动 / 不复制 / 不重命名任何文件**（整理的是桌面图标的呈现方式）。
+   * 一键收纳桌面：普通文件按类型**移动**进 `桌面/Handy整理/<类别>/`，每类一个格子。
+   * 快捷方式与文件夹不动（留在桌面默认位置）。
    */
   gridAutoArrange: (dir?: string | null): Promise<AutoArrangeReport> =>
     call<AutoArrangeReport>('grid_auto_arrange', { dir: dir ?? null }),
@@ -200,16 +219,19 @@ export const ipc = {
   /** 删除一份布局快照 */
   gridLayoutDelete: (snapshotId: string): Promise<void> =>
     call<void>('grid_layout_delete', { snapshotId }),
-  /** 添加条目：仅登记原文件路径引用（displayName 缺省 = 文件名） */
+  /**
+   * 把文件放进格子 = **真的把文件移进**该格子的收纳目录（同名不覆盖，冲突改名）。
+   * displayName 缺省 = 文件名。
+   */
   gridItemAdd: (boxId: number, filePath: string, displayName?: string): Promise<GridItem> =>
     call<GridItem>('grid_item_add', { boxId, filePath, displayName: displayName ?? null }),
-  /** 删除条目（仅移除引用） */
+  /** 把条目移出格子：**文件移回桌面根目录**（不是删除），随后清掉登记 */
   gridItemDelete: (itemId: number, dismiss?: boolean): Promise<void> =>
     call<void>('grid_item_delete', { itemId, dismiss: dismiss ?? null }),
-  /** 移动条目到另一个格子（只改引用归属，文件本体不受影响） */
+  /** 移动条目到另一个格子 = 真的把文件移到目标格子的收纳目录 */
   gridItemMove: (itemId: number, targetBoxId: number): Promise<void> =>
     call<void>('grid_item_move', { itemId, targetBoxId }),
-  /** 桌面同步：清失效引用 + 增量收纳桌面新文件（dismissed 名单不违背） */
+  /** 桌面同步：**只对账**（按目录补齐 / 清理登记），不自动收录桌面文件 */
   gridDesktopSync: (): Promise<DesktopSyncReport> => call<DesktopSyncReport>('grid_desktop_sync'),
   /** 某盒子的条目列表 */
   gridItemList: (boxId: number): Promise<GridItem[]> => call<GridItem[]>('grid_item_list', { boxId }),
@@ -225,7 +247,7 @@ export const ipc = {
   /** 上报命中区域（挂件窗内物理像素，Rust 光标轮询用；全量替换） */
   gridOverlayUpdateRegions: (regions: GridRegion[]): Promise<void> =>
     call<void>('grid_overlay_update_regions', { regions }),
-  /** 挂件前端心跳（每 10s；Rust 据此判定 webview 白屏并自动重建） */
+  /** 挂件前端心跳（每 10s；仅作诊断记录，不再触发窗口重建） */
   gridOverlayHeartbeat: (): Promise<void> => call<void>('grid_overlay_heartbeat'),
   /** 挂件前端故障上报（window.onerror / unhandledrejection） */
   gridOverlayFault: (message: string): Promise<void> =>
@@ -235,8 +257,10 @@ export const ipc = {
     call<string | null>('grid_overlay_fault_get'),
   /** 显示（幂等）桌面挂件窗（Rust 侧创建无边框透明窗并压回桌面层） */
   gridOverlayShow: (): Promise<void> => call<void>('grid_overlay_show'),
-  /** 隐藏桌面挂件窗（不销毁，盒子配置保留） */
+  /** 隐藏桌面挂件窗（不销毁，格子配置保留） */
   gridOverlayHide: (): Promise<void> => call<void>('grid_overlay_hide'),
+  /** 查询挂件层**真实状态**（唯一真相来源：窗口本身，而非前端局部 state） */
+  gridOverlayStatus: (): Promise<OverlayStatus> => call<OverlayStatus>('grid_overlay_status'),
   /** 打开条目原文件（Rust 侧 shell 插件 open；本地路径不受前端 open 作用域限制） */
   gridOpenPath: (path: string): Promise<void> => call<void>('grid_open_path', { path }),
   /** 提取文件/文件夹的系统真实图标（RGBA base64）；失败或不支持返回 null */

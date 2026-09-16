@@ -81,6 +81,7 @@ pub fn run() {
             // —— 桌面网格挂件（M2 改版：文件引用型，绝不移动文件）——
             commands::grid::grid_overlay_show,
             commands::grid::grid_overlay_hide,
+            commands::grid::grid_overlay_status,
             commands::grid::grid_set_interactive,
             commands::grid::grid_overlay_update_regions,
             commands::grid::grid_overlay_heartbeat,
@@ -89,6 +90,7 @@ pub fn run() {
             commands::grid::grid_box_list,
             commands::grid::grid_box_upsert,
             commands::grid::grid_box_delete,
+            commands::grid::grid_box_set_content,
             commands::grid::grid_item_add,
             commands::grid::grid_item_delete,
             commands::grid::grid_item_move,

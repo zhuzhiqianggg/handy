@@ -1,17 +1,26 @@
 /**
  * 桌面网格挂件类型（与 Rust `commands/grid.rs` serde camelCase 一一对应）。
  *
- * 数据契约三方一致：迁移 SQL（`src-tauri/src/db/migrations.rs` v4）
+ * 数据契约三方一致：迁移 SQL（`src-tauri/src/db/migrations.rs` v4 + v6）
  * = Rust 结构体（`src-tauri/src/commands/grid.rs`）= 本文件。
  *
- * 核心语义：条目（GridItem）只是**原文件路径的引用**——文件绝不被移动、
- * 复制或重命名；打开经 shell 唤起系统默认程序作用于原文件。
+ * 核心语义（V33 起）：格子是**真实收纳格**——它绑定一个真实目录
+ * `桌面/Handy整理/<格子名>/`，拖进格子 = 真把文件移进该目录（桌面图标随之消失，
+ * 因此不与桌面重复）；条目上的 × = 把文件移回桌面根目录，不是删除。
+ * 默认**不自动收录**桌面任何东西，快捷方式与图标一律留在原位。
  */
 
-/** 盒子（`itemCount` 来自 grid_box_list 的条目计数子查询） */
+/** 格子类型：收纳格 / 便签 / 日历（含今日计划）/ 系统入口 */
+export type GridBoxKind = 'folder' | 'note' | 'calendar' | 'system';
+
+/** 格子（`itemCount` 来自 grid_box_list 的条目计数子查询） */
 export interface GridBox {
   id: number;
   name: string;
+  /** 格子类型；非 folder 类型不绑目录，内容存在 content 里 */
+  kind: GridBoxKind;
+  /** 挂件自有数据（便签正文 / 日历配置 JSON）；收纳格为空串 */
+  content: string;
   /** 几何均为逻辑像素（相对挂件窗客户区左上角） */
   posX: number;
   posY: number;
@@ -23,27 +32,41 @@ export interface GridBox {
   updatedAt: string;
 }
 
-/** 挂件条目：原文件路径的引用 */
+/** 格子条目：指向**收纳目录里的真实文件**（文件确实住在那里） */
 export interface GridItem {
   id: number;
   boxId: number;
-  /** 原文件的绝对路径（只读引用，永不修改） */
+  /** 收纳目录内的绝对路径（或系统格子的 CLSID 路径） */
   filePath: string;
   displayName: string;
   sort: number;
   createdAt: string;
 }
 
-/** 盒子创建 / 更新入参（缺省字段由 Rust 侧补默认值；更新仅写传入字段） */
+/** 格子创建 / 更新入参（缺省字段由 Rust 侧补默认值；更新仅写传入字段） */
 export interface GridBoxInput {
-  /** 缺省 = 创建新盒子 */
+  /** 缺省 = 创建新格子 */
   boxId?: number | null;
   name?: string | null;
+  kind?: GridBoxKind | null;
+  content?: string | null;
   posX?: number | null;
   posY?: number | null;
   width?: number | null;
   height?: number | null;
   sort?: number | null;
+}
+
+/** 挂件层真实状态（管理页据此对齐「显示 / 隐藏格子」开关） */
+export interface OverlayStatus {
+  /** 挂件窗当前是否真的显示着 */
+  visible: boolean;
+  /** 挂件窗是否已创建（区分「没建过」与「建了但收起了」） */
+  exists: boolean;
+  /** 当前基准层：desktop（贴桌面）/ bottom（普通窗口） */
+  attachMode: string;
+  /** 系统桌面图标是否处于隐藏态 */
+  iconsHidden: boolean;
 }
 
 /** 挂件窗几何（逻辑像素，持久化在 grid_meta） */
@@ -75,23 +98,30 @@ export interface FileIconData {
   rgbaBase64: string;
 }
 
-/** 桌面同步报告 = 一键整理结果 + 失效引用清理数（`grid_desktop_sync` 返回） */
-export interface DesktopSyncReport extends AutoArrangeReport {
-  /** 本次清理的失效引用数（桌面文件已被删除 / 移走） */
+/** 桌面同步报告（`grid_desktop_sync` 返回）：**只对账，不收录** */
+export interface DesktopSyncReport {
+  /** 参与对账的收纳格数 */
+  boxes: number;
+  /** 收纳目录里新发现并登记的条目数（手工在资源管理器里放进格子的文件） */
+  itemsAdded: number;
+  /** 清理掉的失效登记数（文件已被移出 / 删除） */
   pruned: number;
 }
 
+/** 一键收纳结果摘要（`grid_auto_arrange` 返回）：真的移动了文件 */
 export interface AutoArrangeReport {
-  /** 桌面上扫描到的可见条目数（隐藏 / 系统文件与符号链接已排除） */
+  /** 桌面根目录扫描到的可见条目数（含快捷方式 / 文件夹） */
   scanned: number;
+  /** 本次真正移动进收纳目录的普通文件数 */
+  itemsAdded: number;
   /** 本次新建的格子数 */
   boxesCreated: number;
   /** 复用了同名已有格子的次数 */
   boxesReused: number;
-  /** 新登记的条目引用数 */
-  itemsAdded: number;
-  /** 已在格子中、本次跳过的分组数 */
+  /** 按设计跳过的条目数（快捷方式 / 文件夹一律不动） */
   skipped: number;
+  /** 单文件失败原因（不中断整批） */
+  failures: string[];
 }
 
 /** 布局快照里的单条引用 */

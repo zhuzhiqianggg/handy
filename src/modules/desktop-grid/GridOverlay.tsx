@@ -1,8 +1,21 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { EyeOff, File, FolderClosed, Lock, LockOpen, Plus, Trash2, Wand2, X } from 'lucide-react';
+import {
+  CalendarDays,
+  EyeOff,
+  File,
+  FolderClosed,
+  Lock,
+  LockOpen,
+  Plus,
+  StickyNote,
+  Trash2,
+  Wand2,
+  X,
+} from 'lucide-react';
 import { ipc } from '@/lib/ipc';
 import { isTauri } from '@/platform/detect';
 import type { GridBox, GridItem, GridRegion } from '@/types/grid';
+import { CalendarWidget, NoteWidget } from './DesktopWidgets';
 
 /**
  * 桌面网格挂件 · 透明覆盖窗（`grid-overlay`）。
@@ -12,15 +25,16 @@ import type { GridBox, GridItem, GridRegion } from '@/types/grid';
  *   - **盒子画布**：绝对定位的盒子（标题栏 + 条目网格），编辑模式可拖拽移动
  *     （标题栏）、右下角拖拽缩放、双击标题重命名；落库经 `gridBoxUpsert`；
  *   - **文件拖放**：`getCurrentWebview().onDragDropEvent`，drop 落点命中哪个盒子
- *     就把拖入文件登记为该盒子的**引用**（`gridItemAdd`，绝不移动文件）；
+ *     就把拖入文件**真的移动**进该盒子的目录（`gridItemAdd` → Rust `fs::rename`，
+ *     同名冲突自动改名，绝不覆盖）；拖到别的盒子 = 再移动一次；
  *   - **点击穿透协同**：透明区域默认穿透（Rust 侧 `set_ignore_cursor_events`），
  *     本组件把盒子 / 工具栏矩形按 `scaleFactor` 换算为物理像素上报
  *     （`gridOverlayUpdateRegions`），Rust 光标轮询命中后才开放交互；拖拽期间
  *     经 `gridSetInteractive(true)` 显式申请保持可交互，避免拖快了被切回穿透；
  *   - **窗口几何持久化**：moved / resized 停稳 500ms 后写 `grid_geometry_set`；
- *   - **浮动工具栏**（常驻，右下角）：锁定/解锁布局、添加盒子、隐藏挂件。
+ *   - **浮动工具栏**（常驻，右下角）：锁定/解锁布局、添加收纳格 / 便签 / 日历、隐藏挂件。
  *
- * 交互约定：锁定态 = 只能双击打开条目 / 悬停移除引用；编辑态 = 布局操作全开放。
+ * 交互约定：锁定态 = 只能双击打开条目 / 悬停「×」把条目移回桌面；编辑态 = 布局操作全开放。
  */
 
 /** 盒子最小尺寸（与 Rust 侧 grid_box_upsert 的下限一致） */
@@ -188,16 +202,17 @@ export function GridOverlay(): React.JSX.Element {
     void refresh().catch((error: Error) => showHint(error.message));
   }, [refresh, showHint]);
 
-  // —— 桌面同步：接管桌面的数据引擎（Rust 侧增量收纳 + 清失效引用） ——
+  // —— 桌面对账（V33：只对账，不收录） ——
   //
-  // 显示格子层期间，桌面根目录的文件必须始终「每个都在格子里」：
-  // 新建 / 拷进桌面的文件几秒内自动归入对应类型格子，删掉的自动消失；
-  // 用户点 × 移除过的（dismissed 名单）不会被违背意愿地收回来。
+  // 格子内容是「收纳目录的真实内容」：用户在资源管理器里直接往格子的目录里放文件、
+  // 或把文件移走，这里对账后格子会跟着变。
+  // **不再自动把桌面文件收进格子** —— 那正是用户抱怨「和桌面图标重复、像复制了
+  // 一份」的来源；现在只有用户主动拖进格子才会收纳（真移动文件）。
 
-  /** 立即同步一次并按需刷新（返回报告供提示文案使用） */
+  /** 对账一次并按需刷新（有变化才重渲染，避免无谓的 DOM 抖动） */
   const syncDesktop = useCallback(async (): Promise<void> => {
     const report = await ipc.gridDesktopSync();
-    if (report.itemsAdded > 0 || report.pruned > 0 || report.boxesCreated > 0) {
+    if (report.itemsAdded > 0 || report.pruned > 0) {
       await refresh();
     }
   }, [refresh]);
@@ -207,19 +222,22 @@ export function GridOverlay(): React.JSX.Element {
       return;
     }
     const tick = (): void => {
-      // 窗口隐藏（挂件收起）时 webview 仍在运行，别白白扫桌面
+      // 窗口隐藏（挂件收起）时 webview 仍在运行，别白白扫盘
       if (document.visibilityState !== 'visible') {
         return;
       }
       void syncDesktop().catch(() => undefined);
     };
-    const timer = window.setInterval(tick, 5000);
+    // V33：15 秒一次（原 5 秒过于频繁，且对账后新增条目会让格子内容频繁跳动）
+    const timer = window.setInterval(tick, 15_000);
     return () => {
       window.clearInterval(timer);
     };
   }, [syncDesktop]);
 
-  // 挂件窗隐藏后再显示不会重新挂载，这里只在窗口创建时提示一次接管状态
+  // 挂件窗隐藏后再显示不会重新挂载，这里只在窗口创建时提示一次桌面图标状态。
+  // V32 起格子层默认**不再隐藏**系统图标（原桌面 + 格子共存的形态），所以只有手动
+  // 开过「隐藏系统图标」的用户才会看到这条提示 —— 顺带提醒他收起即恢复。
   useEffect(() => {
     if (!isTauri()) {
       return;
@@ -228,7 +246,7 @@ export function GridOverlay(): React.JSX.Element {
       .gridDesktopIconsGet()
       .then((visible) => {
         if (!visible) {
-          showHint('已接管桌面显示：系统图标已隐藏，收起挂件即恢复');
+          showHint('系统桌面图标处于隐藏状态（可在管理页恢复），收起挂件即恢复');
         }
       })
       .catch(() => undefined);
@@ -236,9 +254,12 @@ export function GridOverlay(): React.JSX.Element {
 
   // —— 健康监控（V32）：心跳 + 故障自捕获 ——
 
-  // 心跳：每 10s 向 Rust 报一次「JS 还活着」。Rust 侧 90s 收不到心跳就判定 webview
-  // 白屏（透明窗里白屏 = 什么都看不见，用户只会觉得「格子显示了一下就没了」），
-  // 自动销毁重建挂件窗 —— 自愈过程无需用户发现。
+  // 心跳：每 10s 向 Rust 报一次「JS 还活着」。
+  //
+  // V33 修正：心跳**只作诊断记录**，不再触发窗口重建。旧策略是「90 秒没心跳就销毁
+  // 重建」，但 WebView2 对贴桌面层的窗口会做后台定时器节流，心跳间隔很容易被拉到
+  // 90 秒以上 → 被误判成白屏 → 周期性销毁重建，用户看到的就是「闪一下没了 / 又出来了」。
+  // 现在只有「显示后一次心跳都没有」（真正的冷启动白屏）才会重建，见 Rust 轮询线程。
   useEffect(() => {
     if (!isTauri()) {
       return;
@@ -500,16 +521,17 @@ export function GridOverlay(): React.JSX.Element {
     [showHint],
   );
 
+  /** 把条目移出格子：文件**移回桌面根目录**（不是删除），桌面图标随之回来 */
   const removeItem = useCallback(
     (item: GridItem): void => {
-      // dismiss = true：记住「不要它」，桌面同步不会再把它自动收回来
       void ipc
-        .gridItemDelete(item.id, true)
+        .gridItemDelete(item.id)
         .then(() => {
           setItems((prev) => ({
             ...prev,
             [item.boxId]: (prev[item.boxId] ?? []).filter((i) => i.id !== item.id),
           }));
+          showHint(`已移出格子：${item.displayName}（回到桌面）`);
         })
         .catch((error: Error) => showHint(error.message));
     },
@@ -522,6 +544,7 @@ export function GridOverlay(): React.JSX.Element {
         .gridItemAdd(boxId, filePath)
         .then((item) => {
           setItems((prev) => ({ ...prev, [boxId]: [...(prev[boxId] ?? []), item] }));
+          showHint(`已收纳：${item.displayName}`);
         })
         .catch((error: Error) => showHint(error.message));
     },
@@ -751,7 +774,8 @@ export function GridOverlay(): React.JSX.Element {
     const count = boxesRef.current.length;
     void ipc
       .gridBoxUpsert({
-        name: '新盒子',
+        name: `新格子 ${count + 1}`,
+        kind: 'folder',
         posX: 80 + (count % 5) * 36,
         posY: 80 + (count % 7) * 30,
         width: 320,
@@ -760,11 +784,46 @@ export function GridOverlay(): React.JSX.Element {
       .then((created) => {
         setBoxes((prev) => [...prev, created]);
         setItems((prev) => ({ ...prev, [created.id]: [] }));
+        showHint(`已新建收纳格：${created.name}（把文件拖进来即收纳）`);
       })
       .catch((error: Error) => showHint(error.message));
   }, [showHint]);
 
-  /** 删除格子（仅删格子与其引用登记，文件本体不受任何影响） */
+  /** 新建挂件（便签 / 日历）—— 桌面上直接可用的轻量小组件 */
+  const addWidget = useCallback(
+    (kind: 'note' | 'calendar'): void => {
+      const count = boxesRef.current.length;
+      const preset =
+        kind === 'note'
+          ? { name: '便签', width: 260, height: 220, content: '' }
+          : { name: '日历 · 今日计划', width: 320, height: 300, content: '' };
+      void ipc
+        .gridBoxUpsert({
+          name: preset.name,
+          kind,
+          content: preset.content,
+          posX: 120 + (count % 5) * 36,
+          posY: 120 + (count % 7) * 30,
+          width: preset.width,
+          height: preset.height,
+        })
+        .then((created) => {
+          setBoxes((prev) => [...prev, created]);
+          setItems((prev) => ({ ...prev, [created.id]: [] }));
+          showHint(kind === 'note' ? '已新建便签挂件' : '已新建日历挂件（含今日计划）');
+        })
+        .catch((error: Error) => showHint(error.message));
+    },
+    [showHint],
+  );
+
+  /** 保存挂件数据（便签正文 / 日历配置），失败不弹提示以免打断输入 */
+  const saveBoxContent = useCallback((boxId: number, content: string): void => {
+    setBoxes((prev) => prev.map((box) => (box.id === boxId ? { ...box, content } : box)));
+    void ipc.gridBoxSetContent(boxId, content).catch(() => undefined);
+  }, []);
+
+  /** 删除格子（只删格子本身；收纳目录里还有文件则原样保留） */
   const deleteBox = useCallback(
     (boxId: number): void => {
       void ipc
@@ -786,13 +845,13 @@ export function GridOverlay(): React.JSX.Element {
     void ipc.gridOverlayHide().catch(() => undefined);
   }, []);
 
-  /** 手动触发一次桌面同步（立即整理） */
+  /** 手动对账一次（把格子里目录的真实内容刷新进来） */
   const syncNow = useCallback((): void => {
     void ipc
       .gridDesktopSync()
       .then(async (report) => {
         await refresh();
-        showHint(`已同步桌面：新收 ${report.itemsAdded} 个 · 清理失效 ${report.pruned} 个`);
+        showHint(`已对账 ${report.boxes} 个收纳格：新增 ${report.itemsAdded} · 清理 ${report.pruned}`);
       })
       .catch((error: Error) => showHint(error.message));
   }, [refresh, showHint]);
@@ -805,6 +864,7 @@ export function GridOverlay(): React.JSX.Element {
       {boxes.map((box) => {
         const boxItems = items[box.id] ?? [];
         const isDropTarget = dropTargetId === box.id;
+        const isWidget = box.kind === 'note' || box.kind === 'calendar';
         return (
           <section
             key={box.id}
@@ -868,10 +928,10 @@ export function GridOverlay(): React.JSX.Element {
                   {box.name}
                 </span>
               )}
-              {editMode ? (
+              {editMode && !isWidget ? (
                 <button
                   type="button"
-                  title="填路径添加引用（也可直接把文件拖进盒子）"
+                  title="填路径收纳（也会把文件移动进格子目录）"
                   onMouseDown={(event) => event.stopPropagation()}
                   onClick={() => beginAddPath(box.id)}
                   className="shrink-0 rounded p-0.5 opacity-70 transition hover:bg-white/15 hover:opacity-100"
@@ -882,7 +942,7 @@ export function GridOverlay(): React.JSX.Element {
               {editMode ? (
                 <button
                   type="button"
-                  title="删除格子（里面的文件不受影响）"
+                  title="删除格子（格子里的文件会留在收纳目录里，不会被删）"
                   onMouseDown={(event) => event.stopPropagation()}
                   onClick={() => deleteBox(box.id)}
                   className="shrink-0 rounded p-0.5 opacity-70 transition hover:bg-red-500/80 hover:opacity-100"
@@ -890,14 +950,32 @@ export function GridOverlay(): React.JSX.Element {
                   <Trash2 className="h-3 w-3" />
                 </button>
               ) : null}
-              <span className="shrink-0 text-[10px] opacity-40">{boxItems.length}</span>
+              {isWidget ? (
+                box.kind === 'note' ? (
+                  <StickyNote className="h-3 w-3 shrink-0 opacity-50" />
+                ) : (
+                  <CalendarDays className="h-3 w-3 shrink-0 opacity-50" />
+                )
+              ) : (
+                <span className="shrink-0 text-[10px] opacity-40">{boxItems.length}</span>
+              )}
             </header>
 
-            {/* 条目网格：双击打开原文件；悬停显示移除引用 */}
-            <div
-              className="grid min-h-0 flex-1 content-start gap-1 overflow-y-auto p-2"
-              style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(72px, 1fr))' }}
-            >
+            {/* 挂件（便签 / 日历）：内容自管，不参与收纳对账 */}
+            {box.kind === 'note' ? (
+              <div className="min-h-0 flex-1">
+                <NoteWidget boxId={box.id} content={box.content} onSave={saveBoxContent} />
+              </div>
+            ) : box.kind === 'calendar' ? (
+              <div className="min-h-0 flex-1">
+                <CalendarWidget />
+              </div>
+            ) : (
+              /* 收纳格条目网格：双击打开原文件；悬停把文件移出格子（回桌面） */
+              <div
+                className="grid min-h-0 flex-1 content-start gap-1 overflow-y-auto p-2"
+                style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(72px, 1fr))' }}
+              >
               {addingBoxId === box.id ? (
                 <div className="col-span-full flex items-center gap-1">
                   <input
@@ -921,7 +999,7 @@ export function GridOverlay(): React.JSX.Element {
               {boxItems.map((item) => (
                 <div
                   key={item.id}
-                  title={`${item.displayName}\n${item.filePath}\n双击打开原文件 · 拖到其他格子移动`}
+                  title={`${item.displayName}\n${item.filePath}\n双击打开 · 拖到其他格子移动 · 右上角 × 移回桌面`}
                   draggable
                   onDragStart={(event) => startItemDrag(item, event)}
                   onDragEnd={endItemDrag}
@@ -930,7 +1008,7 @@ export function GridOverlay(): React.JSX.Element {
                 >
                   <button
                     type="button"
-                    title="从格子移除（桌面同步不会再自动收录）"
+                    title="移出格子：文件回到桌面（不是删除）"
                     onClick={() => removeItem(item)}
                     className="absolute right-0.5 top-0.5 hidden rounded bg-black/50 p-0.5 text-neutral-200 hover:bg-red-500/80 group-hover:block"
                   >
@@ -943,11 +1021,14 @@ export function GridOverlay(): React.JSX.Element {
                 </div>
               ))}
               {boxItems.length === 0 && (
-                <p className="col-span-full py-4 text-center text-[11px] opacity-40">
-                  把文件拖到这里建立引用
+                <p className="col-span-full py-3 text-center text-[11px] leading-relaxed opacity-40">
+                  把文件拖到这里收纳
+                  <br />
+                  文件会移动进 桌面/Handy整理/{box.name}
                 </p>
               )}
-            </div>
+              </div>
+            )}
 
             {/* 缩放手柄（仅编辑态） */}
             {editMode && (
@@ -977,19 +1058,38 @@ export function GridOverlay(): React.JSX.Element {
           style={{ pointerEvents: 'auto' }}
           className="absolute left-1/2 top-1/2 flex -translate-x-1/2 -translate-y-1/2 flex-col items-center gap-3 rounded-xl bg-neutral-900/75 px-6 py-5 text-center shadow-2xl backdrop-blur"
         >
-          <p className="text-sm font-medium text-neutral-100">桌面挂件还没有盒子</p>
-          <p className="max-w-xs text-xs leading-relaxed text-neutral-300">
-            盒子是桌面上的收纳格。显示挂件时系统桌面图标会自动隐藏、由格子接管显示：
-            桌面上的文件会按类型自动收进格子，新文件几秒内自动出现。
-            也可以把文件拖进盒子，双击图标用默认程序打开原文件。
+          <p className="text-sm font-medium text-neutral-100">桌面上还没有格子</p>
+          <p className="max-w-sm text-xs leading-relaxed text-neutral-300">
+            收纳格是桌面上的分区：把文件拖进去，文件会
+            <span className="text-neutral-100">真的移动</span>
+            到 桌面/Handy整理/格子名/ 里，桌面不再重复显示它；双击图标用默认程序打开；
+            右上角 × 把文件移回桌面（不是删除）。
+            <br />
+            也可以直接加一个便签或日历挂件，桌面随手记、随手看计划。
           </p>
-          <button
-            type="button"
-            onClick={addBox}
-            className="rounded-lg bg-sky-500/90 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-sky-400"
-          >
-            ＋ 创建第一个盒子
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={addBox}
+              className="rounded-lg bg-sky-500/90 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-sky-400"
+            >
+              ＋ 新建收纳格
+            </button>
+            <button
+              type="button"
+              onClick={() => addWidget('note')}
+              className="rounded-lg bg-white/15 px-3 py-1.5 text-xs font-medium text-neutral-100 transition hover:bg-white/25"
+            >
+              便签
+            </button>
+            <button
+              type="button"
+              onClick={() => addWidget('calendar')}
+              className="rounded-lg bg-white/15 px-3 py-1.5 text-xs font-medium text-neutral-100 transition hover:bg-white/25"
+            >
+              日历 + 计划
+            </button>
+          </div>
         </div>
       )}
 
@@ -1026,8 +1126,24 @@ export function GridOverlay(): React.JSX.Element {
         </button>
         <button
           type="button"
+          onClick={() => addWidget('note')}
+          title="添加便签挂件（自动保存）"
+          className="rounded-full p-1.5 text-neutral-200 transition hover:bg-white/10"
+        >
+          <StickyNote className="h-4 w-4" />
+        </button>
+        <button
+          type="button"
+          onClick={() => addWidget('calendar')}
+          title="添加日历挂件（含今日计划，与工作台共用数据）"
+          className="rounded-full p-1.5 text-neutral-200 transition hover:bg-white/10"
+        >
+          <CalendarDays className="h-4 w-4" />
+        </button>
+        <button
+          type="button"
           onClick={syncNow}
-          title="立即整理：扫描桌面，新文件自动归入对应格子"
+          title="立即对账：把格子目录里的真实内容刷新进来"
           className="rounded-full p-1.5 text-neutral-200 transition hover:bg-white/10"
         >
           <Wand2 className="h-4 w-4" />

@@ -197,7 +197,11 @@ function probeRelativeTime() {
   };
 }
 
-/** 桌面整理控制台：首屏必须是「归类文件」，切到「桌面格子」要给出「不移动」的说明 */
+/**
+ * 桌面整理控制台：首屏是「归类文件」，切到「桌面格子」要讲清 V33 的新语义
+ * —— 格子是**真实收纳**（拖进去文件真的移进 桌面/Handy整理/格子名/），
+ * 而不是只登记引用（旧文案「不移动」已随模型转向废弃）。
+ */
 async function probeDesktopConsole() {
   const tick = () => new Promise((r) => setTimeout(r, 400));
   const before = document.body.innerText;
@@ -216,7 +220,8 @@ async function probeDesktopConsole() {
   }
   gridTab.click();
   await tick();
-  out.gridHint = document.body.innerText.includes('不移动');
+  const after = document.body.innerText;
+  out.gridHint = after.includes('真实收纳') && after.includes('真的移动');
   return out;
 }
 
@@ -648,7 +653,7 @@ const CASES = [
       r.probe?.hasMoveHint === true &&
       r.probe?.gridHint === true,
     detail: (r) =>
-      `首屏=归类文件 ✓ 作用目录 ✓ 真移动提示 ✓ 切页签后=不移动 ${r.probe?.gridHint ? '✓' : '✗'}`,
+      `首屏=归类文件 ✓ 作用目录 ✓ 真移动提示 ✓ 切页签后=真实收纳 ${r.probe?.gridHint ? '✓' : '✗'}`,
   },
 
   // ——— V26 扩展：把剩下 4 个「没有示例条」的工具也补上（补齐 24/24）———

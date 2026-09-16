@@ -15,11 +15,12 @@ import { desktopOrganizerCommands } from './commands';
  *   - **归类文件**（`OrganizerView` + Rust `organizer.rs`）会**真移动**桌面文件到
  *     「桌面/Handy整理/类别/」，同名校验、跳过隐藏与系统文件、按计划可逆序撤销
  *     —— 这就是「操作系统桌面整理」本身；
- *   - **桌面格子**（`GridManagerView` + Rust `grid.rs`）零磁盘副作用，只登记引用，
- *     在桌面上叠一层半透明格子层。
+ *   - **桌面格子**（`GridManagerView` + Rust `grid.rs`）在桌面上叠一层半透明
+ *     收纳层，**V33 起同样是真收纳**：每个格子绑定真实目录 `桌面/Handy整理/<格名>/`，
+ *     拖入即真移动；另含便签 / 日历计划挂件。
  *
  * V19 起首屏一直指向后者，于是「桌面整理」这个名字下用户看到的是「在自己的框里玩」。
- * 现在控制台把「归类文件」设为默认页签，格子降为第二页签并注明不动文件。
+ * 现在控制台把「归类文件」设为默认页签，格子作为第二页签提供常驻桌面的收纳与挂件。
  */
 const desktopOrganizerModule = {
   id: 'desktop-organizer',
@@ -39,13 +40,16 @@ const desktopOrganizerModule = {
     '撤销整理',
     '桌面挂件',
     '格子',
+    '收纳格',
     '网格',
     '挂件',
+    '便签',
+    '日历',
+    '计划',
     '备份布局',
     '还原布局',
     '图标',
     '快捷',
-    '引用',
     'organize',
     'widget',
     'grid',

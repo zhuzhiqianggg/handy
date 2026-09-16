@@ -1,25 +1,57 @@
-//! 桌面网格挂件（desktop grid widget）——「文件引用型」桌面整理（M2 改版）。
+//! 桌面网格挂件（desktop grid widget）——**真实收纳型**桌面整理（V33 起重定）。
 //!
-//! 设计原则（用户明确否决 V12「建目录 + 移动文件」方案）：
-//!   - **零磁盘副作用**：挂件条目只是原文件路径的**引用**（`grid_items.file_path`），
-//!     打开经 shell 插件唤起系统默认程序打开**原文件**，从不移动 / 复制 / 重命名；
-//!   - **桌面层挂件窗**：`grid-overlay` 无边框透明窗，**作为桌面窗口的子窗口**
-//!     真正长在桌面上（`SetParent` 到 Progman / WorkerW，见 [`apply_attach`]）。
-//!     V20 修复：旧实现用 `SetWindowPos(HWND_BOTTOM)` 把它压到了**壁纸之下**，
-//!     用户看到的是「格子建了但桌面上什么都没有」；
-//!   - **默认点击穿透**：窗口创建后即 `set_ignore_cursor_events(true)`；Rust 侧轻量
-//!     轮询线程每 [`POLL_INTERVAL_MS`] 毫秒取全局光标位置，与前端上报的盒子区域
-//!     （[`grid_overlay_update_regions`]，挂件窗内**物理像素**）做命中测试，命中
-//!     （或前端拖拽期显式申请，见 [`grid_set_interactive`]）才切回可交互。这样透明
-//!     区域始终把点击让给桌面，而盒子区域可交互、可接收文件拖放。
+//! ## 模型（V33 转向，用户实测反馈驱动）
 //!
-//! 数据契约：`db/migrations.rs` v4（grid_meta / grid_boxes / grid_items）。
+//! 旧模型是**文件引用型**：格子只登记桌面文件的路径引用，文件一动不动。实测下来
+//! 它与桌面原图标**完全重复**（同一批文件在桌面和格子里各显示一份），用户的原话
+//! 是「并不是整理收纳，而是复制了一份而已」。
+//!
+//! 新模型是**真实收纳型**：
+//!   - 每个收纳格绑定一个真实目录 `桌面/Handy整理/<格子名>/`（与「归类文件」
+//!     共用同一个根目录，用户只需认一个目录）；
+//!   - **拖进格子 = 真把文件移进该目录**（同名不覆盖，冲突自动改名）；
+//!     文件离开桌面根目录 → 桌面图标自然消失 → 不再重复；
+//!   - 条目上的 × = **移出格子**（把文件移回桌面根目录），不是删除；
+//!   - **默认不自动收录桌面任何东西**（不藏图标、不搬文件）：桌面图标与快捷
+//!     方式一律留在原位，格子只呈现「已经收纳进来的文件」。
+//!
+//! 格子还是**挂件容器**：`kind` 区分 `folder`（收纳格）/ `note`（便签）/
+//! `calendar`（日历 + 今日计划）/ `system`（此电脑 · 回收站入口）。非 folder
+//! 类型的格子不绑定目录、不参与磁盘对账，内容存在 `content` 列里。
+//!
+//! ## 桌面层挂件窗
+//!
+//! `grid-overlay` 无边框透明窗，用 `SetWindowPos(hwnd, 桌面宿主)` 贴在桌面窗口
+//! **正上方**（V20 修复：旧实现用 `HWND_BOTTOM` 把它压到了壁纸之下，用户看到的
+//! 是「格子建了但桌面上什么都没有」）。
+//!
+//! ## 点击穿透
+//!
+//! 窗口创建后即 `set_ignore_cursor_events(true)`；Rust 侧轻量轮询线程每
+//! [`POLL_INTERVAL_MS`] 毫秒取全局光标位置，与前端上报的盒子区域
+//! （[`grid_overlay_update_regions`]，挂件窗内**物理像素**）做命中测试，命中
+//! （或前端拖拽期显式申请，见 [`grid_set_interactive`]）才切回可交互。这样透明
+//! 区域始终把点击让给桌面，而盒子区域可交互、可接收文件拖放。
+//!
+//! ## 稳定性（V33 修复用户实测的「闪一下就没了」）
+//!
+//! 1. **心跳自愈只在冷启动失败时生效**：旧策略是「90 秒没心跳就销毁重建」，
+//!    而 WebView2 对贴桌面层的窗口会做后台定时器节流，心跳间隔很容易被拉到 90 秒
+//!    以上 → 误判成白屏 → **周期性销毁重建** → 用户看到「闪一下没了 / 又出来了」。
+//!    现在只认「本次显示后从未收到过心跳」（真正的冷启动白屏），且带冷却与次数上限；
+//! 2. **Z 序校验去抖**：间隔放宽到 [`REASSERT_TICKS`] 个周期，且要求连续两次
+//!    判定不一致才重排 —— 避免第三方桌面工具插队时每 2 秒 `SetWindowPos` 一次；
+//! 3. **生命周期日志**：`%LOCALAPPDATA%/Handy/grid-debug.log` 记录显示 / 收起 /
+//!    重建 / Z 序重排，出问题可直接看文件，不靠猜。
+//!
+//! 数据契约：`db/migrations.rs` v4（建表）+ v6（`kind` / `content`）。
 //! 三方向一致：迁移 SQL = 本文件结构体 = `src/types/grid.ts`。
 //!
 //! 全部命令均为 `async fn`（项目 P0 约定：同步命令会楔死 WebView2 COM STA），
 //! 错误一律中文可读，SQL 一律参数化绑定。
 
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Mutex;
 
 #[cfg(target_os = "windows")]
@@ -44,7 +76,27 @@ const META_KEY_GEOMETRY: &str = "overlay_geometry";
 const POLL_INTERVAL_MS: u64 = 60;
 
 /// 每隔多少个轮询周期检查一次 Z 序（错位才重排，见 [`reassert_attach`]）。
-const REASSERT_TICKS: u64 = 33;
+///
+/// V33：33 周期（≈2 秒）过于频繁 —— 装了第三方桌面工具时判据会持续不成立，
+/// 于是每 2 秒重排一次 Z 序，窗口反复重绘就是「闪一下」的观感来源。
+/// 放宽到 250 周期（≈15 秒）并配连续两次判定去抖。
+const REASSERT_TICKS: u64 = 250;
+
+/// 收纳根目录名（桌面下的一级目录；与「归类文件」共用，避免两个相似目录）。
+const STORAGE_ROOT_NAME: &str = "Handy整理";
+
+/// 收纳根目录名（历史沿用的另一个名字，作为兜底：若只存在它则继续沿用）。
+const LEGACY_STORAGE_ROOT_NAME: &str = "Handy收纳";
+
+/// 冷启动白屏宽限期（秒）：本次显示后这么久还没收到过一次心跳，才判定前端没起来。
+const HEARTBEAT_COLD_START_SECS: u64 = 45;
+
+/// 两次自动重建之间的最小间隔（秒）：冷却，避免重建风暴。
+const HEARTBEAT_REBUILD_COOLDOWN_SECS: u64 = 300;
+
+/// 单次进程内自动重建的次数上限（超过只记日志，交给用户手动「显示格子」）。
+const HEARTBEAT_REBUILD_MAX: u32 = 3;
+
 
 /// 前端上报的盒子命中区域（挂件窗客户区内**物理像素**）。
 #[derive(Debug, Clone, Deserialize)]
@@ -67,11 +119,17 @@ pub struct GridGeometry {
 }
 
 /// 盒子实体（与 `grid_boxes` 表对应；`item_count` 为条目计数子查询）。
+///
+/// `kind`：`folder`（收纳格，绑定真实目录）/ `note`（便签）/ `calendar`（日历 +
+/// 今日计划）/ `system`（此电脑 · 回收站入口）。非 `folder` 的格子不绑目录。
+/// `content`：挂件自有数据（便签正文 / 日历配置 JSON），收纳格恒为空串。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GridBox {
     pub id: i64,
     pub name: String,
+    pub kind: String,
+    pub content: String,
     pub pos_x: i64,
     pub pos_y: i64,
     pub width: i64,
@@ -82,7 +140,10 @@ pub struct GridBox {
     pub updated_at: String,
 }
 
-/// 挂件条目（与 `grid_items` 表对应；`file_path` 为**原文件**路径引用）。
+/// 挂件条目（与 `grid_items` 表对应）。
+///
+/// V33 起 `file_path` 指向**收纳目录里的真实文件**（不再是指向桌面文件的引用），
+/// 表本身降级为登记缓存 —— 真相在磁盘目录，每次列举时按目录对账。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GridItem {
@@ -119,14 +180,16 @@ fn now_iso() -> String {
 }
 
 /// 盒子列前缀（别名 `b`）。
-const BOX_COLUMNS: &str = "b.id, b.name, b.pos_x, b.pos_y, b.width, b.height, b.sort, \
-                           b.created_at, b.updated_at";
+const BOX_COLUMNS: &str = "b.id, b.name, b.kind, b.content, b.pos_x, b.pos_y, b.width, \
+                           b.height, b.sort, b.created_at, b.updated_at";
 
 /// 行 → 盒子实体（SQL 必须附带 `item_count` 计数列）。
 fn row_to_box_with_count(row: &Row) -> rusqlite::Result<GridBox> {
     Ok(GridBox {
         id: row.get("id")?,
         name: row.get("name")?,
+        kind: row.get("kind")?,
+        content: row.get("content")?,
         pos_x: row.get("pos_x")?,
         pos_y: row.get("pos_y")?,
         width: row.get("width")?,
@@ -182,6 +245,205 @@ fn clean_name(name: Option<String>) -> String {
     }
 }
 
+// —— 收纳目录（V33 的真实收纳层：格子 = 桌面/Handy整理/<格子名>/） ——
+
+/// 收纳根目录：`桌面/Handy整理`（与「归类文件」同一根，用户只需认一个目录）。
+///
+/// 兜底：若只存在历史的 `Handy收纳` 目录，则继续沿用，避免凭空多出一个空目录。
+fn storage_root() -> Result<PathBuf, String> {
+    let desktop = desktop_root()?;
+    let primary = desktop.join(STORAGE_ROOT_NAME);
+    if primary.is_dir() {
+        return Ok(primary);
+    }
+    let legacy = desktop.join(LEGACY_STORAGE_ROOT_NAME);
+    if legacy.is_dir() {
+        return Ok(legacy);
+    }
+    Ok(primary)
+}
+
+/// 桌面根目录。
+fn desktop_root() -> Result<PathBuf, String> {
+    dirs::desktop_dir().ok_or_else(|| "无法定位桌面目录".to_string())
+}
+
+/// 目录名清洗：Windows 非法字符换下划线，去首尾空白与结尾句点，空则用缺省名。
+fn clean_segment(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for ch in name.trim().chars() {
+        if matches!(ch, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || (ch as u32) < 0x20
+        {
+            out.push('_');
+        } else {
+            out.push(ch);
+        }
+    }
+    let trimmed = out.trim().trim_end_matches(['.', ' ']).trim();
+    if trimmed.is_empty() {
+        "未命名".to_string()
+    } else {
+        // 过长名字会把整条路径撑爆（Windows MAX_PATH），截到 60 字符
+        trimmed.chars().take(60).collect()
+    }
+}
+
+/// 格子对应的真实收纳目录。
+fn box_dir(root: &Path, box_name: &str) -> PathBuf {
+    root.join(clean_segment(box_name))
+}
+
+/// 建目录（幂等）。
+fn ensure_dir(path: &Path) -> Result<(), String> {
+    if path.is_dir() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(path)
+        .map_err(|err| format!("创建收纳目录失败（{}）：{err}", path.display()))
+}
+
+/// 枚举收纳目录里的条目（跳过隐藏 / 系统文件与点开头项；目录同样算条目）。
+fn list_dir_items(dir: &Path) -> Vec<(String, String)> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<(String, String)> = Vec::new();
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else { continue };
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::fs::MetadataExt;
+            const HIDDEN_OR_SYSTEM: u32 = 0x2 | 0x4;
+            if meta.file_attributes() & HIDDEN_OR_SYSTEM != 0 {
+                continue;
+            }
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+        out.push((entry.path().to_string_lossy().to_string(), name));
+    }
+    out.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
+    out
+}
+
+/// 冲突安全移动：目标同名时自动追加 ` (2)`、` (3)` …，**绝不覆盖**。
+fn move_with_conflict_rename(src: &Path, dest_dir: &Path) -> Result<PathBuf, String> {
+    let file_name = src
+        .file_name()
+        .ok_or_else(|| format!("无法从路径取文件名：{}", src.display()))?
+        .to_string_lossy()
+        .to_string();
+    let file_path = Path::new(&file_name);
+    let stem = file_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| file_name.clone());
+    let ext = file_path
+        .extension()
+        .map(|s| format!(".{}", s.to_string_lossy()))
+        .unwrap_or_default();
+
+    let mut target = dest_dir.join(&file_name);
+    let mut index = 2;
+    while target.exists() {
+        if index > 999 {
+            return Err(format!("目标目录同名文件过多，无法移动：{file_name}"));
+        }
+        target = dest_dir.join(format!("{stem} ({index}){ext}"));
+        index += 1;
+    }
+
+    match std::fs::rename(src, &target) {
+        Ok(()) => Ok(target),
+        Err(err) => {
+            // 跨卷移动（`fs::rename` 不支持）→ 退化成「复制 + 删除源」
+            std::fs::copy(src, &target)
+                .map_err(|copy_err| format!("移动失败（{err}）；复制兜底也失败：{copy_err}"))?;
+            std::fs::remove_file(src)
+                .map_err(|remove_err| format!("复制成功但删除原文件失败：{remove_err}"))?;
+            Ok(target)
+        }
+    }
+}
+
+/// 某盒子的登记条目（按 sort 升序、id 升序稳定排序）。
+fn list_registry_items(conn: &Connection, box_id: i64) -> Result<Vec<GridItem>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, box_id, file_path, display_name, sort, created_at \
+             FROM grid_items WHERE box_id = ?1 ORDER BY sort ASC, id ASC",
+        )
+        .map_err(|err| format!("查询挂件条目失败：{err}"))?;
+    let items = stmt
+        .query_map(params![box_id], row_to_item)
+        .map_err(|err| format!("查询挂件条目失败：{err}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| format!("读取挂件条目失败：{err}"))?;
+    Ok(items)
+}
+
+/// 按磁盘目录对账某个收纳格：补齐新出现的文件、清掉已消失的登记，返回对账结果。
+///
+/// 真相在磁盘目录，`grid_items` 只是给前端提供稳定 id 的登记缓存。
+/// 非 `folder` 类型的格子（便签 / 日历 / 系统）不绑目录，直接返回登记行。
+fn reconcile_box(
+    conn: &Connection,
+    box_id: i64,
+    box_name: &str,
+    kind: &str,
+    root: &Path,
+) -> Result<Vec<GridItem>, String> {
+    if kind != "folder" {
+        return list_registry_items(conn, box_id);
+    }
+    let dir = box_dir(root, box_name);
+    ensure_dir(&dir)?;
+    let on_disk = list_dir_items(&dir);
+    let disk_paths: std::collections::HashSet<String> =
+        on_disk.iter().map(|(path, _)| path.clone()).collect();
+
+    let registered = list_registry_items(conn, box_id)?;
+    // 清理：登记还在、磁盘上没了 → 删登记
+    for item in &registered {
+        if !disk_paths.contains(&item.file_path) {
+            conn.execute("DELETE FROM grid_items WHERE id = ?1", params![item.id])
+                .map_err(|err| format!("清理失效条目失败：{err}"))?;
+        }
+    }
+    // 补齐：磁盘上有、登记里没有 → 补登记（例如用户在资源管理器里手工拖进去的）
+    let known: std::collections::HashSet<String> = registered
+        .iter()
+        .filter(|item| disk_paths.contains(&item.file_path))
+        .map(|item| item.file_path.clone())
+        .collect();
+    let mut sort = registered.iter().map(|item| item.sort).max().unwrap_or(0);
+    for (path, name) in &on_disk {
+        if known.contains(path) {
+            continue;
+        }
+        sort += 1;
+        conn.execute(
+            "INSERT OR IGNORE INTO grid_items (box_id, file_path, display_name, sort, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![box_id, path, name, sort, now_iso()],
+        )
+        .map_err(|err| format!("登记收纳条目失败：{err}"))?;
+    }
+    list_registry_items(conn, box_id)
+}
+
+/// 格子类型白名单：未知值一律回落成收纳格（`folder`），不制造半残数据。
+fn clean_kind(kind: Option<String>) -> String {
+    match kind.as_deref() {
+        Some("note") => "note".to_string(),
+        Some("calendar") => "calendar".to_string(),
+        Some("system") => "system".to_string(),
+        _ => "folder".to_string(),
+    }
+}
+
 /// 读取「下一个排序值」。
 ///
 /// `bind = Some(id)` 用于**带 `?1` 占位符**的 SQL（盒子内条目求最大值）；
@@ -229,6 +491,8 @@ pub async fn grid_box_upsert(
     app: AppHandle,
     box_id: Option<i64>,
     name: Option<String>,
+    kind: Option<String>,
+    content: Option<String>,
     pos_x: Option<i64>,
     pos_y: Option<i64>,
     width: Option<i64>,
@@ -258,10 +522,12 @@ pub async fn grid_box_upsert(
             let cascade = existing.max(0) as i64;
             conn.execute(
                 "INSERT INTO grid_boxes \
-                 (name, pos_x, pos_y, width, height, sort, created_at, updated_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 (name, kind, content, pos_x, pos_y, width, height, sort, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     clean_name(name),
+                    clean_kind(kind),
+                    content.unwrap_or_default(),
                     pos_x.unwrap_or(60 + (cascade % 6) * 340),
                     pos_y.unwrap_or(60 + (cascade % 4) * 250),
                     final_width,
@@ -275,12 +541,38 @@ pub async fn grid_box_upsert(
             load_box(&app, conn.last_insert_rowid())
         }
         Some(id) => {
+            // 重命名收纳格时**目录要跟着改名**，否则格子会指向一个凭空新建的空目录
+            // （用户会看到「改个名字文件全没了」）。目标目录已存在则不动磁盘，只改名。
+            if let Some(raw_name) = name.clone() {
+                let next_name = clean_name(Some(raw_name));
+                if let Ok(previous) = load_box(&app, id) {
+                    if previous.kind == "folder" && previous.name != next_name {
+                        if let Ok(root) = storage_root() {
+                            let from = box_dir(&root, &previous.name);
+                            let to = box_dir(&root, &next_name);
+                            if from.is_dir() && !to.exists() {
+                                std::fs::rename(&from, &to).map_err(|err| {
+                                    format!("重命名收纳目录失败（{} → {}）：{err}", from.display(), to.display())
+                                })?;
+                            }
+                        }
+                    }
+                }
+            }
             // 动态 SET：只更新显式传入的字段
             let mut sets: Vec<&'static str> = Vec::new();
             let mut values: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
             if let Some(v) = name {
                 sets.push("name = ?");
                 values.push(Box::new(clean_name(Some(v))));
+            }
+            if let Some(v) = kind {
+                sets.push("kind = ?");
+                values.push(Box::new(clean_kind(Some(v))));
+            }
+            if let Some(v) = content {
+                sets.push("content = ?");
+                values.push(Box::new(v));
             }
             if let Some(v) = pos_x {
                 sets.push("pos_x = ?");
@@ -326,9 +618,11 @@ pub async fn grid_box_upsert(
     }
 }
 
-/// 删除盒子（级联删除其条目；**文件本体不受任何影响**）。
+/// 删除盒子。**收纳进来的文件不会被删除**：目录里还有东西就原样保留（只是不再有
+/// 格子显示它）；目录已空才顺手删掉空目录，避免满桌面攒空文件夹。
 #[tauri::command]
 pub async fn grid_box_delete(app: AppHandle, box_id: i64) -> Result<(), String> {
+    let entity = load_box(&app, box_id)?;
     let conn = connect(&app)?;
     let affected = conn
         .execute("DELETE FROM grid_boxes WHERE id = ?1", params![box_id])
@@ -337,15 +631,44 @@ pub async fn grid_box_delete(app: AppHandle, box_id: i64) -> Result<(), String> 
         return Err(format!("盒子不存在或已被删除（id={box_id}）"));
     }
     // grid_items 由外键 ON DELETE CASCADE 自动清理（db::open 已启用 foreign_keys）
+    if entity.kind == "folder" {
+        if let Ok(root) = storage_root() {
+            let dir = box_dir(&root, &entity.name);
+            if dir.is_dir() && list_dir_items(&dir).is_empty() {
+                let _ = std::fs::remove_dir(&dir);
+            }
+        }
+    }
     Ok(())
 }
 
-// —— 条目 CRUD（仅登记引用，不动文件） ——
+/// 写挂件数据（便签正文 / 日历配置 JSON 等）。收纳格一般不使用。
+#[tauri::command]
+pub async fn grid_box_set_content(
+    app: AppHandle,
+    box_id: i64,
+    content: String,
+) -> Result<(), String> {
+    let conn = connect(&app)?;
+    let affected = conn
+        .execute(
+            "UPDATE grid_boxes SET content = ?1, updated_at = ?2 WHERE id = ?3",
+            params![content, now_iso(), box_id],
+        )
+        .map_err(|err| format!("保存挂件数据失败：{err}"))?;
+    if affected == 0 {
+        return Err(format!("盒子不存在或已被删除（id={box_id}）"));
+    }
+    Ok(())
+}
 
-/// 添加条目：把**原文件路径**登记为某盒子内的引用。
+// —— 条目 CRUD（真实收纳：文件真的会在收纳目录里进出） ——
+
+/// 把文件放进某个收纳格 = **真的把文件移进**该格子的收纳目录。
 ///
-/// - `displayName` 缺省取文件名；
-/// - 同一盒子内同一 `file_path` 不重复登记（唯一索引兜底 + 友好中文错误）。
+/// - 目标同名**绝不覆盖**，冲突自动改名（`名称 (2).扩展名`）；
+/// - 文件已在收纳目录内 → 明确报错，不做无意义搬运；
+/// - 跨卷移动自动退化成「复制 + 删除源」，失败时中文错误说明是哪一步失败。
 #[tauri::command]
 pub async fn grid_item_add(
     app: AppHandle,
@@ -353,111 +676,118 @@ pub async fn grid_item_add(
     file_path: String,
     display_name: Option<String>,
 ) -> Result<GridItem, String> {
-    let file_path = file_path.trim().to_string();
-    if file_path.is_empty() {
+    let raw = file_path.trim().to_string();
+    if raw.is_empty() {
         return Err("文件路径为空".to_string());
     }
+    let source = PathBuf::from(&raw);
+    if !source.exists() {
+        return Err(format!("文件不存在：{raw}"));
+    }
+    let entity = load_box(&app, box_id)?;
+    if entity.kind != "folder" {
+        return Err("该格子不是收纳格，不能放文件".to_string());
+    }
+    let root = storage_root()?;
+    let dir = box_dir(&root, &entity.name);
+    ensure_dir(&dir)?;
+    if source.parent().map(|parent| parent == dir.as_path()).unwrap_or(false) {
+        return Err("该文件已经在格子里了".to_string());
+    }
+
+    let moved = move_with_conflict_rename(&source, &dir)?;
+    let moved_path = moved.to_string_lossy().to_string();
+    let display = match display_name {
+        Some(value) if !value.trim().is_empty() => value.trim().to_string(),
+        _ => moved
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| moved_path.clone()),
+    };
 
     let conn = connect(&app)?;
-    let box_exists: i64 = conn
+    // 并发/重复拖放的兜底：登记已存在则直接返回既有行
+    let existing = conn
         .query_row(
-            "SELECT COUNT(*) FROM grid_boxes WHERE id = ?1",
-            params![box_id],
-            |row| row.get(0),
+            "SELECT id, box_id, file_path, display_name, sort, created_at \
+             FROM grid_items WHERE box_id = ?1 AND file_path = ?2",
+            params![box_id, moved_path],
+            row_to_item,
         )
-        .map_err(|err| format!("查询盒子失败：{err}"))?;
-    if box_exists == 0 {
-        return Err("盒子不存在或已被删除".to_string());
+        .ok();
+    if let Some(item) = existing {
+        return Ok(item);
     }
 
-    let dup: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM grid_items WHERE box_id = ?1 AND file_path = ?2",
-            params![box_id, file_path],
-            |row| row.get(0),
-        )
-        .map_err(|err| format!("查询挂件条目失败：{err}"))?;
-    if dup > 0 {
-        return Err("该文件已在此盒子中".to_string());
-    }
-
-    let display = match display_name {
-        Some(raw) if !raw.trim().is_empty() => raw.trim().to_string(),
-        _ => std::path::Path::new(&file_path)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| file_path.clone()),
-    };
     let sort = next_sort(
         &conn,
         "SELECT COALESCE(MAX(sort) + 1, 0) FROM grid_items WHERE box_id = ?1",
         Some(box_id),
     )?;
     let created = now_iso();
-
     conn.execute(
         "INSERT INTO grid_items (box_id, file_path, display_name, sort, created_at) \
          VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![box_id, file_path, display, sort, created],
+        params![box_id, moved_path, display, sort, created],
     )
-    .map_err(|err| format!("添加挂件条目失败：{err}"))?;
-
-    // 手动登记 = 用户明确要它进格子 → 从「不再自动收录」名单解除
-    if let Ok(mut dismissed) = read_dismissed(&conn) {
-        if dismissed.remove(&file_path) {
-            let _ = write_dismissed(&conn, &dismissed);
-        }
-    }
+    .map_err(|err| format!("登记收纳条目失败：{err}"))?;
 
     Ok(GridItem {
         id: conn.last_insert_rowid(),
         box_id,
-        file_path,
+        file_path: moved_path,
         display_name: display,
         sort,
         created_at: created,
     })
 }
 
-/// 删除条目（仅移除引用，**文件本体不受任何影响**）。
+/// 把条目移出格子：**文件移回桌面根目录**（不是删除），随后清掉登记。
 ///
-/// `dismiss = true`（格子层 × 按钮语义）：把路径记入「不再自动收录」名单，
-/// 桌面同步不会再把它收回来；再次手动拖入同一文件会自动解除。
+/// `dismiss` 是旧版前端参数（曾经表示「不再自动收录」），V33 起自动收录已取消，
+/// 该参数不再使用 —— 保留形参以免旧调用报「参数不匹配」。
 #[tauri::command]
 pub async fn grid_item_delete(
     app: AppHandle,
     item_id: i64,
     dismiss: Option<bool>,
 ) -> Result<(), String> {
+    let _ = dismiss;
     let conn = connect(&app)?;
-    // 先取路径再删：dismiss 要记住的是「哪个文件」而不是「哪行记录」
-    let path: Option<String> = conn
+    let (path, box_id): (String, i64) = conn
         .query_row(
-            "SELECT file_path FROM grid_items WHERE id = ?1",
+            "SELECT file_path, box_id FROM grid_items WHERE id = ?1",
             params![item_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
-        .ok();
+        .map_err(|_| "挂件条目不存在或已被删除".to_string())?;
+
+    let entity = load_box(&app, box_id)?;
+    if entity.kind == "folder" {
+        // 收纳格：把文件搬回桌面根目录（不是删除）
+        let source = PathBuf::from(&path);
+        if source.exists() {
+            let desktop = desktop_root()?;
+            move_with_conflict_rename(&source, &desktop)?;
+        }
+    } else {
+        // 虚拟条目（系统格子里的此电脑 / 回收站等）：记入「用户不要它」名单，
+        // 否则每次对账都会被 ensure_system_box 重新塞回来
+        let mut set = read_dismissed(&conn)?;
+        set.insert(path.clone());
+        let _ = write_dismissed(&conn, &set);
+    }
+
     let affected = conn
         .execute("DELETE FROM grid_items WHERE id = ?1", params![item_id])
         .map_err(|err| format!("删除挂件条目失败：{err}"))?;
     if affected == 0 {
         return Err("挂件条目不存在或已被删除".to_string());
     }
-    if dismiss.unwrap_or(false) {
-        if let Some(path) = path {
-            let mut set = read_dismissed(&conn)?;
-            set.insert(path);
-            let _ = write_dismissed(&conn, &set);
-        }
-    }
     Ok(())
 }
 
-/// 移动条目到另一个格子（对标腾讯桌面整理：图标拖着走，只改引用归属）。
-///
-/// **文件本体不受任何影响**；桌面同步按「路径已登记」全局去重，
-/// 移动过的条目不会被同步当成新文件再收一遍。
+/// 移动条目到另一个格子 = **真的把文件移到目标格子的收纳目录**。
 #[tauri::command]
 pub async fn grid_item_move(
     app: AppHandle,
@@ -465,44 +795,50 @@ pub async fn grid_item_move(
     target_box_id: i64,
 ) -> Result<(), String> {
     let conn = connect(&app)?;
-    let target_exists: bool = conn
+    let path: String = conn
         .query_row(
-            "SELECT COUNT(*) FROM grid_boxes WHERE id = ?1",
-            params![target_box_id],
-            |row| row.get::<_, i64>(0).map(|count| count > 0),
+            "SELECT file_path FROM grid_items WHERE id = ?1",
+            params![item_id],
+            |row| row.get(0),
         )
-        .map_err(|err| format!("查询目标格子失败：{err}"))?;
-    if !target_exists {
-        return Err("目标格子不存在或已被删除".to_string());
+        .map_err(|_| "挂件条目不存在或已被删除".to_string())?;
+    let target = load_box(&app, target_box_id)?;
+    if target.kind != "folder" {
+        return Err("目标不是收纳格，不能放文件".to_string());
     }
-    let affected = conn
-        .execute(
-            "UPDATE grid_items SET box_id = ?1 WHERE id = ?2",
-            params![target_box_id, item_id],
-        )
-        .map_err(|err| format!("移动挂件条目失败：{err}"))?;
-    if affected == 0 {
-        return Err("挂件条目不存在或已被删除".to_string());
+    let root = storage_root()?;
+    let dir = box_dir(&root, &target.name);
+    ensure_dir(&dir)?;
+
+    let source = PathBuf::from(&path);
+    if !source.exists() {
+        return Err("源文件已不存在（可能已被移动或删除）".to_string());
     }
+    if source.parent().map(|parent| parent == dir.as_path()).unwrap_or(false) {
+        return Ok(()); // 已在目标目录里，无需搬运
+    }
+    let moved = move_with_conflict_rename(&source, &dir)?;
+    let moved_path = moved.to_string_lossy().to_string();
+    let display = moved
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| moved_path.clone());
+
+    conn.execute(
+        "UPDATE grid_items SET box_id = ?1, file_path = ?2, display_name = ?3 WHERE id = ?4",
+        params![target_box_id, moved_path, display, item_id],
+    )
+    .map_err(|err| format!("更新收纳条目失败：{err}"))?;
     Ok(())
 }
 
-/// 某盒子的条目列表（按 sort 升序、id 升序稳定排序）。
+/// 某盒子的条目列表。收纳格按磁盘目录对账后返回；其它类型直接返回登记行。
 #[tauri::command]
 pub async fn grid_item_list(app: AppHandle, box_id: i64) -> Result<Vec<GridItem>, String> {
     let conn = connect(&app)?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, box_id, file_path, display_name, sort, created_at \
-             FROM grid_items WHERE box_id = ?1 ORDER BY sort ASC, id ASC",
-        )
-        .map_err(|err| format!("查询挂件条目失败：{err}"))?;
-    let items = stmt
-        .query_map(params![box_id], row_to_item)
-        .map_err(|err| format!("查询挂件条目失败：{err}"))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|err| format!("读取挂件条目失败：{err}"))?;
-    Ok(items)
+    let entity = load_box(&app, box_id)?;
+    let root = storage_root()?;
+    reconcile_box(&conn, entity.id, &entity.name, &entity.kind, &root)
 }
 
 // —— 挂件窗几何 ——
@@ -940,8 +1276,17 @@ fn reassert_attach(win: &WebviewWindow) {
         // SAFETY: 有效 HWND，仅查询 Z 序。
         let below = unsafe { GetWindow(hwnd, GW_HWNDNEXT) }.unwrap_or_else(|_| null_hwnd());
         if below == host {
+            REASSERT_MISMATCH.store(0, Ordering::Relaxed);
             return;
         }
+        // 去抖：连续两次判定错位才重排。第三方桌面工具会频繁瞬时改变 Z 序，
+        // 一次不匹配就 SetWindowPos 会让窗口反复重绘 —— 即用户看到的「闪一下」。
+        let strikes = REASSERT_MISMATCH.fetch_add(1, Ordering::Relaxed) + 1;
+        if strikes < 2 {
+            return;
+        }
+        REASSERT_MISMATCH.store(0, Ordering::Relaxed);
+        grid_log("检测到 Z 序错位（连续两次判定），重新贴回桌面层");
         let _ = place_above_desktop(hwnd);
     }
     #[cfg(not(target_os = "windows"))]
@@ -1170,26 +1515,42 @@ fn ensure_poller(app: AppHandle) {
                 if tick % REASSERT_TICKS == 0 {
                     reassert_attach(&win);
                 }
-                // 白屏自愈（V32）：窗口可见但前端心跳停了 = webview 已死（JS 崩溃 / 白屏，
-                // 用户看到的就是「格子显示了一下就没了」）。销毁重建，无需用户发现。
+                // 白屏自愈（V33 收窄）：**只在冷启动后从未收到过心跳**时才判定前端没起来。
+                // 稳态心跳可能被 WebView2 后台节流拉长到几分钟，绝不能据此销毁重建 ——
+                // 那正是用户看到的「闪一下就没了 / 莫名又出来了」。
                 {
-                    let last = LAST_HEARTBEAT.load(Ordering::Relaxed);
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0);
-                    if last > 0 && now.saturating_sub(last) > HEARTBEAT_TIMEOUT_SECS {
-                        eprintln!(
-                            "[Handy] 挂件前端心跳超时（{now} - {last} = {}s 无心跳），自动重建挂件窗",
-                            now - last
-                        );
-                        LAST_HEARTBEAT.store(0, Ordering::Relaxed);
-                        let _ = win.close();
-                        std::thread::sleep(std::time::Duration::from_secs(2));
-                        if let Err(err) = show_overlay(&app) {
-                            eprintln!("[Handy] 挂件窗重建失败：{err}");
+                    let shown_at = OVERLAY_SHOWN_AT.load(Ordering::Relaxed);
+                    let now = unix_secs();
+                    // 「显示之后一次心跳都没有」才是前端没起来；稳态心跳被节流不影响判定
+                    let no_beat_since_show = HEARTBEAT_SEQ.load(Ordering::Relaxed)
+                        == SHOWN_HEARTBEAT_SEQ.load(Ordering::Relaxed);
+                    let cold_failed = shown_at > 0
+                        && no_beat_since_show
+                        && now.saturating_sub(shown_at) > HEARTBEAT_COLD_START_SECS;
+                    if cold_failed {
+                        let attempts = REBUILD_ATTEMPTS.load(Ordering::Relaxed);
+                        let cooldown_ok =
+                            now.saturating_sub(LAST_REBUILD_AT.load(Ordering::Relaxed))
+                                > HEARTBEAT_REBUILD_COOLDOWN_SECS;
+                        if attempts < HEARTBEAT_REBUILD_MAX && cooldown_ok {
+                            REBUILD_ATTEMPTS.store(attempts + 1, Ordering::Relaxed);
+                            LAST_REBUILD_AT.store(now, Ordering::Relaxed);
+                            grid_log(&format!(
+                                "前端冷启动无心跳（显示后超过 {HEARTBEAT_COLD_START_SECS} 秒仍无心跳，第 {} 次重建）",
+                                attempts + 1
+                            ));
+                            let _ = win.close();
+                            std::thread::sleep(std::time::Duration::from_secs(2));
+                            if let Err(err) = show_overlay(&app) {
+                                grid_log(&format!("挂件窗重建失败：{err}"));
+                            }
+                            continue;
                         }
-                        continue;
+                        if attempts >= HEARTBEAT_REBUILD_MAX
+                            && !REBUILD_GAVE_UP.swap(true, Ordering::Relaxed)
+                        {
+                            grid_log("挂件前端多次冷启动失败，已放弃自动重建（请手动收起再显示格子）");
+                        }
                     }
                 }
                 let want_interactive =
@@ -1256,8 +1617,9 @@ fn show_overlay(app: &AppHandle) -> Result<(), String> {
         let attach = apply_attach(&existing, mode);
         let _ = existing.show();
         let _ = write_overlay_visible(app, true);
-        store_heartbeat_now();
+        mark_overlay_shown();
         ensure_poller(app.clone());
+        grid_log("显示挂件层（复用已有窗口）");
         return attach;
     }
 
@@ -1295,8 +1657,9 @@ fn show_overlay(app: &AppHandle) -> Result<(), String> {
     let attach = apply_attach(&win, mode);
     let _ = win.show();
     let _ = write_overlay_visible(app, true);
-    // 心跳基线：给 webview 启动 + React 挂载留出宽限（超时判定见轮询线程）
-    store_heartbeat_now();
+    // 冷启动基线：给 webview 启动 + React 挂载留出宽限（判定见轮询线程）
+    mark_overlay_shown();
+    grid_log("新建并显示挂件层");
     ensure_poller(app.clone());
     attach
 }
@@ -1358,6 +1721,7 @@ pub async fn grid_overlay_hide(app: AppHandle) -> Result<(), String> {
     // 收起格子层即交还桌面：系统图标恢复显示（与 show 时隐藏对称）
     takeover_icons(&app, false);
     let _ = write_overlay_visible(&app, false);
+    grid_log("收起挂件层");
     Ok(())
 }
 
@@ -1390,26 +1754,114 @@ pub async fn grid_overlay_update_regions(regions: Vec<GridRegion>) -> Result<(),
 /// 挂件前端最近一次心跳的 UNIX 秒时间戳（0 = 尚未心跳过）。
 static LAST_HEARTBEAT: AtomicU64 = AtomicU64::new(0);
 
-/// 心跳超时阈值（秒）：超过即判定 webview 已死（白屏 / JS 崩溃），重建挂件窗。
-const HEARTBEAT_TIMEOUT_SECS: u64 = 90;
+/// 本次显示挂件窗的时刻（unix 秒，0 = 未显示）。
+///
+/// V33：自愈判据从「最后心跳距今多久」改成「显示后至今有没有收到过心跳」——
+/// WebView2 对贴桌面层的窗口会做后台定时器节流，心跳间隔很容易被拉到 90 秒以上，
+/// 旧判据会把它误判成白屏并**周期性销毁重建**（用户看到的「闪一下没了 / 又出来了」）。
+static OVERLAY_SHOWN_AT: AtomicU64 = AtomicU64::new(0);
+
+/// 心跳序号：每收到一次心跳 +1。只增不减，用于判断「显示之后有没有心跳过」。
+static HEARTBEAT_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// 本次显示挂件窗时的心跳序号基线（与当前序号相等 = 显示后一次心跳都没有）。
+static SHOWN_HEARTBEAT_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// 本进程内已自动重建挂件窗的次数（上限 [`HEARTBEAT_REBUILD_MAX`]，防重建风暴）。
+static REBUILD_ATTEMPTS: AtomicU32 = AtomicU32::new(0);
+
+/// 自动重建是否已放弃（多次失败后只记一次日志，不再刷屏）。
+static REBUILD_GAVE_UP: AtomicBool = AtomicBool::new(false);
+
+/// Z 序连续不匹配的次数（去抖用）。
+static REASSERT_MISMATCH: AtomicU32 = AtomicU32::new(0);
+
+/// 上次自动重建的时刻（unix 秒；用于冷却 [`HEARTBEAT_REBUILD_COOLDOWN_SECS`]）。
+static LAST_REBUILD_AT: AtomicU64 = AtomicU64::new(0);
 
 /// `grid_meta` 中「挂件最近一次前端故障」的键名（管理页展示，供用户截图反馈）。
 const META_KEY_OVERLAY_FAULT: &str = "overlay_last_fault";
 
-/// 记录当前时间为中心跳基线。
-fn store_heartbeat_now() {
-    let now = std::time::SystemTime::now()
+/// 当前 unix 秒（失败返回 0）。
+fn unix_secs() -> u64 {
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
-        .unwrap_or(0);
-    LAST_HEARTBEAT.store(now, Ordering::Relaxed);
+        .unwrap_or(0)
 }
 
-/// 挂件前端心跳（每 10 秒一次；JS 存活即有心跳）。
+/// 挂件生命周期日志（追加到 `%LOCALAPPDATA%/Handy/grid-debug.log`）。
+///
+/// 现场排查只能靠文件：贴桌面层的窗口行为受第三方桌面工具影响很大，用户说
+/// 「闪一下没了」时，只有日志能区分是「Z 序反复重排」「自动重建」还是「前端白屏」。
+fn grid_log(message: &str) {
+    use std::io::Write;
+    let Some(base) = dirs::data_local_dir() else {
+        println!("[Handy][挂件] {message}");
+        return;
+    };
+    let dir = base.join("Handy");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("grid-debug.log");
+    let line = format!("[{}] {message}\n", now_iso());
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = file.write_all(line.as_bytes());
+    }
+    println!("[Handy][挂件] {message}");
+}
+
+/// 记录当前时间为中心跳基线。
+fn store_heartbeat_now() {
+    LAST_HEARTBEAT.store(unix_secs(), Ordering::Relaxed);
+    HEARTBEAT_SEQ.fetch_add(1, Ordering::Relaxed);
+}
+
+/// 标记「挂件窗刚被显示」：重置冷启动判定基线。
+fn mark_overlay_shown() {
+    OVERLAY_SHOWN_AT.store(unix_secs(), Ordering::Relaxed);
+    SHOWN_HEARTBEAT_SEQ.store(HEARTBEAT_SEQ.load(Ordering::Relaxed), Ordering::Relaxed);
+    REBUILD_GAVE_UP.store(false, Ordering::Relaxed);
+}
+
+/// 挂件前端心跳（每 10 秒一次；JS 存活即有心跳）。仅作诊断信息记录，不再触发重建。
 #[tauri::command]
 pub async fn grid_overlay_heartbeat() -> Result<(), String> {
     store_heartbeat_now();
     Ok(())
+}
+
+/// 挂件层的真实状态（管理页据此对齐开关，避免「按钮与实际状态相反」）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OverlayStatus {
+    /// 挂件窗当前是否真的显示着
+    pub visible: bool,
+    /// 挂件窗是否已创建（区分「没建过」与「建了但收起了」）
+    pub exists: bool,
+    /// 当前基准层：`desktop`（贴桌面）或 `normal`
+    pub attach_mode: String,
+    /// 系统桌面图标是否处于隐藏态
+    pub icons_hidden: bool,
+}
+
+/// 查询挂件层真实状态（**唯一真相来源**：窗口本身，而不是前端局部 state）。
+#[tauri::command]
+pub async fn grid_overlay_status(app: AppHandle) -> Result<OverlayStatus, String> {
+    let visible = app
+        .get_webview_window(GRID_LABEL)
+        .map(|win| win.is_visible().unwrap_or(false))
+        .unwrap_or(false);
+    let exists = app.get_webview_window(GRID_LABEL).is_some();
+    Ok(OverlayStatus {
+        visible,
+        exists,
+        attach_mode: read_attach_mode(&app).as_str().to_string(),
+        icons_hidden: read_icons_hidden(&app),
+    })
 }
 
 /// 挂件前端故障上报（window.onerror / unhandledrejection 捕获）。
@@ -1517,20 +1969,22 @@ const ARRANGE_STEP_Y: i64 = 268;
 const ARRANGE_BOX_W: i64 = 320;
 const ARRANGE_BOX_H: i64 = 244;
 
-/// 一键整理结果摘要（前端据此提示「收了几个格子、几个文件」）。
+/// 一键收纳结果摘要（前端据此提示「收纳了几个文件、建了几个格子」）。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AutoArrangeReport {
-    /// 桌面上扫描到的可见条目数（已排除隐藏 / 系统文件与符号链接）
+    /// 桌面根目录扫描到的可见条目数（含快捷方式 / 文件夹）
     pub scanned: usize,
+    /// 本次真正移动进收纳目录的**普通文件**数
+    pub items_added: usize,
     /// 本次新建的格子数
     pub boxes_created: usize,
     /// 复用了同名已有格子的次数
     pub boxes_reused: usize,
-    /// 新登记的条目引用数
-    pub items_added: usize,
-    /// 已在格子中、本次跳过的条目数
+    /// 按设计跳过的条目数（快捷方式 / 文件夹一律不动）
     pub skipped: usize,
+    /// 单文件失败原因（不中断整批，前端原样展示给用户）
+    pub failures: Vec<String>,
 }
 
 /// 把扫描结果归入「格子名」：文件夹单独一组，文件按扩展名类别分组。
@@ -1553,36 +2007,21 @@ fn arrange_group_rank(name: &str) -> i64 {
     }
 }
 
-/// 一键整理核心（连接与目录由调用方给定，命令与桌面同步共用）。
+/// 一键收纳核心（连接与桌面目录由调用方给定）。
 ///
-/// - **不移动 / 不复制 / 不重命名任何文件**，只新建格子与引用；
-/// - 同名格子直接复用（再次整理是**增量补充**，不会越点越多格子）；
-/// - 已登记过的文件全局去重，不会在多个格子里重复出现；
-/// - `dismissed` 名单里的路径（用户点 × 移除过的）跳过，不违背用户决定。
-fn auto_arrange_inner(
-    conn: &Connection,
-    root: &std::path::Path,
-    dismissed: &std::collections::HashSet<String>,
-) -> Result<AutoArrangeReport, String> {
-    use std::collections::{HashMap, HashSet};
+/// V33 起重写为**真移动**：
+///   - 只收**普通文件** —— 快捷方式（.lnk）与文件夹一律不动
+///     （用户明确要求「快捷方式应该保留在默认位置」）；
+///   - 每个类别对应一个收纳格（缺则新建、有则复用），格子名 = 目录名；
+///   - 文件真的被移进 `桌面/Handy整理/<类别>/`，同名不覆盖（冲突改名）；
+///   - 单个文件失败只记录原因，不中断整批。
+fn auto_arrange_inner(conn: &Connection, desktop: &Path) -> Result<AutoArrangeReport, String> {
+    use std::collections::HashMap;
 
-    // 复用 organizer 的扫描：已排除隐藏 / 系统文件与 symlink，并带好 by-type 类别
-    let scanned = crate::commands::organizer::scan_items(root)?;
+    let scanned = crate::commands::organizer::scan_items(desktop)?;
     let total_scanned = scanned.len();
-
-    // 已登记的文件路径（跨全部格子）—— 同一文件不重复登记
-    let mut known: HashSet<String> = HashSet::new();
-    {
-        let mut stmt = conn
-            .prepare("SELECT file_path FROM grid_items")
-            .map_err(|err| format!("读取已有条目失败：{err}"))?;
-        let rows = stmt
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(|err| format!("读取已有条目失败：{err}"))?;
-        for row in rows {
-            known.insert(row.map_err(|err| format!("读取已有条目失败：{err}"))?);
-        }
-    }
+    let storage = storage_root()?;
+    ensure_dir(&storage)?;
 
     // 已有格子：名称 → id；`occupied` 记录已占用的排布槽位，新格子往后排
     let mut existing: HashMap<String, i64> = HashMap::new();
@@ -1603,9 +2042,12 @@ fn auto_arrange_inner(
         }
     }
 
-    // 按类别分组（保持扫描顺序，末尾统一排序把「文件夹」提前、「其他」压后）
+    // 按类别分组（跳过快捷方式 / 文件夹；末尾排序把「文件夹」提前、「其他」压后）
     let mut grouped: Vec<(String, Vec<usize>)> = Vec::new();
     for (index, item) in scanned.iter().enumerate() {
+        if item.is_dir || item.is_lnk {
+            continue;
+        }
         let key = arrange_group_of(item);
         match grouped.iter_mut().find(|(name, _)| *name == key) {
             Some((_, bucket)) => bucket.push(index),
@@ -1616,26 +2058,20 @@ fn auto_arrange_inner(
 
     let mut report = AutoArrangeReport {
         scanned: total_scanned,
+        items_added: 0,
         boxes_created: 0,
         boxes_reused: 0,
-        items_added: 0,
-        skipped: 0,
+        // 快捷方式 / 文件夹按设计不动，明确计入「跳过」，让用户看到不是漏了
+        skipped: scanned.iter().filter(|item| item.is_dir || item.is_lnk).count(),
+        failures: Vec::new(),
     };
 
     for (label, indices) in grouped {
-        // 本组里还没被登记过、且不在「不再收录」名单里的文件
-        let fresh: Vec<usize> = indices
-            .into_iter()
-            .filter(|index| {
-                scanned.get(*index).map_or(false, |item| {
-                    !known.contains(&item.path) && !dismissed.contains(&item.path)
-                })
-            })
-            .collect();
-        if fresh.is_empty() {
-            report.skipped += 1;
+        if indices.is_empty() {
             continue;
         }
+        let dir = box_dir(&storage, &label);
+        ensure_dir(&dir)?;
 
         let box_id: i64 = match existing.get(&label) {
             Some(id) => {
@@ -1648,14 +2084,14 @@ fn auto_arrange_inner(
                 let pos_y = ARRANGE_ORIGIN_Y + (occupied / ARRANGE_COLUMNS) * ARRANGE_STEP_Y;
                 // 全表求最大值：该 SQL 无占位符，必须传 None
                 let sort = next_sort(
-                    &conn,
+                    conn,
                     "SELECT COALESCE(MAX(sort) + 1, 0) FROM grid_boxes",
                     None,
                 )?;
                 conn.execute(
                     "INSERT INTO grid_boxes \
-                     (name, pos_x, pos_y, width, height, sort, created_at, updated_at) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                     (name, kind, pos_x, pos_y, width, height, sort, created_at, updated_at) \
+                     VALUES (?1, 'folder', ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                     params![
                         label,
                         pos_x,
@@ -1676,92 +2112,91 @@ fn auto_arrange_inner(
             }
         };
 
-        let mut item_sort = next_sort(
-            &conn,
-            "SELECT COALESCE(MAX(sort) + 1, 0) FROM grid_items WHERE box_id = ?1",
-            Some(box_id),
-        )?;
-        let created = now_iso();
-        for index in fresh {
+        for index in indices {
             let Some(item) = scanned.get(index) else {
                 continue;
             };
-            conn.execute(
-                "INSERT INTO grid_items (box_id, file_path, display_name, sort, created_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![box_id, item.path, item.name, item_sort, created],
-            )
-            .map_err(|err| format!("登记「{}」失败：{err}", item.name))?;
-            known.insert(item.path.clone());
-            item_sort += 1;
-            report.items_added += 1;
+            let source = Path::new(&item.path);
+            match move_with_conflict_rename(source, &dir) {
+                Ok(_) => report.items_added += 1,
+                Err(err) => report.failures.push(format!("{}：{err}", item.name)),
+            }
         }
+
+        // 移动完成后按目录对账 → 登记表与磁盘严格一致
+        reconcile_box(conn, box_id, &label, "folder", &storage)?;
     }
 
     Ok(report)
 }
 
-/// 一键整理桌面：扫描 → 按类型分组 → 每组一个格子 + 登记引用。
+/// 一键收纳桌面：扫描 → 普通文件按类型移动进 `桌面/Handy整理/<类别>/` → 每类一格。
 ///
+/// **快捷方式与文件夹不动**（用户明确要求快捷方式留在桌面默认位置）。
 /// `dir` 仅供测试 / 自定义目录，缺省为用户桌面。
 #[tauri::command]
 pub async fn grid_auto_arrange(
     app: AppHandle,
     dir: Option<String>,
 ) -> Result<AutoArrangeReport, String> {
-    let root: std::path::PathBuf = match dir {
-        Some(value) if !value.trim().is_empty() => std::path::PathBuf::from(value.trim()),
-        _ => dirs::desktop_dir().ok_or_else(|| "无法定位桌面目录".to_string())?,
+    let desktop: PathBuf = match dir {
+        Some(value) if !value.trim().is_empty() => PathBuf::from(value.trim()),
+        _ => desktop_root()?,
     };
     let conn = connect(&app)?;
-    auto_arrange_inner(&conn, &root, &read_dismissed(&conn)?)
+    auto_arrange_inner(&conn, &desktop)
 }
 
-/// 清理失效引用：桌面根目录下的文件已被删除 / 移走的条目直接删除。
+/// 对账全部收纳格：按磁盘目录补齐新出现的文件、清掉已消失的登记。
 ///
-/// 只清**桌面根目录**的失效引用 —— 用户从其他目录手动拖入的引用（如 U 盘、
-/// 网盘路径）可能只是暂时不可达，静默删掉用户手工整理的引用弊大于利；
-/// 打开时自然会报「文件不存在」，由用户自己处置。
-fn prune_missing_items(conn: &Connection, desktop: &std::path::Path) -> Result<usize, String> {
-    let rows: Vec<(i64, String)> = {
+/// 返回 `(参与对账的收纳格数, 补登记数, 清理数)`。
+fn reconcile_all_boxes(conn: &Connection, root: &Path) -> Result<(usize, usize, usize), String> {
+    let boxes: Vec<(i64, String, String)> = {
         let mut stmt = conn
-            .prepare("SELECT id, file_path FROM grid_items")
-            .map_err(|err| format!("读取条目清单失败：{err}"))?;
+            .prepare("SELECT id, name, kind FROM grid_boxes ORDER BY sort ASC, id ASC")
+            .map_err(|err| format!("读取格子失败：{err}"))?;
         let mapped = stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-            .map_err(|err| format!("读取条目清单失败：{err}"))?;
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|err| format!("读取格子失败：{err}"))?;
         mapped
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|err| format!("读取条目清单失败：{err}"))?
+            .map_err(|err| format!("读取格子失败：{err}"))?
     };
-    let desktop_str = desktop.to_string_lossy().trim_end_matches(['\\', '/']).to_string();
-    let mut removed = 0usize;
-    for (id, path) in rows {
-        let parent = std::path::Path::new(&path)
-            .parent()
-            .map(|p| p.to_string_lossy().trim_end_matches(['\\', '/']).to_string());
-        // 只处置「确实住在桌面根目录且已不存在」的引用；其他一律保留
-        let is_desktop_child = parent
-            .map(|p| p.eq_ignore_ascii_case(&desktop_str))
-            .unwrap_or(false);
-        if !is_desktop_child || std::path::Path::new(&path).exists() {
+
+    let mut counted = 0usize;
+    let mut added = 0usize;
+    let mut pruned = 0usize;
+    for (box_id, name, kind) in boxes {
+        if kind != "folder" {
             continue;
         }
-        let affected = conn
-            .execute("DELETE FROM grid_items WHERE id = ?1", params![id])
-            .map_err(|err| format!("清理失效引用失败：{err}"))?;
-        removed += affected;
+        counted += 1;
+        let before = list_registry_items(conn, box_id)?.len();
+        let after = reconcile_box(conn, box_id, &name, &kind, root)?.len();
+        if after >= before {
+            added += after - before;
+        } else {
+            pruned += before - after;
+        }
     }
-    Ok(removed)
+    Ok((counted, added, pruned))
 }
 
-/// 桌面同步报告：一键整理结果 + 失效引用清理数。
+/// 桌面同步报告（V33 起 sync = **只对账，不收录**）。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DesktopSyncReport {
-    #[serde(flatten)]
-    pub arrange: AutoArrangeReport,
-    /// 本次清理的失效引用数（桌面文件已被删除 / 移走）
+    /// 参与对账的收纳格数
+    pub boxes: usize,
+    /// 收纳目录里新发现并登记的条目数（含用户在资源管理器里手工放进格子的文件）
+    pub items_added: usize,
+    /// 清理掉的失效登记数（文件已被移出 / 删除）
     pub pruned: usize,
 }
 
@@ -2014,8 +2449,8 @@ fn ensure_system_box(
             let now = now_iso();
             conn.execute(
                 "INSERT INTO grid_boxes \
-                 (name, pos_x, pos_y, width, height, sort, created_at, updated_at) \
-                 VALUES ('系统', ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                 (name, kind, pos_x, pos_y, width, height, sort, created_at, updated_at) \
+                 VALUES ('系统', 'system', ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![pos_x, pos_y, ARRANGE_BOX_W, ARRANGE_BOX_H, sort, now, now],
             )
             .map_err(|err| format!("创建系统格子失败：{err}"))?;
@@ -2042,23 +2477,23 @@ fn ensure_system_box(
     Ok(())
 }
 
-/// 桌面同步 —— 格子层「接管桌面」的数据引擎（前端周期调用）：
+/// 桌面同步 —— 格子层的数据引擎（前端周期调用）：**只对账，不收录**。
 ///
-/// 1. 清理失效引用（桌面文件已被删除 / 移走的条目）；
-/// 2. 增量收纳：桌面上还没进格子的文件按类型收进对应格子（缺格子则新建）；
-/// 3. 用户点 × 移除过的文件（dismissed 名单）不违背其意愿。
+/// V33 起这里不再「自动把桌面文件收进格子」—— 那正是用户抱怨「和桌面原图标
+/// 完全重复、像复制了一份」的来源。现在只做两件事：
+///   1. 按磁盘目录对账每个收纳格（用户在资源管理器里手工放进格子的文件会补登记，
+///      被移走 / 删除的会清掉登记）；
+///   2. 兜底建「系统」格子（此电脑 · 回收站入口）。
 ///
-/// 因此**桌面根目录的每个可见文件都始终在某个格子里**：新建的文件几秒内
-/// 自动出现，删掉的自动消失 —— 这是与「腾讯桌面整理」对齐的核心体验。
+/// 想批量收纳桌面文件，走显式的「一键收纳」（`grid_auto_arrange`），它**真移动**文件。
 #[tauri::command]
 pub async fn grid_desktop_sync(app: AppHandle) -> Result<DesktopSyncReport, String> {
-    let root = dirs::desktop_dir().ok_or_else(|| "无法定位桌面目录".to_string())?;
+    let root = storage_root()?;
     let conn = connect(&app)?;
+    let (boxes, added, pruned) = reconcile_all_boxes(&conn, &root)?;
     let dismissed = read_dismissed(&conn)?;
-    let pruned = prune_missing_items(&conn, &root)?;
-    let arrange = auto_arrange_inner(&conn, &root, &dismissed)?;
     ensure_system_box(&conn, &dismissed)?;
-    Ok(DesktopSyncReport { arrange, pruned })
+    Ok(DesktopSyncReport { boxes, items_added: added, pruned })
 }
 
 /// 布局文件里的单条引用。
