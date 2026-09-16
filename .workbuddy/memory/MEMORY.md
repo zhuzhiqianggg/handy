@@ -27,28 +27,30 @@
 | 自检三件套 | `scripts/audit/tool-audit.mjs`（静态）/ `layout-audit.mjs`（几何）/ `sample-smoke.mjs`（真点示例） |
 | 回归 | `scripts/regression/run.mjs` + `test-*.mjs`；`scripts/new-tool.mjs` 脚手架 |
 
-## 3. 状态快照（2026-09-16 · V25 已交付并提交）
+## 3. 状态快照（2026-09-16 · V27 已交付并提交）
 
-- Phase 1（MVP）功能全部交付；**安装包可产出**（V25 打：nsis 3.70 MB / msi 4.75 MB / handy.exe 9.33 MB）；
+- Phase 1（MVP）功能全部交付；**安装包可产出**（最近一次打包是 V25：nsis 3.70 MB / msi 4.75 MB / handy.exe 9.33 MB；
+  **V26/V27 之后未重新打包**，V27 新增的 `http_request` 命令要进安装包需重跑 `tauri build`）；
   **唯一阻塞项 = 用户装机验收 GUI**（窗口/托盘/透明/桌面挂载/拖放/真实文件移动与撤销，沙箱验不了）。
-- 工具箱 **24 个命令 / 6 分类**（text · data · encode · convert · generate · dev）；
+- 工具箱 **25 个命令 / 6 分类**（text · data · encode · convert · generate · dev；V27 新增 `api-tester` 接口测试）；
   **模块目录 4 个**：toolbox / notes / vault / desktop-organizer（workstation、todos、desktop-grid、settings
   是**视图/独立窗口**，不是模块 —— 别再去找 `?module=workstation`）。
 - **独立窗口 6 个**：main / note / settings / organizer / grid-overlay / workstation-bar（桌面顶部常驻贴条）。
 - **DB 迁移链**：v1 → v2 去剪贴板表 → v3 vault → v4 grid → v5 `todos.detail`（**V21 起无 schema 变更**）。
-- 批次明细与提交号 → PROJECT_STATUS §1（最近提交 `git log --oneline -6`）。V25 两个提交：
-  `5f8fe8a`（feat，18 文件）+ `3001510`（test/文档回填）。
+- 批次明细与提交号 → PROJECT_STATUS §1（最近提交 `git log --oneline -6`）。V25–V27：
+  V25 `5f8fe8a`+`3001510`；V26 `2969256`+`43a8a06`；V27 `f7e825f`+`4268257`。
 
-### 3.1 V25 事实源（用户 3 条反馈 → 全部闭环）
+### 3.1 V25–V27 事实源（细节见 PROJECT_STATUS §1.11–§1.13 与日志）
 
-| 反馈 | 落点 |
-| --- | --- |
-| 密码符号过多且连排 | `src/lib/passwordGen.ts` 成**唯一核心**；`separatedPositions()` 用「同奇偶位置互不相邻」保证不连排；默认占比 0.25。回归 86 条 |
-| 正则库大量示例零命中 | `regexLibrary.ts` 加 `sampleKind`/`sampleHitCount()`；界面 `RegexTester.tsx` 每条渲染 `HitBadge`（N 处 / 示例不匹配 / 正则无效）。回归 30 条 |
-| 桌面整理疑似假动作 | **判定「能力有、入口错」→ 完善不砍**：新增 `DesktopOrganizerConsole.tsx` 双页签（默认「归类文件」= 真移动）；`OrganizerView` 顶部加「作用目录」栏自证。命令改名「桌面文件归类」 |
-
-> 三条反馈对应的方法论已沉淀为 **CONVENTIONS.md §12**（示例必须可机器判定对错 / 能证明就别 retry /
-> 「动了真磁盘」要让用户看得见 / 两套能力别混在一个入口）。
+- **V25**：密码符号不连排（`passwordGen.ts` 唯一核心 + `separatedPositions`）；正则库全库自洽（`HitBadge` 自报命中数）；
+  桌面整理「能力有、入口错」→ 双页签控制台默认真归类。方法论沉淀 **CONVENTIONS.md §12**。
+- **V26**：工具箱纯逻辑层从零覆盖 → 1459 条断言（6 套新回归全带外部锚点：RFC 4648/1321、NIST、jwt.io、
+  Goessner JSONPath、IEC 80000-13；与 `node:crypto` 交叉验证）；修 6 处「不报错只给错答案」缺陷
+  （URL 主机:端口被当协议 / FileSize 切进制差 1024⁴ 倍 / JSON→TS 静默错类型等）；抽出 `src/lib/byteUnits.ts`。
+- **V27**：新增 `api-tester` 接口测试（cURL 导入 + **Rust `http_request` 直发绕 CORS**，reqwest 0.13 走 rustls；
+  敏感头不落盘）+ 建议条 14 处识别误报清零（JWT 依 RFC 7515 要求头部解出 JSON 对象；Base64 要求解码为合法 UTF-8）；
+  `jsonLocate` 与 V8 差分 0 分歧、误导报错改准确；回归 **17 套 / 1778 条**、冒烟 28 用例 / 25 工具、
+  工具自检 325 PASS。
 
 ## 4. 协作与操作约定
 
