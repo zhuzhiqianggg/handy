@@ -51,7 +51,7 @@
     `rmSync(recursive)`，计数 1）—— V23 已复验 EXIT=0。`Remove-Item` 一样躲不掉（PowerShell 工具内部
     也走 node 垫片）；**替垫片伪造批准状态是红线**。`scripts/clean-dist.mjs` 本身没错，错的是「不带上限
     一路删」—— 已加 `--max=N`（单回合上限，建议 40；`exit 2` = 还有剩余，换个回合继续），日常用不到它。
-    完整细节见 PROJECT_STATUS §3 约束 16/17。**V24 补充：布局审计也会把额度吃光**（开关 28 个页面，
+    完整细节见 PROJECT_STATUS §3 约束 16/18。**V24 补充：布局审计也会把额度吃光**（开关 28 个页面，
     无头浏览器每页都删临时文件）—— 所以**审计与 build 不能放在同一个回合**；实在要，加
     `--emptyOutDir=false`（构建全程不删文件，代价是 dist 留旧哈希产物、包体涨约 0.5 MB）。
   - **写进源码的中文化说明不要带反引号和 markdown 星号**（V23 踩到）：`cron.ts` 里给 `platformOf()`

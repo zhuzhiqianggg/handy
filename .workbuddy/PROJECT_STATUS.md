@@ -497,6 +497,11 @@ V24 实测：**跑完 `layout-audit` 之后，同一回合里的 `vite build` �
     - **`flex-1` 在「auto 高度的父容器」里不是「撑满」，而是「可被压缩到 0」** —— 窄窗口下它会先把内容压扁，而不是产生滚动条。**要「撑满」必须给父级明确高度**；给不了，就让它按内容自然排布、把滚动交给外层。
     - 因此**一切 `flex-1` / `min-h-*` 都要用 `lg:` 前缀关进宽屏**，窄屏走「单栏 + 内容高度 + 外层滚动」（写法见 §1.9.4）。
     - **改完布局不是靠眼睛看，要跑 `node scripts/audit/layout-audit.mjs`**（见 §4）。只看「有没有横向溢出」会漏掉真缺陷：V23 抓到的两处，**`ox` 全程为 0**，只有 `clipY` / `overlap` 能抓到。
+18. **布局审计同样会吃光删除额度（V24 补充约束 16）**：`scripts/audit/layout-audit.mjs` 要开关 28 个页面，
+    无头浏览器每页都会删临时文件 —— 实测**跑完审计之后，同一回合里的 `vite build` 必然被垫片拦下**
+    （报 `count:57, threshold:50, scope:"turn"`）。两条出路：① **审计与 build 分回合跑**（正解）；
+    ② 加 `--emptyOutDir=false` 跳过清空（**构建全程不删文件**，代价是 dist 里会留旧哈希产物、
+    安装包体积涨约 0.5 MB —— V24 实测 exe 从 9.33 MB 涨到 9.85 MB，额度恢复后重跑干净构建才回落）。
 
 ---
 
@@ -588,12 +593,6 @@ node -e "…起 vite :41779 → 轮询 fetch 就绪 → node \$AB open 'http://l
 
 ## 6. 续接开工三件事
 
-1. **先跑五绿确认树健康**：`cargo check`（经 `scripts/rust-env.sh`）+ `tsc --noEmit` + `node scripts/regression/run.mjs`（**6/6 套 / 715 条断言**）+ `node scripts/audit/tool-audit.mjs`（**0 FAIL / 0 WARN**）+ `node scripts/audit/layout-audit.mjs`（**0 溢出 / 0 裁切 / 0 重叠**），均应为 exit 0。`vite build` 见 §3 约束 16 / 17（**别先跑 `clean-dist.mjs`；也别和布局审计同回合**）。
+1. **先跑五绿确认树健康**：`cargo check`（经 `scripts/rust-env.sh`）+ `tsc --noEmit` + `node scripts/regression/run.mjs`（**6/6 套 / 715 条断言**）+ `node scripts/audit/tool-audit.mjs`（**0 FAIL / 0 WARN**）+ `node scripts/audit/layout-audit.mjs`（**0 溢出 / 0 裁切 / 0 重叠**），均应为 exit 0。`vite build` 见 §3 约束 16 / 18（**别先跑 `clean-dist.mjs`；也别和布局审计同回合**）。
 2. **确认上一轮验收结论**：若用户已装机验收，把发现的问题按「现象 + 期望」记录到本文档 §2 或当日日志，再派人修。
 3. **选下一个方向**：默认优先级 = ① 修验收问题 → ② §2.2 技术债（其中「**文本处理台 Phase 2**」是价值最高的待办；其次是「清空工具草稿」的界面入口，`usePersistedState` 已导出 `clearPersisted` 但没接界面）→ ③ §2.3 Phase 2 模块。
-
-17. **布局审计同样会吃光删除额度（V24 补充约束 16）**：`scripts/audit/layout-audit.mjs` 要开关 28 个页面，
-    无头浏览器每页都会删临时文件 —— 实测**跑完审计之后，同一回合里的 `vite build` 必然被垫片拦下**
-    （报 `count:57, threshold:50, scope:"turn"`）。两条出路：① **审计与 build 分回合跑**（正解）；
-    ② 加 `--emptyOutDir=false` 跳过清空（**构建全程不删文件**，代价是 dist 里会留旧哈希产物、
-    安装包体积涨约 0.5 MB —— V24 实测 exe 从 9.33 MB 涨到 9.85 MB，额度恢复后重跑干净构建才回落）。
