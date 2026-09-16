@@ -277,11 +277,21 @@ export function WorkstationBar(): React.JSX.Element {
     void useTodosStore
       .getState()
       .createTodo({ title, dueAt })
-      .catch(() => undefined);
+      .catch((error: unknown) => {
+        // 用户刚输入的内容不能无声消失：落库失败必须给出可见反馈
+        toast.error('添加待办失败', {
+          description: error instanceof Error ? error.message : String(error),
+        });
+      });
   }, [draft]);
 
   const toggle = useCallback((id: string): void => {
-    void useTodosStore.getState().toggleDone(id).catch(() => undefined);
+    void useTodosStore.getState().toggleDone(id).catch((error: unknown) => {
+      // 勾选没写进库时用户毫无感知，下次打开数据又变回去 —— 必须点破
+      toast.error('更新待办状态失败', {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    });
   }, []);
 
   const openWorkstation = useCallback((): void => {
