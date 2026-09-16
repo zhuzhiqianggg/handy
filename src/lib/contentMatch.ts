@@ -1,4 +1,7 @@
-import { detectContent, type DetectKind } from '@/lib/detect';
+// 用相对路径而非 `@/lib/detect`：本文件要被 `scripts/regression/test-detect.mjs` 直接 import
+// （靠 Node ≥ 22.18 的原生类型剥离跑源码），Node 既不认识 vite 的路径别名，
+// 也不做扩展名补全 —— 所以写成带 `.ts` 的显式路径（tsconfig 已开 allowImportingTsExtensions）。
+import { detectContent, type DetectKind } from './detect.ts';
 
 /**
  * 内容识别与「内容类型 → 工具箱命令」直达映射（原 clipboard 模块，现提取为共享工具）。
@@ -56,8 +59,8 @@ export function isFilePath(text: string): boolean {
   if (value.length === 0 || value.includes('\n')) {
     return false;
   }
-  // Windows 盘符路径：C:\Users\me\file.txt
-  if (/^[a-zA-Z]:\\/.test(value)) {
+  // Windows 盘符路径：C:\Users\me\file.txt —— 反斜杠与正斜杠两种写法都合法（`C:/Users/me` 同样可执行）
+  if (/^[a-zA-Z]:[\\/]/.test(value)) {
     return true;
   }
   // UNC 共享路径：\\server\share\file

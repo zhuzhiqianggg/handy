@@ -38,20 +38,30 @@ export function locateJsonError(input: string): JsonErrorSpot | null {
     }
   }
 
-  /** 在当前位置抛出错误（带行/列与该行片段）。 */
-  const fail = (reason: string): never => {
-    const lineStart = input.lastIndexOf('\n', Math.max(0, i - 1)) + 1;
-    let lineEnd = input.indexOf('\n', i);
+  /**
+   * 在当前位置抛出错误（带行/列与该行片段）。
+   * `at` 可选：把报错位置挪到**真正的元凶**（如尾随逗号应指向那个逗号，
+   * 而不是它后面的 `}`），否则默认用当前扫描位置。
+   */
+  const fail = (
+    reason: string,
+    at?: { line: number; column: number; index: number },
+  ): never => {
+    const idx = at ? at.index : i;
+    const errLine = at ? at.line : line;
+    const errCol = at ? at.column : col;
+    const lineStart = input.lastIndexOf('\n', Math.max(0, idx - 1)) + 1;
+    let lineEnd = input.indexOf('\n', idx);
     if (lineEnd === -1) {
       lineEnd = len;
     }
     let snippet = input.slice(lineStart, lineEnd);
     if (snippet.length > 120) {
-      const center = i - lineStart;
+      const center = idx - lineStart;
       const from = Math.max(0, center - 60);
       snippet = (from > 0 ? '…' : '') + snippet.slice(from, from + 118) + '…';
     }
-    throw new SpotError({ line, column: col, snippet, reason });
+    throw new SpotError({ line: errLine, column: errCol, snippet, reason });
   };
 
   /** 前进一个字符并维护行列号。 */
@@ -165,6 +175,11 @@ export function locateJsonError(input: string): JsonErrorSpot | null {
       fail('意外的结尾：此处缺少 JSON 值');
     }
     const ch = input.charAt(i);
+    // 这些符号只能出现在值的位置之外，说明「这里本该有个值却没有」。
+    // 不单独判的话会掉进 parseNumber 报「数字格式无效」，对用户是误导。
+    if (ch === '}' || ch === ']' || ch === ',' || ch === ':') {
+      fail(`此处缺少 JSON 值（不应出现 ${ch}）`);
+    }
     if (ch === '{') {
       next();
       skipWs();
@@ -198,7 +213,15 @@ export function locateJsonError(input: string): JsonErrorSpot | null {
           fail('对象未闭合（缺少 }）');
         }
         if (input.charAt(i) === ',') {
+          const comma = { line, column: col, index: i };
           next();
+          skipWs();
+          if (i < len && input.charAt(i) === '}') {
+            fail('对象的最后一个成员后面多了一个逗号（JSON 不允许尾随逗号）', comma);
+          }
+          if (i >= len) {
+            fail('对象未闭合（缺少 }）');
+          }
           continue;
         }
         if (input.charAt(i) === '}') {
@@ -225,7 +248,15 @@ export function locateJsonError(input: string): JsonErrorSpot | null {
           fail('数组未闭合（缺少 ]）');
         }
         if (input.charAt(i) === ',') {
+          const comma = { line, column: col, index: i };
           next();
+          skipWs();
+          if (i < len && input.charAt(i) === ']') {
+            fail('数组的最后一个元素后面多了一个逗号（JSON 不允许尾随逗号）', comma);
+          }
+          if (i >= len) {
+            fail('数组未闭合（缺少 ]）');
+          }
           continue;
         }
         if (input.charAt(i) === ']') {

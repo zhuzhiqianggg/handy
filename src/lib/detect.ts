@@ -43,13 +43,43 @@ function isJson(text: string): boolean {
   }
 }
 
+/** base64url 段 → 解码后的 JSON 值；不是合法 base64url / 不是合法 JSON 时抛错 */
+function decodeBase64UrlJson(segment: string): unknown {
+  const b64 = segment.replace(/-/g, '+').replace(/_/g, '/');
+  const padded = b64 + '='.repeat((4 - (b64.length % 4)) % 4);
+  const binary = atob(padded);
+  const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
+  return JSON.parse(new TextDecoder().decode(bytes)) as unknown;
+}
+
+/**
+ * 是否是 JWT。
+ *
+ * **必须校验第一段能解成 JSON 对象**，不能只看「三个点分段 + 字符集」——
+ * 否则 `1.2.3`、`v1.2.3`、`www.example.com`、`file.name.txt`、`foo.json.bak`
+ * 这类极常见的三段式文本会被判成 JWT，在建议条里弹出「解析 JWT 载荷」的错误推荐。
+ *
+ * 依据来自规范：JWS 的受保护头部就是 base64url 编码的 JSON 对象（RFC 7515 §4）。
+ */
 function isJwt(text: string): boolean {
   const value = trimmed(text);
   const parts = value.split('.');
   if (parts.length !== 3) {
     return false;
   }
-  return parts.every((part) => part.length > 0 && /^[A-Za-z0-9_-]+$/.test(part));
+  const [headerPart] = parts;
+  if (headerPart === undefined || headerPart.length === 0 || !/^[A-Za-z0-9_-]+$/.test(headerPart)) {
+    return false;
+  }
+  if (!parts.every((part) => part.length > 0 && /^[A-Za-z0-9_-]+$/.test(part))) {
+    return false;
+  }
+  try {
+    const header = decodeBase64UrlJson(headerPart);
+    return typeof header === 'object' && header !== null && !Array.isArray(header);
+  } catch {
+    return false;
+  }
 }
 
 function isUrl(text: string): boolean {
@@ -68,6 +98,13 @@ function isTimestamp(text: string): boolean {
   return ms >= min && ms <= max;
 }
 
+/**
+ * 是否是 Base64。
+ *
+ * 除了字符集与长度，**还要求解码结果是合法 UTF-8** —— 本工具承诺「文本 ↔ Base64，
+ * UTF-8 安全」，所以解码后必须是可显示的文本。不校验的话，`Feedback` / `Password` /
+ * `DataBase` / `Username` 这类 8 字母单词（长度是 4 的倍数、字符全在表内）会被当成 Base64。
+ */
 function isBase64(text: string): boolean {
   const value = trimmed(text);
   if (value.length < 8 || value.length % 4 !== 0) {
@@ -77,8 +114,16 @@ function isBase64(text: string): boolean {
     return false;
   }
   try {
-    // 浏览器 / WebView 均提供 atob；解码失败即判定为非 Base64
-    return atob(value).length > 0;
+    // 浏览器 / WebView / Node 均提供 atob；解码失败即判定为非 Base64
+    const binary = atob(value);
+    if (binary.length === 0) {
+      return false;
+    }
+    // fatal: true —— 出现非法字节序列即抛错，据此排除「恰好像 Base64 的英文单词」
+    new TextDecoder('utf-8', { fatal: true }).decode(
+      Uint8Array.from(binary, (c) => c.charCodeAt(0)),
+    );
+    return true;
   } catch {
     return false;
   }

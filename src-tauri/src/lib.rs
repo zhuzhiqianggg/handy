@@ -92,6 +92,8 @@ pub fn run() {
             commands::grid::grid_geometry_get,
             commands::grid::grid_geometry_set,
             commands::grid::grid_open_path,
+            // —— 接口测试（api-tester，V28）：Rust 直发 HTTP，绕开 webview CORS ——
+            commands::http::http_request,
             // —— 桌面层挂载 / 系统图标显隐（V20：真正画在桌面上）——
             commands::grid::grid_attach_get,
             commands::grid::grid_attach_set,

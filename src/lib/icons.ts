@@ -29,6 +29,7 @@ import {
   Ruler,
   Scale,
   Search,
+  Send,
   Settings,
   ShieldCheck,
   Sparkles,
@@ -43,6 +44,7 @@ import {
   X,
   type LucideIcon,
 } from 'lucide-react';
+
 
 /**
  * 图标解析（模块 `icon` / 命令 `icon` 为 lucide 具名导出字符串）。
@@ -83,6 +85,7 @@ export const ICONS: Record<string, LucideIcon> = {
   Ruler,
   Scale,
   Search,
+  Send,
   Settings,
   ShieldCheck,
   Sparkles,

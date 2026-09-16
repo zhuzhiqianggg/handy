@@ -31,6 +31,11 @@ const SUITES = [
   'test-jwt.mjs',
   'test-json.mjs',
   'test-byte-units.mjs',
+  // V27：内容识别启发式（建议条误报）+ JSON 错误定位（与 V8 JSON.parse 差分）
+  'test-detect.mjs',
+  'test-json-locate.mjs',
+  // V28：接口测试底层（cURL 解析 / 头部装配 / 响应格式化）
+  'test-api.mjs',
 ];
 
 let failed = 0;

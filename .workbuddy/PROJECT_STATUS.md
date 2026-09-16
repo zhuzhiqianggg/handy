@@ -1,13 +1,13 @@
 # Handy · 顺手 — 项目现状与续接指引
 
 > **从 `handy` 目录打开项目，先读这一份。** 它回答三个问题：**做到哪了 → 还剩什么 → 怎么继续**。
-> 最近更新：2026-09-16（**V26 批次**） · 长期约定见 [`.workbuddy/memory/MEMORY.md`](memory/MEMORY.md) · 逐日进展见 [`memory/`](memory/) · 规划文档见 [`../docs/README.md`](../docs/README.md)
+> 最近更新：2026-09-16（**V27 批次**） · 长期约定见 [`.workbuddy/memory/MEMORY.md`](memory/MEMORY.md) · 逐日进展见 [`memory/`](memory/) · 规划文档见 [`../docs/README.md`](../docs/README.md)
 
 ---
 
 ## 0. 一句话现状
 
-**Phase 1（MVP）功能已全部交付，并完成六轮用户自测反馈大修（V18–V23）**：命令面板统一入口 + 工具箱 **24 个工具** + **桌面网格挂件（V21 起以顶层窗贴在桌面之上，透明可点）** + **桌面整理主控台** + **工作台（日历含农历/节气/节假日/纪念日 · 计划 · 便签所见即所得 · 自适应竖排快捷入口）** + **桌面顶部贴条（可展开折叠、置顶可关）** + 密码存储器；**Windows 安装包已重新产出（V23）**；`cargo check`、`tsc`、回归全绿。V23 做的是**「去掉重复、标清边界、补齐文本处理能力、并用实测代替肉眼」**：合并 Cron 工具里重复的「字段拆解」面板并给 Quartz 语法标上适用平台与误用警示、新增 **文本处理台**（查找替换/正则筛选/20 项行操作/取列/统计）、把「响应式布局」从口头要求变成**可复跑的自动审计**（`scripts/audit/layout-audit.mjs`，实测抓出并修掉工作台在窄窗口下「日历被裁两周 + 计划面板被压成 19px 空壳」两处真缺陷）。
+**Phase 1（MVP）功能已全部交付，并完成六轮用户自测反馈大修（V18–V23）**：命令面板统一入口 + 工具箱 **25 个工具** + **桌面网格挂件（V21 起以顶层窗贴在桌面之上，透明可点）** + **桌面整理主控台** + **工作台（日历含农历/节气/节假日/纪念日 · 计划 · 便签所见即所得 · 自适应竖排快捷入口）** + **桌面顶部贴条（可展开折叠、置顶可关）** + 密码存储器；**Windows 安装包已重新产出（V23）**；`cargo check`、`tsc`、回归全绿。V23 做的是**「去掉重复、标清边界、补齐文本处理能力、并用实测代替肉眼」**：合并 Cron 工具里重复的「字段拆解」面板并给 Quartz 语法标上适用平台与误用警示、新增 **文本处理台**（查找替换/正则筛选/20 项行操作/取列/统计）、把「响应式布局」从口头要求变成**可复跑的自动审计**（`scripts/audit/layout-audit.mjs`，实测抓出并修掉工作台在窄窗口下「日历被裁两周 + 计划面板被压成 19px 空壳」两处真缺陷）。
 
 **V24 做的是「把界面做现代、把工具做成能无限扩展的」**：设计令牌升级（页面底色 `--canvas` 与纯白卡片拉开层次、圆角/阴影/动效统一）、工具箱**分类体系与首页重做**（搜索 + 分类页签 + 收藏/最近 + 按分类分组）、**19 个工具接上状态持久化 + 8 个工具补示例条**，并把「加工具容易漏配」做成**脚手架 + 静态自检 + 编写指南**三件套 —— 首次运行自检即抓到 **3 个工具的图标从未登记**（一直静默显示扳手）。
 
@@ -15,11 +15,13 @@
 
 **V26 做的是「不再等用户报错，主动去找同类的缺口，把工具箱的纯逻辑层用外部标准锁住」**：V25 的三条反馈本质上都是「有一整块面从没被任何脚本覆盖」，于是本轮先把覆盖面盘了一遍 —— 结论是 **`src/modules/toolbox/lib/*`（编码 / URL / JWT / JSON / 哈希五个工具的公共实现，约 60 KB）一条断言都没有**。新增 **6 套回归（831 → 1459 条断言）**，锚点全部来自项目之外（RFC 4648 / RFC 1321 / NIST / jwt.io 公开令牌 / Goessner JSONPath 教程数据 / IEC 单位口径），并用 **Node 自带 `node:crypto` 与产品侧 WebCrypto 交叉验证**哈希与 HMAC。过程中**实测浮出并修掉 6 处真缺陷**，其中最危险的一类是「**不报错、只给错答案**」：URL 解析把 `localhost:5173` 读成「协议 localhost: + 路径 5173」（host/port 双双为空）；字节工具切进制时单位不跟着走，`1.5 TiB` 会算成 `1.5 字节`（差 1024⁴ 倍）；JSON→TS 的接口名复用只看键名，同键不同值类型时**静默**给出与数据打架的类型。另把三条**与实现不符的示例描述**改成真话（V25 用户报的正是这一类），并把冒烟从 23 条扩到 **27 条 / 24 个工具全覆盖**（补的 4 个正是「没有示例条」的那几个）。
 
+**V27 做的是「给工具箱加上第一个带网络能力的工具，并顺手清掉识别层的误报」**：① 用户点名**接口测试工具**（类 Postman）→ 新增 `api-tester`：cURL 导入（DevTools 拷贝即还原）· 方法/URL/头部/体编辑 · **Rust 侧 `http_request` 直发请求绕开 webview 的 CORS**（reqwest + rustls，与 updater 共用依赖树；浏览器预览自动降级 `fetch` 并明示受限）· 状态分档 / 耗时 / 体积 / JSON 美化 / 历史 15 条 / **敏感头不落盘** · 8 条免费接口示例点击填充；② V26 的探针方法论继续扫零覆盖面 → **建议条把 `www.example.com`、`1.2.3`、`file.name.txt` 误判成 JWT**（会弹「解析 JWT 载荷」的错误推荐）、8 字母单词误判成 Base64 —— 14 处误报全清（JWT 按 RFC 7515 要求头部解出 JSON 对象；Base64 要求解码为合法 UTF-8）；③ `jsonLocate` 与 V8 差分 0 分歧，但尾随逗号/缺值的**报错文案误导**改准确且指向真正的元凶；④ 回归 14→**17 套（1778 条）**、冒烟 27→**28 条 / 25 工具**、工具自检 313→**325 PASS**。
+
 **当前卡点：唯一剩下的是「用户装机做 GUI 验收」**（沙箱无法验证窗口/托盘/透明/桌面挂载/拖放等真实 GUI 行为）。
 
 | 项 | 值 |
 | --- | --- |
-| 阶段 | Phase 1 收尾 + V18–**V26** 反馈修复（MVP 完成，待装机验收） |
+| 阶段 | Phase 1 收尾 + V18–**V27** 反馈修复（MVP 完成，待装机验收） |
 | git | **V26 = `2969256`**（19 文件，+2364/−158：工具箱纯逻辑层「零覆盖 → 1459 条断言」+ 修 6 处「不报错只给错答案」缺陷 + 冒烟扩到 27 用例，见 §1.12）；**V25 = `5f8fe8a`**（18 文件，+2649/−565）+ `3001510`（文档回填：修恒真断言 + 回填提交号/包体量）；**V24 = `ef9bba4`**（41 文件，+2273/−326）+ `5d16a0c`（示例条冒烟）；**V23 = `f81a914`**（17 文件，+3334/−184）；V22 = `d49857c`；V21 = `685b8a7`；V20 = `f96a374`；V19 = `64e3008`；`be1dc58` = V18 文档回填；`862d5bf` = V18 批次 |
 | 安装包（**V25 已重新打包**） | `src-tauri/target/release/bundle/nsis/Handy_0.1.0_x64-setup.exe`<br>`src-tauri/target/release/bundle/msi/Handy_0.1.0_x64_en-US.msi`<br>`src-tauri/target/release/handy.exe`（免安装可直接跑）<br>取证：`dist/index.html` 必须**早于** `handy.exe`（且 `beforeBuildCommand` 已覆盖为空操作 ⇒ 打进二进制的就是本批前端）；V25 具体体量与时间戳见 §1.11 |
 
@@ -59,21 +61,23 @@
 | **V23** | 见 §1.9 —— 4 条用户反馈：Cron 工具**删掉重复的「字段拆解」面板**（合并进逐段编辑）· **Quartz 语法定性**（说明适用平台 + 6/7 段贴进 crontab 的误用警示）· 新增**文本处理台**（24 个工具）· **全面响应式审计**（新增可复跑工具 + 修掉窄窗口两处真缺陷）· **重新打包** | ✅ `tsc` + 6/6 回归（715 条断言）+ 布局审计 0 溢出 0 重叠 + 已出安装包 |
 | **V24** | 见 §1.10 —— 3 条开放要求：**设计令牌现代化**（页面底色 vs 白卡层次）· 工具**分类体系 + 首页重做**（6 类 / 搜索 / 收藏最近 / 分组网格）· **易扩展三件套**（脚手架 + 静态自检 + 编写指南）· 19 工具接持久化 / 8 工具补示例条 · 新增**示例条功能冒烟** `sample-smoke.mjs` | ✅ `tsc` + 6/6 回归 + 工具自检 313 PASS/0 WARN + 布局审计 0/0/0 + 示例条冒烟 9/9 + 已出安装包 |
 | **V25** | 见 §1.11 —— 3 条实测反馈 + 1 条开放要求：密码**符号过多且连排** · 正则库**大量示例零命中** · 桌面整理**疑似没在操作系统桌面** · 继续逐工具自测 | ✅ `tsc` + **8/8 回归（831 条断言）** + 工具自检 313 PASS/0 WARN + 布局审计 0/84 + **示例条/功能冒烟 23 用例** + 已出安装包 |
-| **V26**（本轮） | 见 §1.12 —— 承接「继续分析优化剩余其他功能」：把工具箱**纯逻辑层从零覆盖拉到 1459 条断言**（新增 6 套回归）· 修掉 URL「主机:端口 被当成协议」等 **6 处真缺陷** · JSON→TS **接口名复用只看键名导致静默错类型** · 三条**示例描述与实现不符**改成真话 · 冒烟从 23 条扩到 **27 条 / 24 个工具全覆盖** | ✅ `tsc` + **14/14 回归（1459 条断言）** + 工具自检 313 PASS/0 WARN + **冒烟 27/27 + 24/24 工具** + 已重建 dist（未重新打包） |
+| **V26** | 见 §1.12 —— 承接「继续分析优化剩余其他功能」：把工具箱**纯逻辑层从零覆盖拉到 1459 条断言**（新增 6 套回归）· 修掉 URL「主机:端口 被当成协议」等 **6 处真缺陷** · JSON→TS **接口名复用只看键名导致静默错类型** · 三条**示例描述与实现不符**改成真话 · 冒烟从 23 条扩到 **27 条 / 24 个工具全覆盖** | ✅ `tsc` + **14/14 回归（1459 条断言）** + 工具自检 313 PASS/0 WARN + **冒烟 27/27 + 24/24 工具** + 已重建 dist（未重新打包） |
+| **V27**（本轮） | 见 §1.13 —— 用户两条：**新增接口测试工具（类 Postman，含免费接口示例点击填充）** + 分析更多可用工具；同批修掉**建议条把 `www.example.com` / `1.2.3` 误判成 JWT** 等 14 处识别误报 · `jsonLocate` 尾随逗号/缺值报错从误导改准确（与 V8 差分 0 分歧）· 文件路径认 `C:/…` · 回归 14→**17 套（1778 条）** · 冒烟 27→**28 条 / 25 工具** | ✅ `tsc` + `cargo check` + **17/17 回归（1778 条断言）** + 工具自检 325 PASS/0 WARN + **冒烟 28/28 + 25/25 工具** + dist 已重建（未重新打包） |
 
 ### 1.3 功能清单（当前实际能力）
 
-**工具箱（24 个命令，`src/modules/toolbox/commands/`）**
+**工具箱（25 个命令，`src/modules/toolbox/commands/`）**
 - 原有 9：`timestamp` / `json-formatter` / `base64-codec` / `url-codec` / `jwt-decoder` / `text-diff` / `password-generator` / `hash-generator` / `qrcode-generator`
 - V17 新增 14：`uuid-generator` / `json-to-ts` / `regex-tester` / `case-converter` / `text-dedup` / `csv-json` / `sql-formatter` / `relative-time` / `unit-converter` / `file-size` / `cron-descriptor` / `slug-generator` / `image-to-base64` / `ascii-table`
 - **V23 新增 1：`text-lab` 文本处理台** —— 查找替换（普通/正则/捕获组/大小写/全词/`s`/`m`）· 正则筛选（只留匹配行 / 删掉匹配行 / 提取匹配）· **20 项一键行操作**（去重 / 忽略大小写去重 / 删空行 / 去首尾空白 / 去行尾空白 / 清不可见字符 / 排序 ×5 / 逆序 / 随机 / 加行号 / 注释 / 取消注释 / 合并 / 拆分 / 按模式筛选 ×2）· 取列（`1` `2,4` `2-4`）· 逐行加前后缀 · 硬折行 · 统计（行/非空行/去重行数/词/字符/UTF-8 字节）· 换行风格互转（LF / CRLF / CR）· **就地改写 + 30 步撤销栈**
+- **V27 新增 1：`api-tester` 接口测试** —— HTTP 请求编辑（方法 / URL / 头部行 / 请求体）· **cURL 导入**（DevTools「Copy as cURL」直接还原：`-X` `-H` `-d` 系列 / `--json` / `-u` / 续行 / 三种引号）· **Rust 直发请求绕开 CORS**（`http_request` 命令，reqwest + rustls；浏览器预览自动降级 `fetch` 并提示受限）· 响应检查（状态分档着色 / 耗时 / 体积 / 响应头 / JSON 自动美化 + 原文切换 / 一键复制）· **历史 15 条**（只存方法+URL+状态）· **敏感头不落盘**（Authorization / token / key / cookie 值清空且输入框打码）· 8 条免费接口示例（JSONPlaceholder / httpbin / Open-Meteo / Dog CEO / GitHub 等，点击即填充）
 
 **模块（`src/modules/`）** —— 只认 `src/modules/*/index.ts`（`moduleRegistry` 用 `import.meta.glob` 自动发现）。
 **当前只有 4 个**（V25 复核；本节此前把视图目录也列成了模块，已更正）：
 
 | 模块 id | 用户可见名 | 说明 |
 | --- | --- | --- |
-| `toolbox` | 工具箱 | 24 个命令，深链 `?tool=<id>` |
+| `toolbox` | 工具箱 | 25 个命令，深链 `?tool=<id>` |
 | `notes` | **工作台** | 入口原地重定向到 `workstation` 视图（`loadView` → `../workstation/WorkstationView`）。⚠️ **这是唯一的工作台深链 id**（`?module=notes`）—— `?module=workstation` 不存在、会渲染空视图 |
 | `vault` | 密码存储器 | 主密码（Argon2id）→ AES-256-GCM 字段级加密；自动锁 / 复制清剪贴板 |
 | `desktop-organizer` | **桌面整理** | **V25 换首屏**：`DesktopOrganizerConsole` 双页签 —— ①「归类文件」（**默认页签**）= `OrganizerView` + Rust `organizer.rs`，**真移动**桌面文件到「桌面/Handy整理/类别/」（预览 → 勾选排除 → 二次确认 → 可逆序撤销），顶部常驻**作用目录**栏显示真实桌面路径与条目数；②「桌面格子」= `GridManagerView embedded`（零磁盘副作用）。**V19–V24 该模块入口指向的是格子视图**，这正是用户反馈「没有真正操作系统桌面」的原因 |
@@ -88,7 +92,7 @@
 | `desktop-grid/GridManagerView` | 格子管理视图 | 被桌面整理控制台以 `embedded` 复用（紧凑工具条 + 不走自带头部大标题）；盒子拖拽/缩放/重命名、条目为**原文件路径引用**；一键整理 / 布局备份·还原·删除；系统桌面图标显隐 |
 | `components/SettingsCenter` | 设置中心 | **也不是模块**：走独立窗口（`main.tsx` 按 `windowRoot` 分发 main / note / settings / organizer / grid-overlay / workstation-bar）。快捷键/自启/主题/模块启停/备份/贴条常驻/**贴条始终置顶**/**主窗口始终置顶** |
 
-**Rust 命令层（`src-tauri/src/commands/`）**：`app`(窗口/设置) · `notes`(5) · `todos`(5) · `organizer`(6，休眠) · `backup` · `vault`(8) · `grid`(23，**V21 重做 attach 实现**) · `sys`(2，系统动作白名单 **49 项**) · `bar`(**5**：show / hide / set_height / **set_pinned（V21）** / open_workstation) —— 全部 `async fn`。
+**Rust 命令层（`src-tauri/src/commands/`）**：`app`(窗口/设置) · `notes`(5) · `todos`(5) · `organizer`(6，休眠) · `backup` · `vault`(8) · `grid`(23，**V21 重做 attach 实现**) · `sys`(2，系统动作白名单 **49 项**) · `bar`(**5**：show / hide / set_height / **set_pinned（V21）** / open_workstation) · **`http`(1，V27：`http_request` 接口测试直发请求)** —— 全部 `async fn`。
 **DB 迁移链**：v1 schema → v2 移除剪贴板表 → v3 vault → v4 grid → **v5 `todos.detail`**（只追加、幂等）。
 **独立窗口**：`main` / `note` / `settings` / `organizer` / `grid-overlay` / `workstation-bar`。
 
@@ -622,6 +626,88 @@ V25 的 23 条用例覆盖 21 个工具，**缺的 4 个恰好都是「没有示
 
 ---
 
+### 1.13 V27 批次明细（用户：接口测试工具 + 分析更多工具；同批完成探针发现的误报修复）
+
+**两条线**：① 用户点名「增加类 Postman 的接口测试工具，带免费接口示例」→ 新增第 25 个工具
+`api-tester`（**含 Rust 侧直发请求**，这是本项目第一个带网络能力的 Rust 命令）；
+② 承接 V26 的差分探针方法论，把 `detect` / `jsonLocate` / `contentMatch` 三个零覆盖纯逻辑模块
+实测了一遍，**浮出 14 处建议条误报与 2 处误导性报错**并全部修掉。
+
+#### 1) `api-tester` 接口测试（第 25 个工具，分类 dev）
+
+- **请求编辑**：方法（GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS）+ URL + 头部行（增删行、
+  Content-Type / Accept / Authorization 快捷键）+ 请求体（GET/HEAD 禁用）。
+- **cURL 导入**（核心亮点）：粘贴 DevTools「Copy as cURL」或终端命令 → `parseCurl` 还原成可编辑请求。
+  支持续行 / 单引号 / 双引号转义 / `$'...'` / `-X` `-H` `-d`（及全部别名，多个 `-d` 按 curl 语义用 `&` 连接）/
+  `--json`（隐含 POST + Content-Type）/ `-u`（→ Basic 认证头）/ `--url`；未知开关按**不带值**保守跳过
+  —— 宁可少认一个参数，不可把它的值错当 URL。
+- **Rust 直发请求（关键架构点）**：webview 的 `fetch` 受 CORS 约束，「接口测试」恰恰要测任意来源
+  （自己的后端、内网、不配 CORS 的第三方）→ 新增 `commands::http::http_request`（reqwest 0.13 + rustls，
+  **与 updater 共用同一依赖树**，不引入第二个 TLS 栈）。超时必设（默认 30 s，上限 120 s）；
+  4xx/5xx **不是错误**照常返回，只有 DNS/连接/超时走 `Err`（中文可读）。浏览器预览（无 Tauri IPC）
+  自动降级 `fetch` 并在 UI 明示受限 —— 冒烟也因此可跑。
+- **响应检查**：状态徽标按 2xx/3xx/4xx/5xx/网络失败五档着色 · 耗时 · 体积 · 响应头折叠列表 ·
+  JSON 自动美化（原文开关）· 一键复制体。
+- **历史**：15 条（只存方法+URL+状态，**不存任何头与体**），点击回填。
+- **敏感头不落盘**（沿用 V24 约定）：Authorization / token / secret / api-key / cookie / password 的值
+  在持久化前清空（`rowsForPersist`），输入框同时以 `type="password"` 呈现 —— 落盘与回显两头都堵住。
+- **8 条免费接口示例**（点击即填充，全部无 key 且 CORS 友好）：JSONPlaceholder GET/POST(201)、
+  httpbin 回显头 / 404 分档 / 延迟 3 秒、Open-Meteo 北京实时天气、GitHub 仓库信息、cURL 导入演示。
+
+#### 2) 建议条误报修复（`detect.ts`，用户可见的「不报错只给错答案」）
+
+探针实测（修复前 → 修复后）：
+
+| 输入 | 修复前 | 修复后 |
+| --- | --- | --- |
+| `1.2.3` / `v1.2.3` / `2.0.1` / `a.b.c` / `release-1.2.3` | **JWT** → 建议条弹「解析 JWT 载荷」 | 不误报 |
+| `www.example.com` / `file.name.txt` / `foo.json.bak` | **JWT** | 不误报 |
+| `Feedback` / `Password` / `TestCase` / `DataBase` / `Username` / `abcdefgh` | **Base64** | 不误报 |
+| jwt.io 真令牌 / URL / 10 与 13 位时间戳 / JSON | 正确命中 | 仍正确命中 |
+
+- **JWT 判定加固**：只看「三段 + base64url 字符集」会命中一切三段式文本 → 依 RFC 7515 §4，
+  要求**头部段能解码成 JSON 对象**（真 JWT 的受保护头部必然如此）。
+- **Base64 判定加固**：本工具承诺「文本 ↔ Base64（UTF-8 安全）」→ 要求解码结果是**合法 UTF-8**
+  （`TextDecoder('utf-8', {fatal:true})`），恰好满足字符集与长度的英文单词就此出局。
+
+#### 3) `jsonLocate` 报错质量（`JsonFormatter` 直接把 reason 显示给用户）
+
+- 与 **V8 `JSON.parse` 差分 55 例 + 20 个随机合法 JSON**：合法性判定 **0 分歧** —— 扫描器本身可靠。
+- 两处**误导性 reason** 改准确：`{"a":1,}` 从「对象的键必须是双引号字符串」、`[1,2,]` 从「数字格式无效」
+  改为「…多了一个逗号（JSON 不允许尾随逗号）」，且**报错列指向逗号本身**（`fail` 支持指定位置）；
+  `{"a":}` / `{"a"::1}` / `[}` 从「数字格式无效」改为「此处缺少 JSON 值（不应出现 }）」。
+- 行列核对中 6 条「FAIL」复算后**全是测试自己的期望值写错**（`\u` 短转义指向非法处 col 11、
+  `,,"` 是缺键不是缺值等）—— 实现每处都对。
+
+#### 4) 其他
+
+- `contentMatch.isFilePath` 认 `C:/Users/me`（正斜杠盘符路径同样合法）；
+  `contentMatch` 的 `@/lib/detect` 改相对 `.ts` 路径（与 V26 `hashUtils` 同款，为 Node 直测）。
+- 新增回归 **3 套**：`test-detect`（77）· `test-json-locate`（192，含随机合法 JSON 差分与自举
+  `--experimental-transform-types`——`SpotError` 构造器用了参数属性，纯类型剥离不支持）·
+  `test-api`（50）。合计 **17 套 / 1778 条断言**。
+- 冒烟 +1：`api-tester`「cURL 导入」端到端（点 chip → 解析并填充 → 断言方法/URL/体还原 + 敏感头打码；
+  **不发真实网络请求**——无头冒烟必须确定性）。合计 **28 用例 / 25 工具全覆盖**。
+
+#### 5) 验证与「更多工具」分析结论
+
+| 项 | 结果 |
+| --- | --- |
+| `tsc --noEmit` | 0 错 |
+| `cargo check` | EXIT=0（新增 `http` 命令 + reqwest 依赖） |
+| 回归 | **17/17 套 / 1778 条断言** |
+| 工具自检 | **325 PASS / 0 FAIL / 0 WARN** |
+| 冒烟 | **28/28**，25 工具全覆盖 |
+| `vite build` | EXIT=0（`ApiTester` 独立分包，`index` 606 KB 基本持平） |
+
+**「更多工具」分析结论**（本批只交接口测试，其余按「先规划后执行」待用户点头）：
+① **JSON→TypeScript 已有**、**环境变量 .env 编辑**（高价值低成本）② **Markdown 表格 ↔ CSV/JSON 互转**
+（csv-json 已有一半）③ **WebSocket / SSE 调试**（api-tester 的自然延伸，但要新 Rust 通道）④ **cron 下次执行时间预览**
+（cron.ts 能力已有，纯展示层）⑤ **JSON Diff / 请求 Diff**（diff 库已在依赖里）。优先级建议 ④①②③⑤ ——
+④ 是半小时级纯前端活且复用现有回归锚点，③ 需要常驻连接管理、是独立批次体量。
+
+---
+
 ## 2. 剩余任务与已知风险
 
 ### 2.1 🔴 唯一阻塞项：装机 GUI 验收（用户执行）
@@ -659,7 +745,7 @@ V25 的 23 条用例覆盖 21 个工具，**缺的 4 个恰好都是「没有示
 | **`N/step` 两种口径**（V21 新） | `0/30` 这类写法在 **Quartz**（从 N 起每 step 直到上限）与 **Vixie 老实现**（只取 N 一个值）下语义不同。本工具**选 Quartz 口径**，并在 `cron.ts` 头注释与界面（**逐段编辑**会把每段展开取值列出来 —— V23 删掉「字段拆解」面板后，取值改在这里显示）双重说明；若将来要为 Vixie 兼容再加开关 |
 | **只读预览仍是暗底**（V21 新） | `RichMarkdown` 编辑态代码块是浅底（`.md-preview.wysiwyg pre`），配色与 `CodeBlock` 的 token 色一致；但 `MarkdownWithCode` / `MdText` 走的只读 `.md-preview pre` 仍是深底，浅色 token（`text-emerald-700` 等）在深底上偏暗。编辑器已全部切到 wysiwyg，故影响面仅剩只读展示 |
 | **`MarkdownEditor` 休眠**（V21 新） | 便签窗是它最后一个使用者，V21 换成 `RichMarkdown` 后已**无 UI 入口**（文件保留未删，与 `NoteWindow` 同类处理） |
-| **纯逻辑模块无 CI 兜底**（V21 新，V22→4 套，V23→6 套，**V26→14 套**） | 回归脚本已转正成 `scripts/regression/run.mjs`（**14 套 / 1459 条断言**：cron 114 · cron-platform 45 · lunar 32 · holidays 30 · sql 357 · textlab 137 · password 86 · regex-library 30 · **base64 60** · **url 127** · **hash 103** · **jwt 95** · **json 157** · **byte-units 86**）。V26 新增的 6 套全部带**外部标准锚点**（RFC 4648 §10 / RFC 1321 附录 A.5 / NIST SHA / jwt.io 公开令牌 / Goessner JSONPath 教程数据 / IEC 80000-13 单位口径），并与 Node `node:crypto`（OpenSSL）交叉验证 —— 专门拦「不报错只给错答案」那类缺陷。**但仍没有任何自动触发**：合并前/打包前需人工跑一次，也没有 CI。后续若要上 CI，这条是现成入口 |
+| **纯逻辑模块无 CI 兜底**（V21 新，V22→4 套，V23→6 套，V26→14 套，**V27→17 套**） | 回归脚本已转正成 `scripts/regression/run.mjs`（**17 套 / 1778 条断言**：cron 114 · cron-platform 45 · lunar 32 · holidays 30 · sql 357 · textlab 137 · password 86 · regex-library 30 · base64 60 · url 127 · hash 103 · jwt 95 · json 157 · byte-units 86 · **detect 77** · **json-locate 192** · **api 50**）。V26/V27 新增的套件全部带**外部标准锚点**（RFC 4648 §10 / RFC 1321 附录 A.5 / NIST SHA / jwt.io 公开令牌 / Goessner JSONPath 教程数据 / IEC 80000-13 / RFC 7515 JWT 头部结构 / **V8 `JSON.parse` 差分** / 真实 DevTools cURL 语料），并与 Node `node:crypto`（OpenSSL）交叉验证 —— 专门拦「不报错只给错答案」那类缺陷。**但仍没有任何自动触发**：合并前/打包前需人工跑一次，也没有 CI。后续若要上 CI，这条是现成入口 |
 | ~~V22 未重新打包~~ | ✅ **V23 已解决**：`vite build`（52 个 dist 文件）+ `tauri build`（nsis 3.7 MB / msi 4.7 MB）均已重跑，取证见 §0 |
 | **工作台改动无法浏览器自证**（V22 新） | 计划 / 便签 / 日历都读 SQLite，浏览器冒烟下是空的，所以 §1.8.1 的压盖修复**只做到了 `tsc` + 代码级确认**。V23 起这条**部分被打破**：`scripts/audit/layout-audit.mjs` 能在无头浏览器里量出溢出/裁切/**重叠**，窄窗口两处缺陷就是这样抓到的（见 §1.9.4）——但**重叠之外的视觉美感仍需人眼**，装机验收依旧不可省 |
 | **文本处理台只做了 Phase 1**（V23 新） | Phase 2（多文件批量 / 处理链配方 / 正则库复用 / 不可见字符巡检报告 / 选中块格式化）与 Phase 3（编码互转 / 超大文件流式 / 列块框选）**明确未做**，范围与优先级见 §1.9.3。当前实现是「整段进内存」，10 MB 级文本会卡 |
@@ -749,17 +835,19 @@ node node_modules/vite/bin/vite.js build
 # 逐文件清理 dist（一般不需要；要清就带 --max，exit 2 = 还有剩余，换个回合继续）
 node scripts/clean-dist.mjs --max=40
 
-# 纯逻辑回归（14 套 / 1459 条断言；改动 src/lib 下对应文件后必跑）
+# 纯逻辑回归（17 套 / 1778 条断言；改动 src/lib 下对应文件后必跑）
 #   零依赖：靠 Node ≥ 22.18 原生类型剥离直接 import 源码 .ts，不需要先打包
 #   套件断言数：cron 114 · cron-platform 45 · lunar 32 · holidays 30 · sql 357 · textlab 137
 #              · password 86（V25）· regex-library 30（V25：守「每条正则在自己示例里必须有命中」）
 #              · base64 60 · url 127 · hash 103 · jwt 95 · json 157 · byte-units 86（均 V26）
-#   V26 那 6 套带外部标准锚点（RFC 4648 / RFC 1321 / NIST / jwt.io 公开令牌 / Goessner JSONPath / IEC 80000-13）
-#   并与 node:crypto（OpenSSL）交叉验证 —— 专治「不报错、只给错答案」那类缺陷
-node scripts/regression/run.mjs          # 14/14 套通过时 exit 0
+#              · detect 77 · json-locate 192（V27：建议条误报 / 与 V8 JSON.parse 差分）· api 50（V27：cURL 解析）
+#   V26/V27 的新套带外部标准锚点（RFC 4648 / RFC 1321 / NIST / jwt.io 令牌 / Goessner JSONPath /
+#   IEC 80000-13 / RFC 7515 / V8 JSON.parse 差分 / 真实 DevTools cURL）并与 node:crypto 交叉验证
+#   —— 专治「不报错、只给错答案」那类缺陷
+node scripts/regression/run.mjs          # 17/17 套通过时 exit 0
 
 # 响应式布局审计（改了页面布局就该跑；V23 抓出的 2 处真缺陷就是它算出来的）
-#   起 vite dev server + 无头浏览器，对 24 个工具 + 3 个模块页 × 3 档视口（680/1024/1680）实测
+#   起 vite dev server + 无头浏览器，对 25 个工具 + 3 个模块页 × 3 档视口（680/1024/1680）实测
 #   量 4 个指标：ox/mox 横向溢出 · clipX/clipY 内容溢出但不滚 · overlap 非祖孙块级矩形相交 · 截图
 #   注意：dev server 与浏览器必须在同一条命令里（沙箱会回收后台进程）；结果写 _shots/audit/layout-audit.json
 #   V25：脚本开局先做一次预热 open（WARMUP_TIMEOUT=180s）付掉浏览器冷启动，之后每页只要 ~0.3 秒
@@ -767,7 +855,7 @@ node scripts/regression/run.mjs          # 14/14 套通过时 exit 0
 
 # 示例条 / 关键功能冒烟（V24 起；改了任何工具的 samples 或界面首屏就该跑）
 #   静态自检只能证明「文件里写了 samples=」，证明不了「点下去真填进去了」——
-#   本脚本在真实 dist + 无头浏览器里跑 27 个用例（V26 起 24 个工具 + 3 个模块页全覆盖），断言的是**用户能看到的后果**
+#   本脚本在真实 dist + 无头浏览器里跑 28 个用例（V27 起 25 个工具 + 3 个模块页全覆盖），断言的是**用户能看到的后果**
 #   （哈希工具点了示例必须真出现那段摘要；密码示例必须真生成 16 位且符号 ≤4 个、不连排）
 #   两类用例：chip 用例（点示例 chip）/ probe 用例（不点 chip，在页面里跑探针断言
 #   —— 正则库 30 条自检徽标、桌面整理控制台首屏、JWT 解码四态、Cron 常用表达式、SQL 示例填充与错误徽标）

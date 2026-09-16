@@ -404,6 +404,36 @@ async function probeImageToBase64() {
   return out;
 }
 
+/**
+ * 接口测试（api-tester，V28）：走「cURL 导入」端到端 —— 点示例 chip 打开导入面板并预填 cURL，
+ * 探针点「解析并填充」，断言方法/URL/体真的被还原，且 Authorization 值以 password 框呈现
+ * （敏感头不落盘的前半段——「不回显」——用户能看得见）。
+ * 不发真实网络请求：无头冒烟必须确定性，网络用例交给回归与人工。
+ */
+async function probeApiTester() {
+  const tick = () => new Promise((r) => setTimeout(r, 300));
+  const out = { parseButton: false, urlFilled: false, methodPost: false, bodyFilled: false, secretMasked: false };
+  const parse = Array.from(document.querySelectorAll('button')).find(
+    (b) => b.textContent.trim() === '解析并填充',
+  );
+  out.parseButton = parse !== undefined;
+  if (parse === undefined) {
+    return out;
+  }
+  parse.click();
+  await tick();
+  await tick();
+  const urlInput = document.querySelector('#api-url');
+  out.urlFilled = urlInput !== null && String(urlInput.value).includes('httpbin.org/post');
+  const select = document.querySelector('select[aria-label="HTTP 方法"]');
+  out.methodPost = select !== null && select.value === 'POST';
+  const bodyArea = document.querySelector('#api-body');
+  out.bodyFilled = bodyArea !== null && String(bodyArea.value).includes('"tags"');
+  const masked = Array.from(document.querySelectorAll('input[type="password"]'));
+  out.secretMasked = masked.some((i) => String(i.value).startsWith('Bearer '));
+  return out;
+}
+
 const CASES = [
   // ——— V24 建立的用例（chip）———
   {
@@ -615,6 +645,20 @@ const CASES = [
     detail: (r) =>
       `选择图片按钮=${r.probe?.pickButton} 空态提示=${r.probe?.emptyHint} ` +
       `开关 ${r.probe?.switchCount} 个、可切换=${r.probe?.switchToggled}`,
+  },
+  {
+    id: 'api-tester',
+    chip: 'cURL 导入',
+    probe: probeApiTester,
+    check: (r) =>
+      r.probe?.parseButton === true &&
+      r.probe?.urlFilled === true &&
+      r.probe?.methodPost === true &&
+      r.probe?.bodyFilled === true &&
+      r.probe?.secretMasked === true,
+    detail: (r) =>
+      `解析按钮=${r.probe?.parseButton} URL 已填=${r.probe?.urlFilled} 方法=POST(${r.probe?.methodPost}) ` +
+      `体已填=${r.probe?.bodyFilled} 敏感头打码=${r.probe?.secretMasked}`,
   },
 ];
 

@@ -358,4 +358,17 @@ export const toolboxCommands: CommandMeta[] = [
     tier: 'free',
     load: () => import('./AsciiTable'),
   },
+  {
+    id: 'api-tester',
+    category: 'dev',
+    moduleId: 'toolbox',
+    name: '接口测试',
+    description: 'HTTP 接口调试：cURL 导入 / 请求编辑 / 响应检查',
+    icon: 'Send',
+    aliases: ['api', 'http', 'request', 'postman'],
+    keywords: ['接口', 'api', 'http', '请求', '测试', 'postman', '调试', 'curl'],
+    layout: 'split',
+    tier: 'free',
+    load: () => import('./ApiTester'),
+  },
 ];

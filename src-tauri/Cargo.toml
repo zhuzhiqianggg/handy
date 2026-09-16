@@ -41,6 +41,10 @@ dirs = "5"
 walkdir = "2"
 sysinfo = "0.32"
 
+# 接口测试工具（api-tester）：Rust 侧直发 HTTP，绕开 webview 的 CORS 限制。
+# 与 tauri-plugin-updater 共用同一 reqwest / rustls 依赖树（不引入第二个 TLS 后端）。
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "charset", "http2"] }
+
 # 密码存储器（M5）：AES-256-GCM 加密 + Argon2id 密钥派生（纯 Rust 实现）
 aes-gcm = "0.10"
 argon2 = "0.5"
