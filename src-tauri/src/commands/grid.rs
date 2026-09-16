@@ -77,10 +77,16 @@ const POLL_INTERVAL_MS: u64 = 60;
 
 /// 每隔多少个轮询周期检查一次 Z 序（错位才重排，见 [`reassert_attach`]）。
 ///
-/// V33：33 周期（≈2 秒）过于频繁 —— 装了第三方桌面工具时判据会持续不成立，
-/// 于是每 2 秒重排一次 Z 序，窗口反复重绘就是「闪一下」的观感来源。
-/// 放宽到 250 周期（≈15 秒）并配连续两次判定去抖。
-const REASSERT_TICKS: u64 = 250;
+/// V33：从 33 周期放宽到 250 周期（≈15 秒）—— 装了第三方桌面工具时判据会持续
+/// 不成立，于是每 2 秒重排一次 Z 序，窗口反复重绘就是「闪一下」的观感来源。
+/// 放宽确实治住了闪烁，但代价是**真错位时要等十几秒才自愈**，用户看到的是
+/// 「格子跑我窗口上面去了，半天不下来」。
+///
+/// V34：真正的错位根因已定位并修掉（`show()` 会把窗口顶到 Z 序顶层，见
+/// [`show_overlay`] 的顺序说明），所以这里可以既收紧又快 —— 设成 40 周期
+/// （≈2.4 秒）配合 [`reassert_attach`] 的「连续两次判定」，真错位 5 秒内必被纠正，
+/// 而瞬时抖动仍被拒之门外（两次判定之间隔着完整一个轮询周期）。
+const REASSERT_TICKS: u64 = 40;
 
 /// 收纳根目录名（桌面下的一级目录；与「归类文件」共用，避免两个相似目录）。
 const STORAGE_ROOT_NAME: &str = "Handy整理";
@@ -358,7 +364,19 @@ fn move_with_conflict_rename(src: &Path, dest_dir: &Path) -> Result<PathBuf, Str
     match std::fs::rename(src, &target) {
         Ok(()) => Ok(target),
         Err(err) => {
-            // 跨卷移动（`fs::rename` 不支持）→ 退化成「复制 + 删除源」
+            // 跨卷移动（`fs::rename` 不支持）→ 退化成「复制 + 删除源」。
+            //
+            // ⚠️ 目录必须走递归复制：`std::fs::copy` 只能复制单个文件，对目录会直接
+            // 报错。V34 把文件夹纳入收纳之后，这条路径才真正会被踩到（桌面被重定向
+            // 到另一个盘时，`fs::rename` 必然失败）。
+            if src.is_dir() {
+                copy_dir_recursive(src, &target).map_err(|copy_err| {
+                    format!("移动失败（{err}）；目录复制兜底也失败：{copy_err}")
+                })?;
+                std::fs::remove_dir_all(src)
+                    .map_err(|remove_err| format!("目录复制成功但删除原目录失败：{remove_err}"))?;
+                return Ok(target);
+            }
             std::fs::copy(src, &target)
                 .map_err(|copy_err| format!("移动失败（{err}）；复制兜底也失败：{copy_err}"))?;
             std::fs::remove_file(src)
@@ -366,6 +384,25 @@ fn move_with_conflict_rename(src: &Path, dest_dir: &Path) -> Result<PathBuf, Str
             Ok(target)
         }
     }
+}
+
+/// 递归复制目录（跨卷移动文件夹时的兜底）。
+///
+/// 标准库只提供「复制单个文件」，目录得自己走下去。失败一律原样上抛 ——
+/// 调用方会把它拼进中文错误里，不做静默吞错。
+fn copy_dir_recursive(src: &Path, dest: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dest)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dest.join(entry.file_name());
+        if from.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
 }
 
 /// 某盒子的登记条目（按 sort 升序、id 升序稳定排序）。
@@ -520,6 +557,8 @@ pub async fn grid_box_upsert(
                 .query_row("SELECT COUNT(*) FROM grid_boxes", [], |row| row.get(0))
                 .unwrap_or(0);
             let cascade = existing.max(0) as i64;
+            // 缺省落点 = 靠右自动流（与「一键收纳」共用同一套排布，见 arrange_position）
+            let (auto_x, auto_y) = arrange_position(layout_work_width(&app), cascade);
             conn.execute(
                 "INSERT INTO grid_boxes \
                  (name, kind, content, pos_x, pos_y, width, height, sort, created_at, updated_at) \
@@ -528,8 +567,8 @@ pub async fn grid_box_upsert(
                     clean_name(name),
                     clean_kind(kind),
                     content.unwrap_or_default(),
-                    pos_x.unwrap_or(60 + (cascade % 6) * 340),
-                    pos_y.unwrap_or(60 + (cascade % 4) * 250),
+                    pos_x.unwrap_or(auto_x),
+                    pos_y.unwrap_or(auto_y),
                     final_width,
                     final_height,
                     final_sort,
@@ -1260,6 +1299,9 @@ fn apply_attach(win: &WebviewWindow, mode: AttachMode) -> Result<(), String> {
 /// 每次都无脑 `SetWindowPos` 会让窗口反复重绘 —— 那正是 V20「点一下闪一下」的
 /// 观感来源之一。这里用 `GetWindow(hwnd, GW_HWNDNEXT)`（紧贴在我下面的是谁）
 /// 判断：桌面窗口就在正下方 = 层级正确，直接返回。
+///
+/// V34 补充：把三个句柄一并记进日志。用户报「格子跑到其他窗口上面」时，只有这行
+/// 能区分「attach 压根没生效」还是「被别的窗口插队」，不必靠猜。
 fn reassert_attach(win: &WebviewWindow) {
     #[cfg(target_os = "windows")]
     {
@@ -1281,12 +1323,17 @@ fn reassert_attach(win: &WebviewWindow) {
         }
         // 去抖：连续两次判定错位才重排。第三方桌面工具会频繁瞬时改变 Z 序，
         // 一次不匹配就 SetWindowPos 会让窗口反复重绘 —— 即用户看到的「闪一下」。
+        // V34 把轮询周期从 ~15 秒收紧到 ~2.4 秒（见 REASSERT_TICKS）：两次判定之间
+        // 仍隔着整整一个轮询周期，足以滤掉瞬时抖动，而真正的错位 5 秒内必被纠正。
         let strikes = REASSERT_MISMATCH.fetch_add(1, Ordering::Relaxed) + 1;
         if strikes < 2 {
             return;
         }
         REASSERT_MISMATCH.store(0, Ordering::Relaxed);
-        grid_log("检测到 Z 序错位（连续两次判定），重新贴回桌面层");
+        grid_log(&format!(
+            "Z 序错位（连续两次；我正下方不是桌面窗口），重新贴回桌面层（overlay={:?} host={:?} below={:?}）",
+            hwnd.0, host.0, below.0
+        ));
         let _ = place_above_desktop(hwnd);
     }
     #[cfg(not(target_os = "windows"))]
@@ -1477,10 +1524,18 @@ fn cursor_hit(win: &WebviewWindow) -> bool {
     }
 }
 
+/// 挂件窗「意外消失」后的重建冷却（秒）。
+///
+/// 与白屏自愈的冷却分开记：那条是「窗口在、前端没起来」，这条是「窗口整个没了」。
+const RESURRECT_COOLDOWN_SECS: u64 = 30;
+
+/// 上次自动重建「消失的挂件窗」的时刻（unix 秒；用于 [`RESURRECT_COOLDOWN_SECS`]）。
+static LAST_RESURRECT_AT: AtomicU64 = AtomicU64::new(0);
+
 /// 启动（或确认已在运行的）光标轮询线程。
 ///
-/// 生命周期：窗口被销毁（用户 Alt+F4 / grid_overlay_show 重建路径外的关闭）后，
-/// 下一轮 `get_webview_window` 返回 `None`，线程自行退出并复位 `POLLER_RUNNING`。
+/// 生命周期：窗口被销毁后不再无条件退出 —— 见下面窗口丢失分支的说明，只有当
+/// 「用户要的是收起态」时才退出并复位 `POLLER_RUNNING`。
 fn ensure_poller(app: AppHandle) {
     if POLLER_RUNNING
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -1494,13 +1549,38 @@ fn ensure_poller(app: AppHandle) {
             // 上次施加的穿透态（None = 尚未施加），仅在状态变化时调用窗口 API
             let mut last_ignore: Option<bool> = None;
             let mut tick: u64 = 0;
+            // 窗口连续"不在"的轮询次数：把「该不该重建」的判定降到约 30 秒一次，
+            // 否则每 60ms 就要查一次库。
+            let mut missing_ticks: u64 = 0;
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS));
                 let Some(win) = app.get_webview_window(GRID_LABEL) else {
-                    // 窗口已销毁 → 图标若仍在代管必须先还回去，再退出线程
+                    // 窗口已销毁 → 图标若仍在代管必须先还回去
                     release_icons_if_taken(&app);
-                    break;
+                    // V34：**格子层不该"没了就没了"**。用户对桌面整理的预期是
+                    // 「它就是桌面的一部分，除非 Handy 主程序退出」。所以这里区分两种
+                    // 情况，而不是一律退出线程：
+                    //   - 用户要的是显示态（overlay_visible = 1）→ 重建挂件层；
+                    //   - 用户主动收起了 → 线程退出，不做无谓重建。
+                    missing_ticks += 1;
+                    if missing_ticks % 500 == 1 {
+                        if !read_overlay_visible(&app) {
+                            break;
+                        }
+                        let now = unix_secs();
+                        if now.saturating_sub(LAST_RESURRECT_AT.load(Ordering::Relaxed))
+                            >= RESURRECT_COOLDOWN_SECS
+                        {
+                            LAST_RESURRECT_AT.store(now, Ordering::Relaxed);
+                            grid_log("挂件窗已不在，但状态是「显示中」，自动重建挂件层");
+                            if let Err(err) = show_overlay(&app) {
+                                grid_log(&format!("重建挂件窗失败：{err}"));
+                            }
+                        }
+                    }
+                    continue;
                 };
+                missing_ticks = 0;
                 if !win.is_visible().unwrap_or(false) {
                     if last_ignore != Some(true) {
                         let _ = win.set_ignore_cursor_events(true);
@@ -1612,10 +1692,16 @@ fn release_icons_if_taken(app: &AppHandle) {
 /// 想隐藏图标仍有手动开关（`grid_desktop_icons_set`，管理页）。
 fn show_overlay(app: &AppHandle) -> Result<(), String> {
     let mode = read_attach_mode(app);
-    // 已存在 → 先归位再显示：避免「先以旧层级画一帧、再跳位」的闪动
+    // 已存在 → 先 show 再归位。
+    //
+    // ⚠️ 顺序不能反（V34 修的关键 bug）：`show()` 会把窗口提到 Z 序**顶层**，
+    // 若先 `apply_attach` 贴到桌面层、再 `show`，刚贴好的层级立刻被顶掉 ——
+    // 用户看到的就是「格子跑到我其他窗口上面了」；等他点一下别的窗口，那个窗口
+    // 被激活盖过来，格子又像「消失」了。同一根因，两种表象。
+    // 正确顺序：先让它显示，再把它按基准层插回「桌面正上方」。
     if let Some(existing) = app.get_webview_window(GRID_LABEL) {
-        let attach = apply_attach(&existing, mode);
         let _ = existing.show();
+        let attach = apply_attach(&existing, mode);
         let _ = write_overlay_visible(app, true);
         mark_overlay_shown();
         ensure_poller(app.clone());
@@ -1653,9 +1739,10 @@ fn show_overlay(app: &AppHandle) -> Result<(), String> {
 
     // 默认点击穿透；光标命中盒子区域后由轮询线程开放交互
     let _ = win.set_ignore_cursor_events(true);
+    // 先 show 再归位：顺序理由同上（`show()` 会把窗口顶到 Z 序顶层）
+    let _ = win.show();
     // 按基准层归位（默认「贴到桌面」；失败时窗口仍在，把原因透给前端）
     let attach = apply_attach(&win, mode);
-    let _ = win.show();
     let _ = write_overlay_visible(app, true);
     // 冷启动基线：给 webview 启动 + React 挂载留出宽限（判定见轮询线程）
     mark_overlay_shown();
@@ -1960,30 +2047,52 @@ pub async fn grid_open_path(app: AppHandle, path: String) -> Result<(), String> 
 // 因此「还原布局」只是丢弃 / 重建格子，不涉及任何文件回迁，天然安全。
 // ————————————————————————————————————————————————————————————————
 
-/// 一键整理的格子排布：从左上角起、每行 [`ARRANGE_COLUMNS`] 个、按网格递进。
-const ARRANGE_COLUMNS: i64 = 3;
-const ARRANGE_ORIGIN_X: i64 = 40;
-const ARRANGE_ORIGIN_Y: i64 = 40;
+/// 一键整理的格子排布：**靠右自动流**（详见 [`arrange_position`]）。
+const ARRANGE_MARGIN: i64 = 32;
 const ARRANGE_STEP_X: i64 = 344;
 const ARRANGE_STEP_Y: i64 = 268;
 const ARRANGE_BOX_W: i64 = 320;
 const ARRANGE_BOX_H: i64 = 244;
+/// 单行最多摆几列（超宽屏也别一路排到左边缘之外）
+const ARRANGE_MAX_COLUMNS: i64 = 8;
 
-/// 一键收纳结果摘要（前端据此提示「收纳了几个文件、建了几个格子」）。
+/// 按工作区宽度算一行能摆几列（至少 1 列、最多 [`ARRANGE_MAX_COLUMNS`] 列）。
+fn arrange_columns(work_width: i64) -> i64 {
+    ((work_width - ARRANGE_MARGIN) / ARRANGE_STEP_X).clamp(1, ARRANGE_MAX_COLUMNS)
+}
+
+/// 靠右自动流的落点：第 `index` 个格子（0 起）的逻辑像素坐标。
+///
+/// 用户建议原话：「建议格子靠右自动流布局」。直觉来自桌面图标 —— 从右边缘开始摆，
+/// 摆满一列往左推一列，一行到底再换下一行；这样新格子永远落在眼睛习惯的位置，
+/// 也不会把桌面左侧压满。
+fn arrange_position(work_width: i64, index: i64) -> (i64, i64) {
+    let columns = arrange_columns(work_width);
+    let col = index % columns;
+    let row = index / columns;
+    // col = 0 最靠右，往左依次推进一列；`.`max(MARGIN) 兜住极窄工作区
+    let x = (work_width - ARRANGE_MARGIN - ARRANGE_BOX_W - col * ARRANGE_STEP_X).max(ARRANGE_MARGIN);
+    let y = ARRANGE_MARGIN + row * ARRANGE_STEP_Y;
+    (x, y)
+}
+
+/// 一键收纳结果摘要（前端据此提示「收纳了几个条目、建了几个格子」）。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AutoArrangeReport {
     /// 桌面根目录扫描到的可见条目数（含快捷方式 / 文件夹）
     pub scanned: usize,
-    /// 本次真正移动进收纳目录的**普通文件**数
+    /// 本次真正移动进收纳目录的条目数（文件 + 文件夹）
     pub items_added: usize,
+    /// 其中文件夹占的数量（V34 起文件夹也纳入收纳）
+    pub folders_moved: usize,
     /// 本次新建的格子数
     pub boxes_created: usize,
     /// 复用了同名已有格子的次数
     pub boxes_reused: usize,
-    /// 按设计跳过的条目数（快捷方式 / 文件夹一律不动）
+    /// 按设计跳过的条目数（只剩快捷方式 `.lnk` —— 用户要求留在桌面原位）
     pub skipped: usize,
-    /// 单文件失败原因（不中断整批，前端原样展示给用户）
+    /// 单条目失败原因（不中断整批，前端原样展示给用户）
     pub failures: Vec<String>,
 }
 
@@ -2009,19 +2118,26 @@ fn arrange_group_rank(name: &str) -> i64 {
 
 /// 一键收纳核心（连接与桌面目录由调用方给定）。
 ///
-/// V33 起重写为**真移动**：
-///   - 只收**普通文件** —— 快捷方式（.lnk）与文件夹一律不动
-///     （用户明确要求「快捷方式应该保留在默认位置」）；
-///   - 每个类别对应一个收纳格（缺则新建、有则复用），格子名 = 目录名；
-///   - 文件真的被移进 `桌面/Handy整理/<类别>/`，同名不覆盖（冲突改名）；
-///   - 单个文件失败只记录原因，不中断整批。
-fn auto_arrange_inner(conn: &Connection, desktop: &Path) -> Result<AutoArrangeReport, String> {
+/// V33 起重写为**真移动**；V34 两处修正：
+///   - **文件夹纳入收纳**（只留 `.lnk` 不动）：用户实测「文件夹的整理根本都不生效」，
+///     根因就是这里把 `is_dir` 整个跳过 —— 「文件夹」格因此永远是空的；
+///   - **靠右自动流排布**：新格子从工作区右边缘起、自右往左推进（见 [`arrange_position`]）。
+///
+/// `work_width` 是工作区（挂件窗）的逻辑宽度，用于算右对齐落点；<= 0 时退回 1280。
+fn auto_arrange_inner(
+    conn: &Connection,
+    desktop: &Path,
+    work_width: i64,
+) -> Result<AutoArrangeReport, String> {
     use std::collections::HashMap;
 
+    let width = if work_width > 0 { work_width } else { 1280 };
     let scanned = crate::commands::organizer::scan_items(desktop)?;
     let total_scanned = scanned.len();
     let storage = storage_root()?;
     ensure_dir(&storage)?;
+    // 收纳根目录自己绝不能被搬进自己（`桌面/Handy整理` 也可能被 scan_items 扫到）
+    let storage_key = storage.to_string_lossy().to_string();
 
     // 已有格子：名称 → id；`occupied` 记录已占用的排布槽位，新格子往后排
     let mut existing: HashMap<String, i64> = HashMap::new();
@@ -2042,10 +2158,10 @@ fn auto_arrange_inner(conn: &Connection, desktop: &Path) -> Result<AutoArrangeRe
         }
     }
 
-    // 按类别分组（跳过快捷方式 / 文件夹；末尾排序把「文件夹」提前、「其他」压后）
+    // 按类别分组（**只跳过快捷方式**；文件夹归「文件夹」组）
     let mut grouped: Vec<(String, Vec<usize>)> = Vec::new();
     for (index, item) in scanned.iter().enumerate() {
-        if item.is_dir || item.is_lnk {
+        if item.is_lnk || item.path == storage_key {
             continue;
         }
         let key = arrange_group_of(item);
@@ -2059,10 +2175,11 @@ fn auto_arrange_inner(conn: &Connection, desktop: &Path) -> Result<AutoArrangeRe
     let mut report = AutoArrangeReport {
         scanned: total_scanned,
         items_added: 0,
+        folders_moved: 0,
         boxes_created: 0,
         boxes_reused: 0,
-        // 快捷方式 / 文件夹按设计不动，明确计入「跳过」，让用户看到不是漏了
-        skipped: scanned.iter().filter(|item| item.is_dir || item.is_lnk).count(),
+        // 快捷方式按设计不动，明确计入「跳过」，让用户看到不是漏了
+        skipped: scanned.iter().filter(|item| item.is_lnk).count(),
         failures: Vec::new(),
     };
 
@@ -2080,8 +2197,7 @@ fn auto_arrange_inner(conn: &Connection, desktop: &Path) -> Result<AutoArrangeRe
             }
             None => {
                 let now = now_iso();
-                let pos_x = ARRANGE_ORIGIN_X + (occupied % ARRANGE_COLUMNS) * ARRANGE_STEP_X;
-                let pos_y = ARRANGE_ORIGIN_Y + (occupied / ARRANGE_COLUMNS) * ARRANGE_STEP_Y;
+                let (pos_x, pos_y) = arrange_position(width, occupied);
                 // 全表求最大值：该 SQL 无占位符，必须传 None
                 let sort = next_sort(
                     conn,
@@ -2118,7 +2234,12 @@ fn auto_arrange_inner(conn: &Connection, desktop: &Path) -> Result<AutoArrangeRe
             };
             let source = Path::new(&item.path);
             match move_with_conflict_rename(source, &dir) {
-                Ok(_) => report.items_added += 1,
+                Ok(_) => {
+                    report.items_added += 1;
+                    if item.is_dir {
+                        report.folders_moved += 1;
+                    }
+                }
                 Err(err) => report.failures.push(format!("{}：{err}", item.name)),
             }
         }
@@ -2130,9 +2251,32 @@ fn auto_arrange_inner(conn: &Connection, desktop: &Path) -> Result<AutoArrangeRe
     Ok(report)
 }
 
-/// 一键收纳桌面：扫描 → 普通文件按类型移动进 `桌面/Handy整理/<类别>/` → 每类一格。
+/// 布局可用的逻辑宽度。
 ///
-/// **快捷方式与文件夹不动**（用户明确要求快捷方式留在桌面默认位置）。
+/// 优先用挂件窗自身的宽度 —— 格子的 `pos_x` 本来就是**相对挂件窗客户区**的，
+/// 拿显示器宽度去算会在「窗口没铺满屏幕」时把格子推到窗口外面。
+/// 窗口还没建时退回主显示器工作区宽度；都拿不到给 1280。
+fn layout_work_width(app: &AppHandle) -> i64 {
+    if let Some(win) = app.get_webview_window(GRID_LABEL) {
+        if let (Ok(size), Ok(scale)) = (win.inner_size(), win.scale_factor()) {
+            if scale > 0.0 && size.width > 0 {
+                return (f64::from(size.width) / scale).round() as i64;
+            }
+        }
+    }
+    if let Ok(Some(monitor)) = app.primary_monitor() {
+        let scale = monitor.scale_factor();
+        if scale > 0.0 {
+            return (f64::from(monitor.work_area().size.width) / scale).round() as i64;
+        }
+    }
+    1280
+}
+
+/// 一键收纳桌面：扫描 → 文件与文件夹按类型移动进 `桌面/Handy整理/<类别>/` → 每类一格。
+///
+/// **只有快捷方式（`.lnk`）不动**（用户明确要求「原生快捷方式不需要动态整理」）；
+/// 文件夹按用户实测反馈一并收纳（V34：「文件夹的整理根本都不生效」）。
 /// `dir` 仅供测试 / 自定义目录，缺省为用户桌面。
 #[tauri::command]
 pub async fn grid_auto_arrange(
@@ -2144,7 +2288,7 @@ pub async fn grid_auto_arrange(
         _ => desktop_root()?,
     };
     let conn = connect(&app)?;
-    auto_arrange_inner(&conn, &desktop)
+    auto_arrange_inner(&conn, &desktop, layout_work_width(&app))
 }
 
 /// 对账全部收纳格：按磁盘目录补齐新出现的文件、清掉已消失的登记。
@@ -2276,214 +2420,212 @@ fn extract_icon_rgba(path: &str) -> Option<FileIconData> {
 }
 
 /// 提取链本体（调用方需保证本线程已初始化 COM）。
+///
+/// 取图标做成三级，越靠前越像桌面：
+///   ① 系统图像列表 `SHIL_EXTRALARGE` = **48×48** —— 与桌面 / 资源管理器的
+///      「中等图标」同尺寸；
+///   ② 退到 `SHGetFileInfoW` 的 `SHGFI_LARGEICON` = 32×32；
+///   ③ 全失败返回 `None`，由前端回退通用线条图标。
+///
+/// 三级都带 `SHGFI_LINKOVERLAY | SHGFI_ADDOVERLAYS` —— 这是用户那句「整理到格子里
+/// 面的图标样式都变了」的正解：不带叠层标志时拿到的是**基础图标**，`.lnk` 会丢掉
+/// 左下角那个小箭头，于是同一个快捷方式在桌面上和格子里长得不一样。
 #[cfg(target_os = "windows")]
 fn extract_icon_rgba_impl(path: &str) -> Option<FileIconData> {
+    use windows::Win32::UI::WindowsAndMessaging::DestroyIcon;
+
+    let icon = shell_icon_handle(path)?;
+    let result = icon_to_rgba(icon);
+    // SAFETY: icon 是本函数刚取得的 HICON 所有权，用完即销毁
+    unsafe {
+        let _ = DestroyIcon(icon);
+    }
+    result
+}
+
+/// 取一个「跟资源管理器一样」的图标句柄（优先 48×48）。
+#[cfg(target_os = "windows")]
+fn shell_icon_handle(path: &str) -> Option<windows::Win32::UI::WindowsAndMessaging::HICON> {
     use std::os::windows::ffi::OsStrExt;
 
     use windows::core::PCWSTR;
-    use windows::Win32::Graphics::Gdi::{
-        CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, BITMAPINFO, BITMAPINFOHEADER,
-        DIB_RGB_COLORS, HBITMAP,
-    };
     use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL;
     use windows::Win32::UI::Shell::{
-        SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON,
+        SHGetFileInfoW, SHFILEINFOW, SHGFI_ADDOVERLAYS, SHGFI_ICON, SHGFI_LARGEICON,
+        SHGFI_LINKOVERLAY, SHGFI_SYSICONINDEX,
     };
-    use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, ICONINFO};
 
     let wide: Vec<u16> = std::ffi::OsStr::new(path)
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
+
+    // ① 系统大图标列表（48×48）
     let mut sfi = SHFILEINFOW::default();
-    let ok = unsafe {
+    let info_ok = unsafe {
         SHGetFileInfoW(
             PCWSTR(wide.as_ptr()),
             FILE_ATTRIBUTE_NORMAL,
             Some(&mut sfi as *mut SHFILEINFOW as *mut _),
             std::mem::size_of::<SHFILEINFOW>() as u32,
-            SHGFI_ICON | SHGFI_LARGEICON,
+            SHGFI_SYSICONINDEX | SHGFI_LINKOVERLAY | SHGFI_ADDOVERLAYS,
         )
     };
-    if ok == 0 || sfi.hIcon.is_invalid() {
+    if info_ok != 0 {
+        if let Some(icon) = image_list_icon(sfi.iIcon, SHIL_EXTRALARGE) {
+            return Some(icon);
+        }
+    }
+
+    // ② 退到 32×32 大图标（叠层照旧要）
+    let mut fallback = SHFILEINFOW::default();
+    let ok = unsafe {
+        SHGetFileInfoW(
+            PCWSTR(wide.as_ptr()),
+            FILE_ATTRIBUTE_NORMAL,
+            Some(&mut fallback as *mut SHFILEINFOW as *mut _),
+            std::mem::size_of::<SHFILEINFOW>() as u32,
+            SHGFI_ICON | SHGFI_LARGEICON | SHGFI_LINKOVERLAY | SHGFI_ADDOVERLAYS,
+        )
+    };
+    if ok == 0 || fallback.hIcon.is_invalid() {
         return None;
     }
-
-    // 内联小闭包统一清理；返回值经 Option 透传
-    let result: Option<FileIconData> = (|| {
-        unsafe {
-            let mut info = ICONINFO::default();
-            if GetIconInfo(sfi.hIcon, &mut info).is_err() {
-                return None;
-            }
-            let hdc = CreateCompatibleDC(None);
-            if hdc.is_invalid() {
-                let _ = DeleteObject(info.hbmMask).ok();
-                let _ = DeleteObject(info.hbmColor).ok();
-                return None;
-            }
-
-            let read_bitmap = |hbm: HBITMAP, bit_count: u16| -> Option<Vec<u8>> {
-                let mut bmi = BITMAPINFO::default();
-                bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
-                // 第一次调用不取像素，只回填尺寸信息
-                GetDIBits(hdc, hbm, 0, 0, None, &mut bmi, DIB_RGB_COLORS);
-                let w = bmi.bmiHeader.biWidth;
-                if w <= 0 {
-                    return None;
-                }
-                let h = bmi.bmiHeader.biHeight.unsigned_abs();
-                bmi.bmiHeader.biHeight = -bmi.bmiHeader.biHeight; // top-down
-                bmi.bmiHeader.biBitCount = bit_count;
-                bmi.bmiHeader.biCompression = 0u32; // BI_RGB
-                let stride = ((w as usize * bit_count as usize + 31) / 32) * 4;
-                let mut buf = vec![0u8; stride * h as usize];
-                let lines = GetDIBits(
-                    hdc,
-                    hbm,
-                    0,
-                    h,
-                    Some(buf.as_mut_ptr() as *mut _),
-                    &mut bmi,
-                    DIB_RGB_COLORS,
-                );
-                if lines == 0 {
-                    return None;
-                }
-                Some(buf)
-            };
-
-            let color = read_bitmap(info.hbmColor, 32);
-            let mask = if color.is_some() {
-                read_bitmap(info.hbmMask, 1)
-            } else {
-                None
-            };
-            let _ = DeleteDC(hdc).ok();
-            let _ = DeleteObject(info.hbmMask).ok();
-            let _ = DeleteObject(info.hbmColor).ok();
-            let mut color = color?;
-
-            let w = (color.len() / 4).max(1);
-            // GetDIBits 给的是 BGRA 且多为自下而上（biHeight 已取负转 top-down 后即按行序），
-            // 交换 R/B 到 RGBA；全零 alpha（老式无 alpha 通道图标）用掩码位补齐。
-            let all_transparent = color.chunks_exact(4).all(|px| px[3] == 0);
-            for (index, px) in color.chunks_exact_mut(4).enumerate() {
-                px.swap(0, 2);
-                if all_transparent {
-                    let x = index % w;
-                    let byte = mask.as_ref().and_then(|m| m.get(x / 8)).copied().unwrap_or(0);
-                    let opaque = (byte >> (7 - (x % 8))) & 1 == 0; // 0 = 不透明
-                    px[3] = if opaque { 255 } else { 0 };
-                }
-            }
-
-            let side = (w as f64).sqrt().round() as u32;
-            let (width, height) = if w > 0 && side * side == w as u32 {
-                (side, side)
-            } else {
-                (w as u32, 1)
-            };
-            Some(FileIconData {
-                width,
-                height,
-                rgba_base64: b64_encode(&color),
-            })
-        }
-    })();
-
-    unsafe {
-        let _ = DestroyIcon(sfi.hIcon);
-    }
-    result
+    Some(fallback.hIcon)
 }
 
-/// 「系统」格子兜底：桌面图标被隐藏后，「此电脑 / 回收站」也随之消失 ——
-/// 这两个系统入口不该跟着没了。同步时确保存在一个「系统」格子放这两个虚拟路径
-/// （CLSID；打开经 ShellExecute、图标经 SHGetFileInfo 均可正常解析）。
-/// 用户点 × 移除过（dismissed 名单）的不强行塞回。
-fn ensure_system_box(
-    conn: &Connection,
-    dismissed: &std::collections::HashSet<String>,
-) -> Result<(), String> {
-    const SYSTEM_ENTRIES: [(&str, &str); 2] = [
-        ("此电脑", "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}"),
-        ("回收站", "::{645FF040-5081-101B-9F08-00AA002F954E}"),
-    ];
-    let missing: Vec<(&str, &str)> = SYSTEM_ENTRIES
-        .iter()
-        .copied()
-        .filter(|(_, clsid)| !dismissed.contains(*clsid))
-        .filter(|(_, clsid)| {
-            let count: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM grid_items WHERE file_path = ?1",
-                    params![clsid],
-                    |row| row.get(0),
-                )
-                .unwrap_or(0);
-            count == 0
-        })
-        .collect();
-    if missing.is_empty() {
-        return Ok(());
-    }
+/// `SHIL_EXTRALARGE`：系统图像列表里 48×48 的那一档（`SHGetImageList` 的索引值）。
+#[cfg(target_os = "windows")]
+const SHIL_EXTRALARGE: i32 = 2;
 
-    let box_id: i64 = match conn.query_row(
-        "SELECT id FROM grid_boxes WHERE name = '系统' LIMIT 1",
-        [],
-        |row| row.get(0),
-    ) {
-        Ok(id) => id,
-        Err(rusqlite::Error::QueryReturnedNoRows) => {
-            let occupied: i64 = conn
-                .query_row("SELECT COUNT(*) FROM grid_boxes", [], |row| row.get(0))
-                .map_err(|err| format!("统计格子数失败：{err}"))?;
-            let pos_x = ARRANGE_ORIGIN_X + (occupied % ARRANGE_COLUMNS) * ARRANGE_STEP_X;
-            let pos_y = ARRANGE_ORIGIN_Y + (occupied / ARRANGE_COLUMNS) * ARRANGE_STEP_Y;
-            let sort = next_sort(
-                conn,
-                "SELECT COALESCE(MAX(sort) + 1, 0) FROM grid_boxes",
-                None,
-            )?;
-            let now = now_iso();
-            conn.execute(
-                "INSERT INTO grid_boxes \
-                 (name, kind, pos_x, pos_y, width, height, sort, created_at, updated_at) \
-                 VALUES ('系统', 'system', ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![pos_x, pos_y, ARRANGE_BOX_W, ARRANGE_BOX_H, sort, now, now],
-            )
-            .map_err(|err| format!("创建系统格子失败：{err}"))?;
-            conn.last_insert_rowid()
+/// 从系统图像列表取出第 `index` 个图标。
+///
+/// 为什么要绕这一道：`SHGetFileInfoW` 只给 32×32（`SHGFI_LARGEICON`）；要拿到桌面
+/// 「中等图标」那种 48×48，只能进系统图像列表取。
+///
+/// windows-rs 0.58 把 `SHGetImageList` 包成了泛型返回（`Result<T>`），不再需要手写
+/// IID —— 这里显式标注 `IImageList` 让类型推导落地。系统图像列表是进程内共享对象，
+/// `SHGetImageList` 已加过引用计数，由 `IImageList` 自身负责释放，不泄漏。
+///
+/// 另注：0.58 的 `IImageList::GetIcon(i, flags) -> Result<HICON>` 是**返回值**式签名
+/// （老版本是 `&mut HICON` 出参），`flags` 要裸 `u32`，所以 `ILD_TRANSPARENT` 取 `.0`。
+#[cfg(target_os = "windows")]
+fn image_list_icon(index: i32, size: i32) -> Option<windows::Win32::UI::WindowsAndMessaging::HICON> {
+    use windows::Win32::UI::Controls::{IImageList, ILD_TRANSPARENT};
+    use windows::Win32::UI::Shell::SHGetImageList;
+
+    // SAFETY: 系统图像列表由 shell 维护、进程内共享；取出的 HICON 归调用方所有。
+    unsafe {
+        let list: IImageList = match SHGetImageList(size) {
+            Ok(value) => value,
+            Err(_) => return None,
+        };
+        match list.GetIcon(index, ILD_TRANSPARENT.0) {
+            Ok(icon) if !icon.is_invalid() => Some(icon),
+            _ => None,
         }
-        Err(err) => return Err(format!("查询系统格子失败：{err}")),
-    };
-
-    let mut item_sort = next_sort(
-        conn,
-        "SELECT COALESCE(MAX(sort) + 1, 0) FROM grid_items WHERE box_id = ?1",
-        Some(box_id),
-    )?;
-    let created = now_iso();
-    for (name, clsid) in missing {
-        conn.execute(
-            "INSERT INTO grid_items (box_id, file_path, display_name, sort, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![box_id, clsid, name, item_sort, created],
-        )
-        .map_err(|err| format!("登记系统条目「{name}」失败：{err}"))?;
-        item_sort += 1;
     }
-    Ok(())
+}
+
+/// `HICON` → RGBA 像素（统一处理 alpha 通道与 BGRA→RGBA 换序）。
+#[cfg(target_os = "windows")]
+fn icon_to_rgba(hicon: windows::Win32::UI::WindowsAndMessaging::HICON) -> Option<FileIconData> {
+    use windows::Win32::Graphics::Gdi::{
+        CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, BITMAPINFO, BITMAPINFOHEADER,
+        DIB_RGB_COLORS, HBITMAP,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{GetIconInfo, ICONINFO};
+
+    unsafe {
+        let mut info = ICONINFO::default();
+        if GetIconInfo(hicon, &mut info).is_err() {
+            return None;
+        }
+        let hdc = CreateCompatibleDC(None);
+        if hdc.is_invalid() {
+            let _ = DeleteObject(info.hbmMask).ok();
+            let _ = DeleteObject(info.hbmColor).ok();
+            return None;
+        }
+
+        let read_bitmap = |hbm: HBITMAP, bit_count: u16| -> Option<Vec<u8>> {
+            let mut bmi = BITMAPINFO::default();
+            bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+            // 第一次调用不取像素，只回填尺寸信息
+            GetDIBits(hdc, hbm, 0, 0, None, &mut bmi, DIB_RGB_COLORS);
+            let w = bmi.bmiHeader.biWidth;
+            if w <= 0 {
+                return None;
+            }
+            let h = bmi.bmiHeader.biHeight.unsigned_abs();
+            bmi.bmiHeader.biHeight = -bmi.bmiHeader.biHeight; // top-down
+            bmi.bmiHeader.biBitCount = bit_count;
+            bmi.bmiHeader.biCompression = 0u32; // BI_RGB
+            let stride = ((w as usize * bit_count as usize + 31) / 32) * 4;
+            let mut buf = vec![0u8; stride * h as usize];
+            let lines = GetDIBits(
+                hdc,
+                hbm,
+                0,
+                h,
+                Some(buf.as_mut_ptr() as *mut _),
+                &mut bmi,
+                DIB_RGB_COLORS,
+            );
+            if lines == 0 {
+                return None;
+            }
+            Some(buf)
+        };
+
+        let color = read_bitmap(info.hbmColor, 32);
+        let mask = if color.is_some() {
+            read_bitmap(info.hbmMask, 1)
+        } else {
+            None
+        };
+        let _ = DeleteDC(hdc).ok();
+        let _ = DeleteObject(info.hbmMask).ok();
+        let _ = DeleteObject(info.hbmColor).ok();
+        let mut color = color?;
+
+        let w = (color.len() / 4).max(1);
+        // GetDIBits 给的是 BGRA 且多为自下而上（biHeight 已取负转 top-down 后即按行序），
+        // 交换 R/B 到 RGBA；全零 alpha（老式无 alpha 通道图标）用掩码位补齐。
+        let all_transparent = color.chunks_exact(4).all(|px| px[3] == 0);
+        for (index, px) in color.chunks_exact_mut(4).enumerate() {
+            px.swap(0, 2);
+            if all_transparent {
+                let x = index % w;
+                let byte = mask.as_ref().and_then(|m| m.get(x / 8)).copied().unwrap_or(0);
+                let opaque = (byte >> (7 - (x % 8))) & 1 == 0; // 0 = 不透明
+                px[3] = if opaque { 255 } else { 0 };
+            }
+        }
+
+        let side = (w as f64).sqrt().round() as u32;
+        let (width, height) = if w > 0 && side * side == w as u32 {
+            (side, side)
+        } else {
+            (w as u32, 1)
+        };
+        Some(FileIconData {
+            width,
+            height,
+            rgba_base64: b64_encode(&color),
+        })
+    }
 }
 
 /// 桌面同步 —— 格子层的数据引擎（前端周期调用）：**只对账，不收录**。
 ///
 /// V33 起这里不再「自动把桌面文件收进格子」—— 那正是用户抱怨「和桌面原图标
-/// 完全重复、像复制了一份」的来源。现在只做两件事：
-///   1. 按磁盘目录对账每个收纳格（用户在资源管理器里手工放进格子的文件会补登记，
-///      被移走 / 删除的会清掉登记）；
-///   2. 兜底建「系统」格子（此电脑 · 回收站入口）。
+/// 完全重复、像复制了一份」的来源。现在只做一件事：按磁盘目录对账每个收纳格 ——
+/// 用户在资源管理器里手工放进格子的文件会补登记，被移走 / 删除的会清掉登记。
+///
+/// V34 去掉了「兜底建系统格子」。此电脑 / 回收站是 Explorer **恒定显示**的桌面
+/// 入口，不受任何桌面工具控制，格子里那份纯属重复（用户截图里两个「我的电脑」
+/// 并排）；用户明确说「系统这个不需要」。已存在的系统格由迁移 v7 清掉。
 ///
 /// 想批量收纳桌面文件，走显式的「一键收纳」（`grid_auto_arrange`），它**真移动**文件。
 #[tauri::command]
@@ -2491,9 +2633,11 @@ pub async fn grid_desktop_sync(app: AppHandle) -> Result<DesktopSyncReport, Stri
     let root = storage_root()?;
     let conn = connect(&app)?;
     let (boxes, added, pruned) = reconcile_all_boxes(&conn, &root)?;
-    let dismissed = read_dismissed(&conn)?;
-    ensure_system_box(&conn, &dismissed)?;
-    Ok(DesktopSyncReport { boxes, items_added: added, pruned })
+    Ok(DesktopSyncReport {
+        boxes,
+        items_added: added,
+        pruned,
+    })
 }
 
 /// 布局文件里的单条引用。

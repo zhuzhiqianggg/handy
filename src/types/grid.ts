@@ -108,19 +108,21 @@ export interface DesktopSyncReport {
   pruned: number;
 }
 
-/** 一键收纳结果摘要（`grid_auto_arrange` 返回）：真的移动了文件 */
+/** 一键收纳结果摘要（`grid_auto_arrange` 返回）：真的移动了文件和文件夹 */
 export interface AutoArrangeReport {
   /** 桌面根目录扫描到的可见条目数（含快捷方式 / 文件夹） */
   scanned: number;
-  /** 本次真正移动进收纳目录的普通文件数 */
+  /** 本次真正移动进收纳目录的条目数（文件 + 文件夹） */
   itemsAdded: number;
+  /** 其中文件夹占的数量（V34 起文件夹也纳入收纳） */
+  foldersMoved: number;
   /** 本次新建的格子数 */
   boxesCreated: number;
   /** 复用了同名已有格子的次数 */
   boxesReused: number;
-  /** 按设计跳过的条目数（快捷方式 / 文件夹一律不动） */
+  /** 按设计跳过的条目数（只剩快捷方式 .lnk —— 用户要求留在桌面原位） */
   skipped: number;
-  /** 单文件失败原因（不中断整批） */
+  /** 单条目失败原因（不中断整批） */
   failures: string[];
 }
 

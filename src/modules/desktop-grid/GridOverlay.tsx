@@ -71,11 +71,25 @@ function isDirectoryPath(path: string): boolean {
 
 // —— 系统真实图标（接管桌面的观感关键：和资源管理器一致，一眼认出「这是我的文件」） ——
 
-/** 图标缓存（路径 → dataURL）：挂件窗独立 JS 环境，模块级即可；失败也缓存空串避免反复请求 */
-const iconCache = new Map<string, string>();
-const iconPending = new Map<string, Promise<string | null>>();
+/** 一条图标缓存：dataURL + 原始像素尺寸（尺寸跟着系统图标走，不在前端硬编码缩放） */
+interface IconEntry {
+  url: string;
+  size: number;
+}
 
-async function loadIconDataUrl(path: string): Promise<string | null> {
+/** 图标缓存（路径 → 图标）：挂件窗独立 JS 环境，模块级即可 */
+const iconCache = new Map<string, IconEntry>();
+const iconPending = new Map<string, Promise<IconEntry | null>>();
+
+/**
+ * 取系统真实图标并转成 dataURL。
+ *
+ * V34（用户反馈「整理到格子里面的图标样式都变了」）：Rust 侧改为取**带快捷方式
+ * 箭头叠层**的 48px 大图标（`SHGetImageList` 的 `SHIL_EXTRALARGE`）—— 之前取的是
+ * 无箭头的 32px 基础图标，于是 `.lnk` 在格子里「长得不像快捷方式」，
+ * 和桌面/资源管理器里的样子对不上。这里也不再写死 `h-8 w-8`，按真实尺寸渲染。
+ */
+async function loadIcon(path: string): Promise<IconEntry | null> {
   try {
     const data = await ipc.gridFileIcon(path);
     if (!data || data.width <= 0 || data.height <= 0) {
@@ -94,7 +108,7 @@ async function loadIconDataUrl(path: string): Promise<string | null> {
       0,
       0,
     );
-    return canvas.toDataURL('image/png');
+    return { url: canvas.toDataURL('image/png'), size: data.width };
   } catch {
     return null;
   }
@@ -102,13 +116,13 @@ async function loadIconDataUrl(path: string): Promise<string | null> {
 
 /** 条目图标：优先系统真实图标，加载失败回退通用线条图标 */
 function FileIcon({ path }: { path: string }): React.JSX.Element {
-  const [url, setUrl] = useState<string | null>(() => iconCache.get(path) ?? null);
+  const [icon, setIcon] = useState<IconEntry | null>(() => iconCache.get(path) ?? null);
   useEffect(() => {
-    if (url !== null) {
+    if (icon !== null) {
       return;
     }
     let cancelled = false;
-    const pending = iconPending.get(path) ?? loadIconDataUrl(path);
+    const pending = iconPending.get(path) ?? loadIcon(path);
     iconPending.set(path, pending);
     void pending
       .then((data) => {
@@ -116,7 +130,7 @@ function FileIcon({ path }: { path: string }): React.JSX.Element {
           iconCache.set(path, data);
         }
         if (!cancelled && data !== null) {
-          setUrl(data);
+          setIcon(data);
         }
       })
       .finally(() => {
@@ -125,16 +139,15 @@ function FileIcon({ path }: { path: string }): React.JSX.Element {
     return () => {
       cancelled = true;
     };
-  }, [path, url]);
-  if (url !== null) {
+  }, [path, icon]);
+  if (icon !== null) {
     return (
       <img
-        src={url}
+        src={icon.url}
         alt=""
-        width={32}
-        height={32}
         draggable={false}
-        className="h-8 w-8 object-contain"
+        style={{ width: icon.size, height: icon.size }}
+        className="shrink-0 object-contain [filter:drop-shadow(0_1px_2px_rgba(0,0,0,0.55))]"
       />
     );
   }
@@ -344,8 +357,22 @@ export function GridOverlay(): React.JSX.Element {
 
   // —— 命中区域上报：Rust 光标轮询据此切换「穿透 ↔ 可交互」 ——
 
+  /**
+   * 桌面上真正要画的格子。
+   *
+   * V34（用户要求「整理的时候只展示分类下面有东西的格子」）：**空的收纳格不在桌面
+   * 上占位** —— 一个空框浮在壁纸上只会挡视线、看着也乱。
+   *
+   * 但空格子并没有消失：解锁布局（编辑态）后它们全部显形，可以往里拖文件、重命名、
+   * 删除；平时它们在管理页里照旧可管。一旦有内容就自动出现在桌面上。
+   * 挂件（便签 / 日历）与内容无关，任何模式下都展示。
+   */
+  const visibleBoxes = boxes.filter(
+    (box) => box.kind !== 'folder' || editMode || (items[box.id]?.length ?? 0) > 0,
+  );
+
   /** 区域键（几何或缩放变化才重新上报，避免 mousemove 高频 invoke） */
-  const regionsKey = `${boxes
+  const regionsKey = `${visibleBoxes
     .map((b) => `${b.id}:${b.posX},${b.posY},${b.width},${b.height}`)
     .join('|')}|sf=${scaleFactor}`;
 
@@ -353,7 +380,7 @@ export function GridOverlay(): React.JSX.Element {
     if (!isTauri()) {
       return;
     }
-    const regions: GridRegion[] = boxes.map((box) => ({
+    const regions: GridRegion[] = visibleBoxes.map((box) => ({
       x: box.posX * scaleFactor,
       y: box.posY * scaleFactor,
       width: box.width * scaleFactor,
@@ -776,8 +803,8 @@ export function GridOverlay(): React.JSX.Element {
       .gridBoxUpsert({
         name: `新格子 ${count + 1}`,
         kind: 'folder',
-        posX: 80 + (count % 5) * 36,
-        posY: 80 + (count % 7) * 30,
+        // 不指定落点 → 由 Rust 按「靠右自动流」算（与一键收纳共用同一套排布）：
+        // 新格子永远出现在眼睛习惯的右侧，且不会叠在已有格子上
         width: 320,
         height: 220,
       })
@@ -789,9 +816,23 @@ export function GridOverlay(): React.JSX.Element {
       .catch((error: Error) => showHint(error.message));
   }, [showHint]);
 
-  /** 新建挂件（便签 / 日历）—— 桌面上直接可用的轻量小组件 */
+  /**
+   * 新建挂件（便签 / 日历）—— 桌面上直接可用的轻量小组件。
+   *
+   * V34（用户要求「日历挂件只有一个，不要点一次就能无限加一堆个」「便签也一个吧」）：
+   * 改为**同类型只允许一个**。再点就把用户引到已有的那一个上，不再新建。
+   */
   const addWidget = useCallback(
     (kind: 'note' | 'calendar'): void => {
+      const existing = boxesRef.current.find((box) => box.kind === kind);
+      if (existing) {
+        showHint(
+          kind === 'note'
+            ? '便签已经有一个了，直接用它就好'
+            : '日历挂件已经有一个了，直接用它就好',
+        );
+        return;
+      }
       const count = boxesRef.current.length;
       const preset =
         kind === 'note'
@@ -858,10 +899,17 @@ export function GridOverlay(): React.JSX.Element {
 
   // —— 渲染 ——
 
+  /**
+   * 挂件唯一性（用户要求「日历挂件只有一个」「便签也一个吧」）：
+   * 已经有一个就把对应按钮置灰，而不是点了才弹提示。
+   */
+  const hasNote = boxes.some((box) => box.kind === 'note');
+  const hasCalendar = boxes.some((box) => box.kind === 'calendar');
+
   return (
     <div className="fixed inset-0 select-none overflow-hidden" style={{ pointerEvents: 'none' }}>
       {/* 盒子画布：每个盒子自身恢复指针事件（外层穿透不继承） */}
-      {boxes.map((box) => {
+      {visibleBoxes.map((box) => {
         const boxItems = items[box.id] ?? [];
         const isDropTarget = dropTargetId === box.id;
         const isWidget = box.kind === 'note' || box.kind === 'calendar';
@@ -875,11 +923,22 @@ export function GridOverlay(): React.JSX.Element {
               height: box.height,
               pointerEvents: 'auto',
             }}
-            className={`absolute flex flex-col overflow-hidden rounded-xl text-neutral-100 transition-shadow ${
+            /* 观感目标（用户原话）：「桌面就是一个大容器，格子就是大容器里面的小容器，
+               自然嵌入在桌面上」「像在壁纸上画了一张图」。
+               手法 = 极低透明度的磨砂 + 淡淡的描边 + 大圆角 + 柔和外阴影，
+               而不是实心深色卡片；只有解锁（编辑态）时描边才变明显，
+               好让你找得到可拖拽的边界。 */
+            className={`absolute flex flex-col overflow-hidden rounded-2xl text-neutral-100 ${
               editMode
-                ? 'border border-white/15 bg-neutral-900/55 shadow-xl ring-1 ring-sky-400/60 backdrop-blur-md'
-                : 'border border-white/5 bg-neutral-900/20 shadow-sm'
-            } ${isDropTarget ? 'ring-2 ring-sky-300' : ''}`}
+                ? 'border border-dashed bg-white/[0.07] backdrop-blur-md'
+                : 'border bg-white/[0.045] shadow-[0_2px_18px_rgba(0,0,0,0.16)] backdrop-blur-[3px]'
+            } ${
+              isDropTarget
+                ? 'border-sky-300/80 bg-sky-400/10'
+                : editMode
+                  ? 'border-sky-300/40'
+                  : 'border-white/10'
+            }`}
             onDragOver={(event) => {
               // 内部条目拖拽：允许作为放点（系统文件拖放走 webview 级事件，不经过这里）
               if (itemDragRef.current !== null) {
@@ -971,10 +1030,12 @@ export function GridOverlay(): React.JSX.Element {
                 <CalendarWidget />
               </div>
             ) : (
-              /* 收纳格条目网格：双击打开原文件；悬停把文件移出格子（回桌面） */
+              /* 收纳格条目网格：双击打开原文件；悬停把文件移出格子（回桌面）。
+                 列宽 84px 是跟着 48px 系统图标定的 —— 桌面/资源管理器用的就是
+                 48px 大图标，格子里的图标要和它看起来是同一个东西。 */
               <div
                 className="grid min-h-0 flex-1 content-start gap-1 overflow-y-auto p-2"
-                style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(72px, 1fr))' }}
+                style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(84px, 1fr))' }}
               >
               {addingBoxId === box.id ? (
                 <div className="col-span-full flex items-center gap-1">
@@ -1051,6 +1112,19 @@ export function GridOverlay(): React.JSX.Element {
         );
       })}
 
+      {/* 格子都在、但都是空的 → 桌面上会一片空白。必须给个交代，
+          否则用户会以为「格子又莫名消失了」。 */}
+      {boxes.length > 0 && visibleBoxes.length === 0 && (
+        <div
+          style={{ pointerEvents: 'auto' }}
+          className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-xl bg-neutral-900/70 px-4 py-3 text-center text-xs leading-relaxed text-neutral-200 shadow-lg backdrop-blur"
+        >
+          {boxes.length} 个格子还是空的，就先不在桌面上占位了
+          <br />
+          <span className="opacity-70">点右下角解锁图标即可看到它们，或先往里放文件</span>
+        </div>
+      )}
+
       {/* 空态引导：卡片自身可交互（已纳入命中区域），可直接创建第一个盒子 */}
       {boxes.length === 0 && (
         <div
@@ -1119,7 +1193,7 @@ export function GridOverlay(): React.JSX.Element {
         <button
           type="button"
           onClick={addBox}
-          title="添加盒子"
+          title="添加收纳格"
           className="rounded-full p-1.5 text-neutral-200 transition hover:bg-white/10"
         >
           <Plus className="h-4 w-4" />
@@ -1127,16 +1201,22 @@ export function GridOverlay(): React.JSX.Element {
         <button
           type="button"
           onClick={() => addWidget('note')}
-          title="添加便签挂件（自动保存）"
-          className="rounded-full p-1.5 text-neutral-200 transition hover:bg-white/10"
+          disabled={hasNote}
+          title={hasNote ? '便签已经有一个了' : '添加便签挂件（Markdown 边写边渲染，自动保存）'}
+          className="rounded-full p-1.5 text-neutral-200 transition hover:bg-white/10 disabled:opacity-30 disabled:hover:bg-transparent"
         >
           <StickyNote className="h-4 w-4" />
         </button>
         <button
           type="button"
           onClick={() => addWidget('calendar')}
-          title="添加日历挂件（含今日计划，与工作台共用数据）"
-          className="rounded-full p-1.5 text-neutral-200 transition hover:bg-white/10"
+          disabled={hasCalendar}
+          title={
+            hasCalendar
+              ? '日历挂件已经有一个了'
+              : '添加日历挂件（农历 · 节气 · 节假日，点某天加计划，与工作台共用数据）'
+          }
+          className="rounded-full p-1.5 text-neutral-200 transition hover:bg-white/10 disabled:opacity-30 disabled:hover:bg-transparent"
         >
           <CalendarDays className="h-4 w-4" />
         </button>

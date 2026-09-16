@@ -142,12 +142,11 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
   const addBox = useCallback((): void => {
     setBusy(true);
     void ipc
-      // 显式给出级联位置：多个新格子依次错开，不会叠在同一处
+      // 不指定落点 → 由 Rust 按「靠右自动流」算（与一键收纳共用同一套排布），
+      // 多个新格子依次往左推进，不会叠在同一处
       .gridBoxUpsert({
         name: `新格子 ${boxes.length + 1}`,
         kind: 'folder',
-        posX: 40 + (boxes.length % 3) * 344,
-        posY: 40 + Math.floor(boxes.length / 3) * 268,
         width: 320,
         height: 244,
       })
@@ -163,9 +162,19 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
       .finally(() => setBusy(false));
   }, [refresh, boxes.length, overlayVisible]);
 
-  /** 新建挂件（便签 / 日历 + 今日计划） */
+  /** 新建挂件（便签 / 日历 + 今日计划）—— **同类型全桌面只允许一个** */
   const addWidget = useCallback(
     (kind: 'note' | 'calendar'): void => {
+      // V34（用户要求「日历挂件只有一个不要点一次就能无限加一堆个」「便签也一个吧」）：
+      // 之前每点一次就多一个，桌面上很快堆满同款挂件。改为幂等——
+      // 已经有就直接把用户引到那一个上，不再新建。
+      const existing = boxes.find((box) => box.kind === kind);
+      if (existing) {
+        toast.info(kind === 'note' ? '便签已经有一个了' : '日历挂件已经有一个了', {
+          description: `直接在桌面上用「${existing.name}」就行；想重来可以先删掉它`,
+        });
+        return;
+      }
       setBusy(true);
       const preset =
         kind === 'note'
@@ -195,17 +204,21 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
   );
 
   /**
-   * 一键收纳：扫描桌面 → 普通文件按类型**移动**进 `桌面/Handy整理/<类别>/`。
+   * 一键收纳：扫描桌面 → 文件与文件夹按类型**移动**进 `桌面/Handy整理/<类别>/`。
    *
-   * 这是**真的移动文件**（V33 起），所以必须先二次确认；快捷方式与文件夹不动。
+   * 这是**真的移动文件**（V33 起），所以必须先二次确认。
+   * V34 修正：文件夹也纳入收纳 —— 用户实测「文件夹的整理根本都不生效」，
+   * 根因就是这里把 `is_dir` 整个跳过了，「文件夹」格于是永远是空的。
+   * 现在只有快捷方式（.lnk）保持不动（用户明确要求「原生快捷方式不需要动态整理」）。
    */
   const autoArrange = useCallback((): void => {
     const ok = window.confirm(
       '一键收纳桌面？\n\n' +
-        '会把桌面上的普通文件按类型移动到「桌面/Handy整理/<类别>/」，' +
+        '会把桌面上的文件和文件夹按类型移动到「桌面/Handy整理/<类别>/」，' +
         '每个类别对应一个收纳格。\n\n' +
-        '· 快捷方式（.lnk）与文件夹保持不动，留在桌面原位；\n' +
-        '· 同名文件绝不覆盖（自动改名为 name (2).ext）；\n' +
+        '· 只有快捷方式（.lnk）保持不动，留在桌面原位；\n' +
+        '· 文件夹会整体移进「文件夹」格（内容一起搬走，不会丢）；\n' +
+        '· 同名绝不覆盖（自动改名为 name (2).ext）；\n' +
         '· 收纳后桌面图标不再重复显示这些文件；\n' +
         '· 想还原：在格子里点条目右上角的 × 即可把文件移回桌面。\n\n' +
         '确定继续？',
@@ -225,13 +238,14 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
         }
         if (report.itemsAdded === 0) {
           toast.info('没有需要收纳的文件', {
-            description: `扫描到 ${report.scanned} 项，其中快捷方式 / 文件夹 ${report.skipped} 项按设计不动`,
+            description: `扫描到 ${report.scanned} 项，其中快捷方式 ${report.skipped} 项按设计不动`,
           });
           return;
         }
         const created = report.boxesCreated > 0 ? `新建 ${report.boxesCreated} 个收纳格、` : '';
-        toast.success(`已收纳 ${report.itemsAdded} 个文件`, {
-          description: `${created}移动进 桌面/Handy整理/ 下；快捷方式与文件夹保持原位`,
+        const folders = report.foldersMoved > 0 ? `（含 ${report.foldersMoved} 个文件夹）` : '';
+        toast.success(`已收纳 ${report.itemsAdded} 个条目${folders}`, {
+          description: `${created}移动进 桌面/Handy整理/ 下；快捷方式保持原位`,
         });
         if (report.failures.length > 0) {
           toast.warning(`${report.failures.length} 个文件没能收纳`, {
@@ -436,8 +450,9 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
               「备份布局」记下当前摆法，随时能「还原」回来。
             </p>
             <p className="text-foreground">
-              桌面挂件：便签随手记（自动保存）、日历挂件带今日计划（与工作台共用同一份
-              待办数据，桌面勾完工作台同步）。
+              桌面挂件：便签支持 Markdown 边写边渲染（自动保存）、日历挂件带农历 · 节气 ·
+              节假日与每日计划（与工作台共用同一份待办数据，桌面勾完工作台同步）。
+              便签与日历各只能有一个。
             </p>
             {fault && (
               <p className="rounded bg-red-500/10 px-2 py-1 text-[11px] text-red-600 dark:text-red-400">
@@ -527,9 +542,9 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
           <div className="py-14 text-center">
             <p className="text-sm font-medium text-foreground">还没有格子</p>
               <p className="mx-auto mt-1 max-w-md text-xs leading-relaxed text-muted-foreground">
-                点「一键收纳桌面」把桌面上的普通文件按类型移动进 桌面/Handy整理/ 并各建一个格子
-                （快捷方式与文件夹不动）；也可以点「新建格子」自己摆，
-                或加一个便签 / 日历挂件。显示格子后把文件拖进格子即收纳。
+                点「一键收纳桌面」把桌面上的文件和文件夹按类型移动进 桌面/Handy整理/
+                并各建一个格子（只有快捷方式留在原位）；也可以点「新建格子」自己摆，
+                或加一个便签 / 日历挂件（各限一个）。显示格子后把文件拖进格子即收纳。
               </p>
               <div className="mt-4 flex justify-center gap-2">
                 <Button size="sm" onClick={autoArrange} disabled={arranging}>
@@ -545,7 +560,7 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
         ) : (
           <>
             <p className="mb-2 text-xs text-muted-foreground">
-              共 {boxes.length} 个格子 · {totalItems} 个图标引用
+              共 {boxes.length} 个格子 · {totalItems} 个条目
             </p>
             <div className="overflow-hidden rounded-xl border border-border">
               <table className="w-full text-sm">

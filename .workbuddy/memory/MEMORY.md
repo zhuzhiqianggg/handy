@@ -27,26 +27,31 @@
 | 自检三件套 | `scripts/audit/tool-audit.mjs`（静态）/ `layout-audit.mjs`（几何）/ `sample-smoke.mjs`（真点示例） |
 | 回归 | `scripts/regression/run.mjs` + `test-*.mjs`；`scripts/new-tool.mjs` 脚手架 |
 
-## 3. 状态快照（2026-09-16 · V33 已交付、已提交、已打包装机）
+## 3. 状态快照（2026-09-17 00:20 · V34 已交付、已打包装机，**待提交**）
 
-- Phase 1（MVP）功能全部交付；**最近一次打包是 V33**（nsis 4.30 MB / msi 5.28 MB / handy.exe 10.60 MB，
-  23:25 产出），**已静默安装到用户机**（`%LOCALAPPDATA%\Handy\handy.exe`，NSIS currentUser，`/S`）。
+- Phase 1（MVP）功能全部交付；**最近一次打包是 V34**（nsis 4,302,332 B / msi 5,537,792 B /
+  handy.exe 11,121,664 B，09-17 00:15 产出），**已静默安装到用户机**
+  （`%LOCALAPPDATA%\Handy\handy.exe`，NSIS currentUser，`/S`）。
   一键脚本 `bash scripts/build-release.sh`（tsc → 回归 → 清 dist → vite → tauri → 取证 → `/S` 装机 → 启动核验）。
+  本轮用 `--no-deploy --skip-tsc --skip-regression`（tsc/回归刚单独跑绿）+ **手工装机取证，且刻意不代为启动**。
   **唯一阻塞项 = 用户装机验收 GUI**（窗口/托盘/透明/桌面挂载/拖放/真实文件移动，沙箱验不了）。
 - ⚠️ **2026-09-16 起 agent 会话已启动不了本应用**：新旧版本一律挂死在启动早期（内存恒 26–39 MB、CPU 冻结、
   库一个字节不写）。已用「09-14 的旧产物做对照」证明**不是代码回归**（PROJECT_STATUS §1.19.2 / CONVENTIONS §13.5）。
-  **所以「打包 + 静默安装」只做到装完为止，启动必须交给用户**。
+  **所以「打包 + 静默安装」只做到装完为止，启动必须交给用户；V34 起也不再代为启动**（会留僵尸进程，
+  单实例插件会把用户自己那次启动引到僵尸上，反而「点了没反应」）。
 - 工具箱 **25 个命令 / 6 分类**（text · data · encode · convert · generate · dev；V27 新增 `api-tester` 接口测试）；
   **模块目录 4 个**：toolbox / notes / vault / desktop-organizer（workstation、todos、desktop-grid、settings
   是**视图/独立窗口**，不是模块 —— 别再去找 `?module=workstation`）。
 - **桌面格子 V33 起是「真实收纳」**：格子 = 真目录 `桌面/Handy整理/<格名>/`，拖入 = 真 `fs::rename`；
-  **默认不自动收纳**，`.lnk` 与文件夹原地不动。旧的「只登记引用」模型（V25–V32）**已作废**，别再按它理解。
+  **默认不自动收纳**；**V34 起文件夹也纳入收纳，只有 `.lnk` 原地不动**（用户：原生快捷方式不动态整理）。
+  旧的「只登记引用」模型（V25–V32）**已作废**，别再按它理解。
 - **独立窗口 6 个**：main / note / settings / organizer / grid-overlay / workstation-bar（桌面顶部常驻贴条）。
 - **DB 迁移链**：v1 → v2 去剪贴板表 → v3 vault → v4 grid → v5 `todos.detail` → **v6 grid 挂件**
-  （`grid_boxes.kind/content` + 把「系统」格子标 `system`）。**v6 尚未在真实库生效**（应用没跑到 `db::init`），
-  由用户首次启动时自动应用；已由 `cargo test --lib db::migrations` 3 条断言守住。
+  （`grid_boxes.kind/content` + 把「系统」格子标 `system`）→ **v7 删掉「系统」格子及其登记行**（V34）。
+  **v6/v7 尚未在真实库生效**（应用没跑到 `db::init`），由用户首次启动时顺次自动应用；
+  已由 `cargo test --lib db::migrations` 3 条断言守住。
 - 批次明细与提交号 → PROJECT_STATUS §1（最近提交 `git log --oneline -6`）。
-  **V33 `eeed5f9`**；V28 `bc05a8c`；V27 `f7e825f`+`4268257`；V26 `2969256`+`43a8a06`；V25 `5f8fe8a`+`3001510`。
+  **V34**（见 §3.2）；V33 `eeed5f9`；V28 `bc05a8c`；V27 `f7e825f`+`4268257`；V26 `2969256`+`43a8a06`；V25 `5f8fe8a`+`3001510`。
 
 ### 3.1 V25–V27 事实源（细节见 PROJECT_STATUS §1.11–§1.13 与日志）
 
@@ -60,7 +65,7 @@
   `jsonLocate` 与 V8 差分 0 分歧、误导报错改准确；回归 **17 套 / 1778 条**、冒烟 28 用例 / 25 工具、
   工具自检 325 PASS。
 
-### 3.2 V30–V33 事实源（桌面格子这条线的关键转折，别再按旧结论推理）
+### 3.2 V30–V34 事实源（桌面格子这条线的关键转折，别再按旧结论推理）
 
 - **V30**：格子层开始「接管桌面」（自动隐藏系统图标 + 每 5s `grid_desktop_sync` **自动收录**桌面文件）。
 - **V31**：`grid_item_move` + HTML5 跨格拖拽；`grid_meta/overlay_visible` + `restore_overlay_if_visible`
@@ -71,6 +76,16 @@
   Z 序去抖 `REASSERT_TICKS` 33→250 且连续 2 次不匹配才动手；③ `grid-overlay-status` 唯一事实源 + 2s 轮询；
   ④ 挂件体系（`kind`: folder/note/calendar/system；便签 + 日历·计划复用 `todos` 表）；⑤ 迁移 v6；
   ⑥ 新增 `cargo test --lib db::migrations`（迁移此前零断言）。方法论沉淀 **CONVENTIONS.md §13**。
+- **V34**：① ★ **Z 序根因** —— `show_overlay` 里 `apply_attach` 与 `show()` 顺序写反（`show()` 会提拔
+  到 Z 序顶层，把刚贴好的桌面层级顶掉）⇒ 用户两条相反抱怨（「盖在我窗口上面」/「点别处就消失」）
+  **是同一条链**，修法是 `show()` 在前、`apply_attach()` 最后；② 驻留：窗口不在但状态是显示中 →
+  自动重建（30s 冷却），`REASSERT_TICKS` 250→**40**（约 2.4s，错位 5 秒内纠正）；
+  ③ **靠右自动流布局** `arrange_position`（右边缘起、往左推列）；④ 便签改用 `RichMarkdown` 所见即所得；
+  ⑤ 日历挂件复用 `lib/lunar|holidays|planUtils` **与工作台逐项一致** + 点某天加计划 + 悬停 tooltip；
+  ⑥ **取消系统格**（`ensure_system_box` 删除 + 迁移 v7）治「两个我的电脑」；
+  ⑦ 图标改 `SHGetImageList(SHIL_EXTRALARGE)` 48×48 + `.lnk` 叠层（48 而非 32 才对得上桌面「中等图标」）；
+  ⑧ 文件夹纳入收纳（原 `if item.is_dir { continue }` 整类跳过）；⑨ 空格子不占桌面 + 挂件各限一个 + 柔光无边框。
+  方法论沉淀 **CONVENTIONS.md §14**。
 
 ## 4. 协作与操作约定
 
@@ -81,23 +96,33 @@
   ⚠️ **2026-09-16 起启动这一步 agent 做不到**（新旧版本一律挂死，见 §5）→ **改为「装完即止 + 请用户自己启动」**，
   在回复里明确告知，别谎报「已启动、进程存活」（任务管理器里确实有进程，但窗口起不来）。
 - **装机取证优先用「哈希比对」而不是 mtime**（V33 立）：把安装后的
-  `%LOCALAPPDATA%\Handy\handy.exe` 与 `src-tauri/target/release/handy.exe` 逐字节比 ——
+  `%LOCALAPPDATA%\Handy\handy.exe` 与 `src-tauri/target/release/handy.exe` 逐字节比（`cmp -l`）——
   只应差 **3 个字节**（Tauri 打包标记 `__TAURI_BUNDLE_TYPE_VAR_UNK` → `..._NSS`）。mtime 只能证明
   「变新了」，证明不了「是这一版」。
+- **V34 起装机走法固定**：`build-release.sh --no-deploy`（只构建；tsc/回归刚单独跑绿时可加
+  `--skip-tsc --skip-regression` 省 3 分钟）→ 手工 `taskkill` 停旧版 → `NSIS /S` 静默装 →
+  mtime + `cmp -l` 双取证 → **停手，不启动**。
 - 先排除无关范围（`node_modules`/`dist`/`target`/旧版验证残留）再聚焦。
 - **红线**：禁止对真实用户目录（Desktop/Documents/Downloads）做任何写操作（测试限 TEMP 沙箱）。
-- **最高频的 6 个坑**（完整清单 → CONVENTIONS.md §12.3 + PROJECT_STATUS §3）：
+- **最高频的 7 个坑**（完整清单 → CONVENTIONS.md §12.3/§14 + PROJECT_STATUS §3）：
   1. 同一文件的多处 Edit **必须串行**（同消息并行会写入竞争丢改动）；不同文件可并行。
   2. **`vite build` 必须单独发一条命令**（本机 node 安全删除垫片：单回合累计 >50 次即拒，且会把随后的
      build 连带拦下，表现为 `CLEAN_EXIT=1`+`VITE_EXIT=1`，极易误判成「前端编不过」）。**布局审计与
-     build 不同回合**（审计开 28 页、每页都删临时文件）。
+     build 不同回合**（审计开 28 页、每页都删临时文件）。⚠️ 但 V34 实测：只要把审计与 build **分成两条
+     Bash 调用**（审计跑到自己结束），build 的 dist 分批清空就不会被拦。
   3. `npm.cmd` / `cmd.exe` 被安全层拦截 → 一律 `node node_modules/<cli>/<entry>.js`。
   4. Bash shim 时好时坏（`ls` 曾 exit 127；`bash scripts/xxx.sh` 整条命令可能只写出 16 字节日志就"完成"）
-     → 降级 PowerShell 或 node 脚本，**输出落盘再 Read**；跑构建脚本可用 Git Bash 完整路径：
-     `"C:/Users/Administrator/.workbuddy/binaries/PortableGit/versions/1.2.0/bin/bash.exe" -lc "..."`。
+     → 降级 PowerShell 或 node 脚本，**输出落盘再 Read**；跑构建脚本要用 **PortableGit 全路径 bash**
+     **并显式构造 PATH**（`<PG>/usr/bin`、`<PG>/mingw64/bin` 用 POSIX 形式 `/c/...` 放前面，
+     node 目录放**最前**才会用受管 v22 而非系统 v24）：
+     `"C:/Users/Administrator/.workbuddy/binaries/PortableGit/versions/1.2.0/bin/bash.exe" -c 'export PATH=...; bash scripts/build-release.sh ...'`。
      ⚠️ 构建后必须核对产物 mtime，防 shim 假成功。
   5. 写进源码的中文文案**不要带反引号和 markdown 星号**（模板字符串会被反引号搞崩，报错位置离真问题很远）。
   6. **跨零点批次以 `Get-Date` 为准**，别信会话注入的「当前时间」；判断脚本是否真卡死看**日志 mtime 差**。
+  7. **Git Bash 里 `taskkill //IM x //F` 反而不认**（报「无效参数/选项 - '//IM'」）→
+     写 `MSYS_NO_PATHCONV=1 taskkill /IM x /F`。
+  8. 在 Bash 里 `powershell -Command ...` 会被安全层拒（「Invoking PowerShell from Bash bypasses
+     PowerShell security checks」）→ 改用内置的 PowerShell 工具。
 
 ## 5. 开发环境（跨会话必读）
 

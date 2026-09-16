@@ -357,3 +357,79 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+/* ---------- 桌面便签（`.note-markdown`） ----------
+ *
+ * 桌面便签的底是**暖色浅底**（琥珀便签纸），而上面整套 `.md-preview` 的颜色都走
+ * 主题令牌（`hsl(var(--foreground))` 等）。深色主题下 `--foreground` 是浅色 ——
+ * 于是便签会变成「白纸白字」，一个字都看不见。
+ *
+ * 因此这里把便签内部的 Markdown 配色**固定**成深色系。选择器写成
+ * `.note-markdown .md-preview`（两个类）以保证压过单类的 `.md-preview` 规则，
+ * 不依赖样式表的先后顺序。
+ */
+
+.note-markdown .md-preview {
+  color: #451a03;
+  font-size: 0.75rem;
+  line-height: 1.6;
+  caret-color: #92400e;
+}
+
+.note-markdown .md-preview strong {
+  color: #3f1a02;
+}
+
+.note-markdown .md-preview h1,
+.note-markdown .md-preview h2 {
+  border-bottom-color: rgb(69 26 3 / 0.2);
+}
+
+.note-markdown .md-preview h6 {
+  opacity: 1;
+  color: rgb(69 26 3 / 0.7);
+}
+
+.note-markdown .md-preview a {
+  color: #1d4ed8;
+}
+
+.note-markdown .md-preview hr {
+  border-top-color: rgb(69 26 3 / 0.2);
+}
+
+.note-markdown .md-preview code {
+  background: rgb(69 26 3 / 0.1);
+  color: #451a03;
+}
+
+.note-markdown .md-preview blockquote {
+  background: rgb(69 26 3 / 0.07);
+  border-left-color: rgb(69 26 3 / 0.25);
+  color: #78350f;
+}
+
+.note-markdown .md-preview th {
+  background: rgb(69 26 3 / 0.08);
+}
+
+.note-markdown .md-preview th,
+.note-markdown .md-preview td {
+  border-color: rgb(69 26 3 / 0.2);
+}
+
+.note-markdown .md-preview tbody tr:nth-child(even) {
+  background: rgb(69 26 3 / 0.04);
+}
+
+/* 代码块：编辑态默认走 `--muted`（深色主题下就是深底），在便签纸上是一块黑斑 */
+.note-markdown .md-preview pre,
+.note-markdown .md-preview.wysiwyg pre {
+  background: rgb(69 26 3 / 0.08);
+  color: #451a03;
+}
+
+/* 空内容占位（RichMarkdown 用一个 span 承载，颜色同样取自主题） */
+.note-markdown [class*='text-muted-foreground'] {
+  color: rgb(120 53 15 / 0.55);
+}

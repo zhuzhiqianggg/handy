@@ -116,7 +116,26 @@ ALTER TABLE grid_boxes ADD COLUMN content TEXT NOT NULL DEFAULT '';
 -- 迁移前的「系统」格子是由 ensure_system_box 建的，里面装的是此电脑 / 回收站
 -- 这类 CLSID 虚拟条目（磁盘上并没有对应文件）。升级后必须把它标成 system 类型，
 -- 否则按「收纳格 = 真实目录」的新模型对账时，会把这两个入口当成失效条目清掉。
+--
+-- 这一步的产物只活一个版本：紧接着的 v7 会把这个格子连同它的条目一起删掉
+-- （V34 用户要求）。保留 v6 的标记不是冗余 —— 迁移只追加不改写，老库升上来必须能
+-- 一步一步重放，中间态也得自洽。
 UPDATE grid_boxes SET kind = 'system' WHERE name = '系统';
+";
+
+/// v7：移除「系统」收纳格（V34，用户实测反馈驱动）。
+///
+/// 用户原话：「系统这个不需要吧，我们原生的快捷方式不需要动态整理，也没有合理的
+/// 分类规则」。此电脑 / 回收站是 Explorer **恒定显示**的桌面入口（不受任何桌面
+/// 工具控制），格子里的那一份与桌面上的那一份**完全重复** —— 用户截图里就是左右
+/// 两个「我的电脑」并排；而它们既不是文件、也没有可收纳的归属。
+///
+/// 因此：① 删掉所有 `kind = 'system'` 的格子；② 连带清掉它们的 `grid_items` 行
+/// （外键 `ON DELETE CASCADE` 本会处理，这里显式删一遍，保证即使外键未启用也不留
+/// 孤儿行）。本迁移**只动 `grid_*` 两张表，不触碰磁盘上任何文件**。
+pub const V7_DROP_SYSTEM_BOX: &str = "
+DELETE FROM grid_items WHERE box_id IN (SELECT id FROM grid_boxes WHERE kind = 'system');
+DELETE FROM grid_boxes WHERE kind = 'system';
 ";
 
 /// 全部迁移：(版本号, SQL)。新增结构在**末尾追加**；移除历史结构可追加 DROP 迁移。
@@ -127,6 +146,7 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
     (4, V4_GRID),
     (5, V5_TODO_DETAIL),
     (6, V6_GRID_WIDGETS),
+    (7, V7_DROP_SYSTEM_BOX),
 ];
 
 /// 当前毫秒时间戳（用于 `applied_at`）。
@@ -265,14 +285,17 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
-    /// 老库升级（线上真实形态）：停在 v5、且已有一个「系统」格子。
+    /// 老库升级（线上真实形态）：停在 v5，桌面上已有「文件夹」格与「系统」格。
     ///
-    /// 断言三件事：① v6 被追加；② 新增列的默认值符合预期（普通格子回落 folder、
-    /// content 为空串 —— 前端按 kind 分支渲染，空串是便签的安全初值）；
-    /// ③ 名字为「系统」的格子被标成 `system` —— 它是 CLSID 虚拟条目（此电脑/回收站），
-    /// 不标就会被新模型当成「收纳目录里已不存在的失效条目」清掉。
+    /// 走完整 `run()`，断言 v6 + v7 串起来的最终形态：
+    ///   ① 普通格子回落 `folder`、`content` 为空串（前端按 kind 分支渲染，
+    ///      空串是便签的安全初值）；
+    ///   ② 「系统」格**整行消失** —— v6 先把它标成 `system`（否则按新模型的目录
+    ///      对账会把它当失效条目），v7 再按用户要求连格带条目一起删掉
+    ///      （此电脑 / 回收站是 Explorer 恒定显示的入口，格子里那份纯属重复）；
+    ///   ③ 「文件夹」格必须原样活着 —— 删系统格不能误伤正常的收纳格。
     #[test]
-    fn v5_db_upgrades_to_widgets_without_losing_boxes() {
+    fn v5_db_upgrades_then_drops_system_box() {
         let (path, conn) = temp_conn("from-v5");
         apply_upto(&conn, 5);
         assert_eq!(versions(&conn), vec![1, 2, 3, 4, 5], "预置应停在 v5");
@@ -285,8 +308,20 @@ mod tests {
             )
             .expect("预置格子失败");
         }
+        // 系统格里有两个 CLSID 虚拟条目；删格子必须连带清掉，不留孤儿行
+        let system_id: i64 = conn
+            .query_row("SELECT id FROM grid_boxes WHERE name = '系统'", [], |row| {
+                row.get(0)
+            })
+            .expect("读取系统格 id 失败");
+        conn.execute(
+            "INSERT INTO grid_items (box_id, file_path, display_name, sort, created_at) \
+             VALUES (?1, '::{20D04FE0-3AEA-1069-A2D8-08002B30309D}', '此电脑', 0, '2026-01-01T00:00:00Z')",
+            rusqlite::params![system_id],
+        )
+        .expect("预置系统条目失败");
 
-        run(&conn).expect("v5 → v6 升级失败");
+        run(&conn).expect("v5 → 最新版本 升级失败");
 
         // 用内层作用域收掉 `stmt` 的借用，后面才能 drop(conn) 关库再删文件
         let rows: Vec<(String, String, String)> = {
@@ -303,13 +338,20 @@ mod tests {
 
         assert_eq!(
             rows,
-            vec![
-                ("文件夹".to_string(), "folder".to_string(), String::new()),
-                ("系统".to_string(), "system".to_string(), String::new()),
-            ],
-            "升级后：普通格子回落 folder，系统格子必须标成 system，content 为空串"
+            vec![("文件夹".to_string(), "folder".to_string(), String::new())],
+            "普通格子回落 folder 且必须存活；系统格必须被 v7 删掉"
         );
-        assert_eq!(versions(&conn).last().copied(), Some(6), "v6 应被记录");
+
+        let orphans: i64 = conn
+            .query_row("SELECT COUNT(*) FROM grid_items", [], |row| row.get(0))
+            .expect("统计条目失败");
+        assert_eq!(orphans, 0, "系统格的虚拟条目必须随格子一起清掉，不留孤儿行");
+
+        assert_eq!(
+            versions(&conn),
+            MIGRATIONS.iter().map(|(v, _)| *v).collect::<Vec<_>>(),
+            "全部迁移（含 v7）都应被记录"
+        );
 
         drop(conn);
         let _ = std::fs::remove_file(path);
