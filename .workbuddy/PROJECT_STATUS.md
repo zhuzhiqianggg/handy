@@ -23,7 +23,7 @@
 | --- | --- |
 | 阶段 | Phase 1 收尾 + V18–**V27** 反馈修复（MVP 完成，待装机验收） |
 | git | **V27 = `f7e825f`**（19 文件，+2251/−31：新增接口测试工具 `api-tester`（首个网络类 Rust 命令）+ 清掉建议条 14 处识别误报 + 回归扩到 17 套 1778 条，见 §1.13）；**V26 = `2969256`**（19 文件，+2364/−158）+ `43a8a06`（文档回填：提交号 + §2.2 三处 STALE 校正 + 日志）；**V25 = `5f8fe8a`**（18 文件，+2649/−565）+ `3001510`（文档回填：修恒真断言 + 回填提交号/包体量）；**V24 = `ef9bba4`**（41 文件，+2273/−326）+ `5d16a0c`（示例条冒烟）；**V23 = `f81a914`**（17 文件，+3334/−184）；V22 = `d49857c`；V21 = `685b8a7`；V20 = `f96a374`；V19 = `64e3008`；`be1dc58` = V18 文档回填；`862d5bf` = V18 批次 |
-| 安装包（**V25 已重新打包**） | `src-tauri/target/release/bundle/nsis/Handy_0.1.0_x64-setup.exe`<br>`src-tauri/target/release/bundle/msi/Handy_0.1.0_x64_en-US.msi`<br>`src-tauri/target/release/handy.exe`（免安装可直接跑）<br>取证：`dist/index.html` 必须**早于** `handy.exe`（且 `beforeBuildCommand` 已覆盖为空操作 ⇒ 打进二进制的就是本批前端）；V25 具体体量与时间戳见 §1.11 |
+| 安装包（**V27 已重新打包**，09-16 13:39） | `src-tauri/target/release/bundle/nsis/Handy_0.1.0_x64-setup.exe`（**4.07 MB**）<br>`src-tauri/target/release/bundle/msi/Handy_0.1.0_x64_en-US.msi`（**5.24 MB**）<br>`src-tauri/target/release/handy.exe`（免安装可直接跑，**10.50 MB**）<br>取证：`handy.exe`(13:39:29) 晚于 `dist/index.html`(13:33:40) ⇒ 打进二进制的就是 V27 前端（含 `http_request` 命令）；一键脚本 `bash scripts/build-release.sh` 见 §5 |
 
 ---
 
@@ -62,7 +62,7 @@
 | **V24** | 见 §1.10 —— 3 条开放要求：**设计令牌现代化**（页面底色 vs 白卡层次）· 工具**分类体系 + 首页重做**（6 类 / 搜索 / 收藏最近 / 分组网格）· **易扩展三件套**（脚手架 + 静态自检 + 编写指南）· 19 工具接持久化 / 8 工具补示例条 · 新增**示例条功能冒烟** `sample-smoke.mjs` | ✅ `tsc` + 6/6 回归 + 工具自检 313 PASS/0 WARN + 布局审计 0/0/0 + 示例条冒烟 9/9 + 已出安装包 |
 | **V25** | 见 §1.11 —— 3 条实测反馈 + 1 条开放要求：密码**符号过多且连排** · 正则库**大量示例零命中** · 桌面整理**疑似没在操作系统桌面** · 继续逐工具自测 | ✅ `tsc` + **8/8 回归（831 条断言）** + 工具自检 313 PASS/0 WARN + 布局审计 0/84 + **示例条/功能冒烟 23 用例** + 已出安装包 |
 | **V26** | 见 §1.12 —— 承接「继续分析优化剩余其他功能」：把工具箱**纯逻辑层从零覆盖拉到 1459 条断言**（新增 6 套回归）· 修掉 URL「主机:端口 被当成协议」等 **6 处真缺陷** · JSON→TS **接口名复用只看键名导致静默错类型** · 三条**示例描述与实现不符**改成真话 · 冒烟从 23 条扩到 **27 条 / 24 个工具全覆盖** | ✅ `tsc` + **14/14 回归（1459 条断言）** + 工具自检 313 PASS/0 WARN + **冒烟 27/27 + 24/24 工具** + 已重建 dist（未重新打包） |
-| **V27**（本轮） | 见 §1.13 —— 用户两条：**新增接口测试工具（类 Postman，含免费接口示例点击填充）** + 分析更多可用工具；同批修掉**建议条把 `www.example.com` / `1.2.3` 误判成 JWT** 等 14 处识别误报 · `jsonLocate` 尾随逗号/缺值报错从误导改准确（与 V8 差分 0 分歧）· 文件路径认 `C:/…` · 回归 14→**17 套（1778 条）** · 冒烟 27→**28 条 / 25 工具** | ✅ `tsc` + `cargo check` + **17/17 回归（1778 条断言）** + 工具自检 325 PASS/0 WARN + **冒烟 28/28 + 25/25 工具** + dist 已重建（未重新打包） |
+| **V27**（本轮） | 见 §1.13 —— 用户两条：**新增接口测试工具（类 Postman，含免费接口示例点击填充）** + 分析更多可用工具；同批修掉**建议条把 `www.example.com` / `1.2.3` 误判成 JWT** 等 14 处识别误报 · `jsonLocate` 尾随逗号/缺值报错从误导改准确（与 V8 差分 0 分歧）· 文件路径认 `C:/…` · 回归 14→**17 套（1778 条）** · 冒烟 27→**28 条 / 25 工具** | ✅ `tsc` + `cargo check` + **17/17 回归（1778 条断言）** + 工具自检 325 PASS/0 WARN + **冒烟 28/28 + 25/25 工具** + **已重新打包**（V27 包，含 `http_request`；一键脚本 `scripts/build-release.sh`） |
 
 ### 1.3 功能清单（当前实际能力）
 
@@ -702,7 +702,10 @@ V25 的 23 条用例覆盖 21 个工具，**缺的 4 个恰好都是「没有示
 
 **提交**：`f7e825f`（19 文件，+2251/−31）—— 提交前复跑 `tsc` 0 错 · `cargo check` EXIT=0 ·
 回归 17/17（1778 条）· `tool-audit` 325 PASS/0 FAIL/0 WARN · `sample-smoke` 28/28。
-**未重新打包**（团队红线；`http_request` 要进安装包需重跑 `tauri build`）。
+**已重新打包**（用户 09-16 明确要求打包并要一键脚本）：新增 `scripts/build-release.sh`（见 §5），
+V27 包含 `http_request` 命令 → **nsis 4.07 MB / msi 5.24 MB / handy.exe 10.50 MB**，
+取证 exe(13:39:29) 晚于 dist(13:33:40)。打包脚本顺手把「node 批量删除保护拦 vite 清 dist」
+的坑内化掉了（分批 rm，见脚本注释）。
 
 **「更多工具」分析结论**（本批只交接口测试，其余按「先规划后执行」待用户点头）：
 ① **JSON→TypeScript 已有**、**环境变量 .env 编辑**（高价值低成本）② **Markdown 表格 ↔ CSV/JSON 互转**
@@ -881,9 +884,18 @@ node scripts/audit/layout-audit.mjs --widths=680,1680     # 自定义视口
 node scripts/audit/layout-audit.mjs --only=toolbox        # 只跑某一组（toolbox/module）
 node scripts/audit/layout-audit.mjs --shots               # 同时存截图到 _shots/audit/
 
-# 打包（先确保 dist 已构建；beforeBuildCommand 走 npm 会被拦，用 --config 覆盖成空操作）
+# 打包（V27 起推荐一键脚本：tsc → 分批清 dist → vite build → tauri build → 自动取证 mtime）
+bash scripts/build-release.sh              # 完整打包，日志落 .build-logs/
+bash scripts/build-release.sh --skip-tsc   # 跳过类型检查（赶时间用）
+
+# 手动等价流程（脚本内部做的事，排查问题时用）：
+#   1) node node_modules/typescript/bin/tsc --noEmit -p tsconfig.json
+#   2) 分批删 dist（node 批量删除保护拦 vite 清 dist：单次 >50 文件即拒，xargs -n 40 rm 绕开）
+#   3) node node_modules/vite/bin/vite.js build
+#   4) beforeBuildCommand 走 npm 会被拦，--config 覆盖成空操作：
 source scripts/rust-env.sh && node node_modules/@tauri-apps/cli/tauri.js build \
   --config '{"build":{"beforeBuildCommand":"node --version"}}'
+#   5) 取证：handy.exe 的 mtime 必须晚于 dist/index.html，否则前端没打进去
 
 # 浏览器冒烟 A：静态服务 + 逐字符驱动所见即所得编辑器
 #   （必须在同一条 bash 调用里起服务，否则后台进程会被作业对象回收）

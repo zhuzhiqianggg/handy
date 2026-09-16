@@ -53,3 +53,6 @@ pnpm-debug.log*
 
 # 测试与覆盖率
 coverage/
+
+# 本机构建日志（build-release.sh 产出）
+.build-logs/

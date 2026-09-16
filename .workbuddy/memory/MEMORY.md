@@ -29,8 +29,8 @@
 
 ## 3. 状态快照（2026-09-16 · V27 已交付并提交）
 
-- Phase 1（MVP）功能全部交付；**安装包可产出**（最近一次打包是 V25：nsis 3.70 MB / msi 4.75 MB / handy.exe 9.33 MB；
-  **V26/V27 之后未重新打包**，V27 新增的 `http_request` 命令要进安装包需重跑 `tauri build`）；
+- Phase 1（MVP）功能全部交付；**安装包可产出**（最近一次打包是 **V27**：nsis 4.07 MB / msi 5.24 MB / handy.exe 10.50 MB，
+  含 `http_request` 命令；一键脚本 `bash scripts/build-release.sh`）；
   **唯一阻塞项 = 用户装机验收 GUI**（窗口/托盘/透明/桌面挂载/拖放/真实文件移动与撤销，沙箱验不了）。
 - 工具箱 **25 个命令 / 6 分类**（text · data · encode · convert · generate · dev；V27 新增 `api-tester` 接口测试）；
   **模块目录 4 个**：toolbox / notes / vault / desktop-organizer（workstation、todos、desktop-grid、settings
