@@ -795,6 +795,30 @@ api-tester 异常路径抽查确认闭环（cURL 解析失败 / 传输失败 / �
 
 **验证**：`tsc` 0 错 · `cargo check` EXIT=0 · 回归/自检/冒烟由打包流水线门禁执行（全绿）。
 
+### 1.17 V31 批次（对标腾讯桌面整理：拖拽交互补齐 + 接管永久生效）
+
+**用户反馈**：「各自拖动、移动等功能都没有」「桌面整理应该永久生效，不能 Handy 退后台就没了」。
+
+**① 条目跨格子拖拽（`grid.rs` + `GridOverlay.tsx`）**：
+- 新命令 **`grid_item_move`**：`UPDATE grid_items SET box_id`，只改引用归属（文件本体不动）；
+  目标格子存在性校验；桌面同步按路径全局去重，移动过的条目不会被当新文件再收一遍。
+- 前端 HTML5 drag：条目 `draggable` + `dragstart` 记 `ItemDrag` 会话并 `gridSetInteractive(true)`
+  （拖拽期整窗可交互）；盒子 `onDragOver/onDrop` 接放点（带高亮）；`dragend` 交还轮询控制；
+  同格拖放无操作。Tauri 系统文件拖放回调对内部拖拽**让路**（`itemDragRef` 守卫），两套拖放不互扰。
+
+**② 接管永久生效**：
+- **`grid_meta/overlay_visible`**：`show_overlay` 写 1、`grid_overlay_hide` 写 0；
+  **`restore_overlay_if_visible`** 在 `lib.rs` setup（`db::init` 后）调用 —— 上次显示中 →
+  本次启动（手动重启 / 升级覆盖装 / 开机自启）**自动把格子层摆回桌面**，不用每次手点。
+- 开机自启：**复用既有 `tauri-plugin-autostart`**（设置中心已有开关），不重复造注册表轮子。
+
+**③ 交互放宽（随时可用，不再藏进编辑态）**：
+- 格子标题**随时拖动移动**（原先锁编辑态才可拖）；**双击标题随时重命名**；
+- 编辑态标题栏新增 **🗑 删除格子**（仅删格子与引用，文件不受影响）；
+- 编辑态开关同时 `gridSetInteractive`（编辑期全窗可交互）。
+
+**验证**：`tsc` 0 错 · `cargo check` EXIT=0（11s）· 回归/自检/冒烟由打包流水线门禁执行。
+
 ---
 
 ## 2. 剩余任务与已知风险
