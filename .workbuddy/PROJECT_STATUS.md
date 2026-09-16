@@ -819,6 +819,28 @@ api-tester 异常路径抽查确认闭环（cURL 解析失败 / 传输失败 / �
 
 **验证**：`tsc` 0 错 · `cargo check` EXIT=0（11s）· 回归/自检/冒烟由打包流水线门禁执行。
 
+### 1.18 V32 批次（止损：撤自动藏图标 + 白屏自愈 + 故障取证）
+
+**用户反馈**：「显示了一下就没有了」「桌面快捷方式都没有」「系统格子的此电脑点不动」「更乱更丑」。
+
+**取证（python ctypes 只读探针）**：挂件窗**一直存在且 visible=true**（rect 正确）——
+「消失了」的真身是 **webview 白屏**（透明窗里白屏=看不见）+ regions 空 → 永久穿透 → 点哪都没反应；
+`SysListView32` 不可见 = 图标仍被藏着（看门狗没兜住的泄漏）。
+
+**修复**：
+1. **立即恢复用户图标**（探针 ShowWindow）——桌面快捷方式/此电脑回位。
+2. **撤自动藏图标**（`show_overlay` 两处 `takeover_icons(true)` 删除）：显示格子层**不再隐藏**
+   系统图标，形态改为用户要的「原桌面 + 多一些格子」共存；手动开关保留（管理页「隐藏系统桌面图标」）；
+   `grid_overlay_hide` 的恢复保留（收起兜底）。
+3. **心跳自愈**：前端每 10s `grid_overlay_heartbeat`；Rust 轮询线程发现窗口可见但心跳停 90s
+   → 判定 webview 已死 → 销毁重建挂件窗（`show_overlay`）——白屏从「永久消失」变「90 秒内自动恢复」。
+4. **故障取证**：`window.onerror`/`unhandledrejection` → `grid_overlay_fault` 落库
+   （`grid_meta/overlay_last_fault`）；管理页显示最近故障（用户截图即可反馈白屏根因）。
+5. **CLSID 直通**：`grid_open_path` 对 `::{...}` 不走 shell 插件，直接 `ShellExecuteW` 并检查
+   ≤32 失败码（此电脑/回收站打开不再赌插件行为）。
+
+**验证**：`tsc` 0 错 · `cargo check` EXIT=0 · 回归/自检/冒烟由打包流水线门禁执行。
+
 ---
 
 ## 2. 剩余任务与已知风险
