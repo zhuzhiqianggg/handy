@@ -88,6 +88,7 @@ pub fn run() {
             commands::grid::grid_box_delete,
             commands::grid::grid_item_add,
             commands::grid::grid_item_delete,
+            commands::grid::grid_item_move,
             commands::grid::grid_item_list,
             commands::grid::grid_geometry_get,
             commands::grid::grid_geometry_set,
@@ -147,6 +148,8 @@ pub fn run() {
                 Ok(path) => println!("[Handy] 数据库就绪：{}", path.display()),
                 Err(err) => eprintln!("[Handy] 数据库初始化失败：{err}"),
             }
+            // 桌面格子层「永久生效」：上次显示中（含重启前就在接管）→ 本次启动自动摆回桌面
+            commands::grid::restore_overlay_if_visible(app.handle());
             // 主窗口启动显示（V16 修复）：`visible:false` 交给逻辑控制显隐，
             // 首启必须显式 show —— 否则窗口一直隐藏、需手动点托盘才出现（"退出再开不显示"）。
             // 置于托盘 / 快捷键 / DB 之后，确保托盘兜底与数据层就绪再亮窗。

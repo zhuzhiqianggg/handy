@@ -454,6 +454,39 @@ pub async fn grid_item_delete(
     Ok(())
 }
 
+/// 移动条目到另一个格子（对标腾讯桌面整理：图标拖着走，只改引用归属）。
+///
+/// **文件本体不受任何影响**；桌面同步按「路径已登记」全局去重，
+/// 移动过的条目不会被同步当成新文件再收一遍。
+#[tauri::command]
+pub async fn grid_item_move(
+    app: AppHandle,
+    item_id: i64,
+    target_box_id: i64,
+) -> Result<(), String> {
+    let conn = connect(&app)?;
+    let target_exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM grid_boxes WHERE id = ?1",
+            params![target_box_id],
+            |row| row.get::<_, i64>(0).map(|count| count > 0),
+        )
+        .map_err(|err| format!("查询目标格子失败：{err}"))?;
+    if !target_exists {
+        return Err("目标格子不存在或已被删除".to_string());
+    }
+    let affected = conn
+        .execute(
+            "UPDATE grid_items SET box_id = ?1 WHERE id = ?2",
+            params![target_box_id, item_id],
+        )
+        .map_err(|err| format!("移动挂件条目失败：{err}"))?;
+    if affected == 0 {
+        return Err("挂件条目不存在或已被删除".to_string());
+    }
+    Ok(())
+}
+
 /// 某盒子的条目列表（按 sort 升序、id 升序稳定排序）。
 #[tauri::command]
 pub async fn grid_item_list(app: AppHandle, box_id: i64) -> Result<Vec<GridItem>, String> {
@@ -635,6 +668,13 @@ const META_KEY_ICONS_HIDDEN: &str = "desktop_icons_hidden";
 /// 若不同步记住这个意愿，下一轮同步就会把它原样收回来 —— 名单就是那块记忆。
 /// 手动把同一文件拖进格子会自动解除（用户用行动推翻了之前的决定）。
 const META_KEY_DISMISSED: &str = "sync_dismissed";
+
+/// `grid_meta` 中「挂件层是否应处于显示状态」的键名。
+///
+/// 「桌面整理永久生效」的根基：应用任何原因退出 / 重启（手动关闭、升级覆盖安装、
+/// 崩溃被拉起）后，启动时只要这里记着「显示中」，就自动把格子层摆回桌面并接管 ——
+/// 用户不需要每次开机后重新去点「显示格子」。
+const META_KEY_OVERLAY_VISIBLE: &str = "overlay_visible";
 
 /// 当前生效的基准层（轮询线程读它做周期复位，避免每 tick 查库）。
 static ATTACH_MODE: AtomicU8 = AtomicU8::new(0);
@@ -1189,6 +1229,7 @@ fn show_overlay(app: &AppHandle) -> Result<(), String> {
     if let Some(existing) = app.get_webview_window(GRID_LABEL) {
         let attach = apply_attach(&existing, mode);
         let _ = existing.show();
+        let _ = write_overlay_visible(app, true);
         if attach.is_ok() && mode == AttachMode::Desktop {
             takeover_icons(app, true);
         }
@@ -1229,11 +1270,51 @@ fn show_overlay(app: &AppHandle) -> Result<(), String> {
     // 按基准层归位（默认「贴到桌面」；失败时窗口仍在，把原因透给前端）
     let attach = apply_attach(&win, mode);
     let _ = win.show();
+    let _ = write_overlay_visible(app, true);
     if attach.is_ok() && mode == AttachMode::Desktop {
         takeover_icons(app, true);
     }
     ensure_poller(app.clone());
     attach
+}
+
+/// 读「挂件层是否应处于显示状态」。
+fn read_overlay_visible(app: &AppHandle) -> bool {
+    let Ok(conn) = connect(app) else {
+        return false;
+    };
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT value FROM grid_meta WHERE key = ?1",
+            params![META_KEY_OVERLAY_VISIBLE],
+            |row| row.get(0),
+        )
+        .ok();
+    raw.as_deref() == Some("1")
+}
+
+/// 写「挂件层是否应处于显示状态」。
+fn write_overlay_visible(app: &AppHandle, visible: bool) -> Result<(), String> {
+    let conn = connect(app)?;
+    conn.execute(
+        "INSERT INTO grid_meta (key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![META_KEY_OVERLAY_VISIBLE, if visible { "1" } else { "0" }],
+    )
+    .map_err(|err| format!("保存挂件显示状态失败：{err}"))?;
+    Ok(())
+}
+
+/// 应用启动时恢复「上次显示中」的格子层（桌面整理永久生效的关键一步）。
+///
+/// 由 `lib.rs` setup 在 `db::init` 之后调用；失败只留日志 —— 格子层没恢复
+/// 不该拦住整个应用启动。
+pub fn restore_overlay_if_visible(app: &AppHandle) {
+    if read_overlay_visible(app) {
+        if let Err(err) = show_overlay(app) {
+            eprintln!("[Handy] 启动恢复桌面格子层失败：{err}");
+        }
+    }
 }
 
 /// 显示（幂等）桌面挂件窗。
@@ -1253,6 +1334,7 @@ pub async fn grid_overlay_hide(app: AppHandle) -> Result<(), String> {
     }
     // 收起格子层即交还桌面：系统图标恢复显示（与 show 时隐藏对称）
     takeover_icons(&app, false);
+    let _ = write_overlay_visible(&app, false);
     Ok(())
 }
 

@@ -206,6 +206,9 @@ export const ipc = {
   /** 删除条目（仅移除引用） */
   gridItemDelete: (itemId: number, dismiss?: boolean): Promise<void> =>
     call<void>('grid_item_delete', { itemId, dismiss: dismiss ?? null }),
+  /** 移动条目到另一个格子（只改引用归属，文件本体不受影响） */
+  gridItemMove: (itemId: number, targetBoxId: number): Promise<void> =>
+    call<void>('grid_item_move', { itemId, targetBoxId }),
   /** 桌面同步：清失效引用 + 增量收纳桌面新文件（dismissed 名单不违背） */
   gridDesktopSync: (): Promise<DesktopSyncReport> => call<DesktopSyncReport>('grid_desktop_sync'),
   /** 某盒子的条目列表 */

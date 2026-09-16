@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { EyeOff, File, FolderClosed, Lock, LockOpen, Plus, Wand2, X } from 'lucide-react';
+import { EyeOff, File, FolderClosed, Lock, LockOpen, Plus, Trash2, Wand2, X } from 'lucide-react';
 import { ipc } from '@/lib/ipc';
 import { isTauri } from '@/platform/detect';
 import type { GridBox, GridItem, GridRegion } from '@/types/grid';
@@ -41,6 +41,12 @@ interface Interaction {
   origY: number;
   origW: number;
   origH: number;
+}
+
+/** 一次「条目跨格子拖拽」的会话状态（HTML5 drag，仅挂件内部） */
+interface ItemDrag {
+  itemId: number;
+  fromBoxId: number;
 }
 
 /** 按扩展名粗判是否目录（无扩展名 → 视为文件夹；仅影响展示图标，不影响打开） */
@@ -145,6 +151,8 @@ export function GridOverlay(): React.JSX.Element {
   const boxesRef = useRef<GridBox[]>([]);
   const scaleRef = useRef(1);
   const interactionRef = useRef<Interaction | null>(null);
+  /** 进行中的条目内部拖拽（null = 没有正在拖的条目） */
+  const itemDragRef = useRef<ItemDrag | null>(null);
   const hintTimerRef = useRef<number | undefined>(undefined);
   const toolbarRef = useRef<HTMLDivElement | null>(null);
   /** 空态卡片的 DOM 引用：它也要纳入命中区域，否则「创建第一个盒子」按钮点不到 */
@@ -369,9 +377,6 @@ export function GridOverlay(): React.JSX.Element {
 
   const startMove = useCallback(
     (event: React.MouseEvent, box: GridBox): void => {
-      if (!editMode) {
-        return;
-      }
       event.preventDefault();
       interactionRef.current = {
         kind: 'move',
@@ -386,7 +391,7 @@ export function GridOverlay(): React.JSX.Element {
       // 拖拽期显式保持可交互（光标甩出盒子也不被切回穿透）
       void ipc.gridSetInteractive(true).catch(() => undefined);
     },
-    [editMode],
+    [],
   );
 
   const startResize = useCallback(
@@ -415,13 +420,10 @@ export function GridOverlay(): React.JSX.Element {
 
   const beginRename = useCallback(
     (box: GridBox): void => {
-      if (!editMode) {
-        return;
-      }
       setRenamingId(box.id);
       setRenameDraft(box.name);
     },
-    [editMode],
+    [],
   );
 
   const commitRename = useCallback((): void => {
@@ -501,6 +503,51 @@ export function GridOverlay(): React.JSX.Element {
     setAddingBoxId(boxId);
   }, []);
 
+  // —— 条目跨格子拖拽（对标腾讯桌面整理：图标拖着走，只改引用归属） ——
+
+  /** 条目拖进目标格子：改引用归属，本地两格列表同步增删 */
+  const moveItem = useCallback(
+    (drag: ItemDrag, targetBoxId: number): void => {
+      if (drag.fromBoxId === targetBoxId) {
+        return; // 同格拖放 = 无操作
+      }
+      void ipc
+        .gridItemMove(drag.itemId, targetBoxId)
+        .then(() => {
+          setItems((prev) => {
+            const source = (prev[drag.fromBoxId] ?? []).filter((i) => i.id !== drag.itemId);
+            const dragged = (prev[drag.fromBoxId] ?? []).find((i) => i.id === drag.itemId);
+            if (!dragged) {
+              return prev;
+            }
+            const target = [...(prev[targetBoxId] ?? []), { ...dragged, boxId: targetBoxId }];
+            return { ...prev, [drag.fromBoxId]: source, [targetBoxId]: target };
+          });
+        })
+        .catch((error: Error) => showHint(error.message));
+    },
+    [showHint],
+  );
+
+  const startItemDrag = useCallback((item: GridItem, event: React.DragEvent): void => {
+    itemDragRef.current = { itemId: item.id, fromBoxId: item.boxId };
+    event.dataTransfer.effectAllowed = 'move';
+    // 同窗口 HTML5 拖拽也会走 WebView2 的系统拖放事件，标记一下供其忽略
+    event.dataTransfer.setData('application/x-handy-item', String(item.id));
+    // 拖拽期保持整窗可交互（光标会频繁跨越盒子边界）
+    void ipc.gridSetInteractive(true).catch(() => undefined);
+  }, []);
+
+  const endItemDrag = useCallback((): void => {
+    if (itemDragRef.current === null) {
+      return;
+    }
+    itemDragRef.current = null;
+    setDropTargetId(null);
+    // 交还命中轮询控制（光标若仍在盒子内会立即恢复可交互）
+    void ipc.gridSetInteractive(false).catch(() => undefined);
+  }, []);
+
   // —— 文件拖放：drop 落点命中哪个盒子，就把文件登记为该盒子的引用 ——
 
   /** 逻辑坐标 → 命中的盒子 id（后渲染的盒子优先，即数组尾部在上层） */
@@ -533,6 +580,10 @@ export function GridOverlay(): React.JSX.Element {
       try {
         const { getCurrentWebview } = await import('@tauri-apps/api/webview');
         const fn = await getCurrentWebview().onDragDropEvent((event) => {
+          // 挂件内部正在拖条目（HTML5 drag）：让路，避免系统拖放事件把状态搅乱
+          if (itemDragRef.current !== null) {
+            return;
+          }
           const payload = event.payload;
           const sf = scaleRef.current || 1;
           if (payload.type === 'over') {
@@ -640,7 +691,12 @@ export function GridOverlay(): React.JSX.Element {
   // —— 工具栏动作 ——
 
   const toggleEditMode = useCallback((): void => {
-    setEditMode((prev) => !prev);
+    setEditMode((prev) => {
+      const next = !prev;
+      // 编辑态 = 布局操作密集期：整窗保持可交互，退出后交还命中轮询控制
+      void ipc.gridSetInteractive(next).catch(() => undefined);
+      return next;
+    });
   }, []);
 
   const addBox = useCallback((): void => {
@@ -659,6 +715,24 @@ export function GridOverlay(): React.JSX.Element {
       })
       .catch((error: Error) => showHint(error.message));
   }, [showHint]);
+
+  /** 删除格子（仅删格子与其引用登记，文件本体不受任何影响） */
+  const deleteBox = useCallback(
+    (boxId: number): void => {
+      void ipc
+        .gridBoxDelete(boxId)
+        .then(() => {
+          setBoxes((prev) => prev.filter((box) => box.id !== boxId));
+          setItems((prev) => {
+            const next = { ...prev };
+            delete next[boxId];
+            return next;
+          });
+        })
+        .catch((error: Error) => showHint(error.message));
+    },
+    [showHint],
+  );
 
   const hideOverlay = useCallback((): void => {
     void ipc.gridOverlayHide().catch(() => undefined);
@@ -698,15 +772,29 @@ export function GridOverlay(): React.JSX.Element {
                 ? 'border border-white/15 bg-neutral-900/55 shadow-xl ring-1 ring-sky-400/60 backdrop-blur-md'
                 : 'border border-white/5 bg-neutral-900/20 shadow-sm'
             } ${isDropTarget ? 'ring-2 ring-sky-300' : ''}`}
+            onDragOver={(event) => {
+              // 内部条目拖拽：允许作为放点（系统文件拖放走 webview 级事件，不经过这里）
+              if (itemDragRef.current !== null) {
+                event.preventDefault();
+                event.dataTransfer.dropEffect = 'move';
+                setDropTargetId(box.id);
+              }
+            }}
+            onDrop={(event) => {
+              const drag = itemDragRef.current;
+              if (drag !== null) {
+                event.preventDefault();
+                moveItem(drag, box.id);
+                endItemDrag();
+              }
+            }}
           >
-            {/* 标题栏：编辑态拖拽移动 + 双击重命名 */}
+            {/* 标题栏：拖拽移动（随时可用）+ 双击重命名 */}
             <header
               onMouseDown={(event) => startMove(event, box)}
               onDoubleClick={() => beginRename(box)}
-              className={`flex h-8 shrink-0 items-center gap-1 px-2 ${
-                editMode ? 'cursor-move active:cursor-grabbing' : ''
-              }`}
-              title={editMode ? '拖拽移动 · 双击重命名' : box.name}
+              className="flex h-8 shrink-0 cursor-move items-center gap-1 px-2 active:cursor-grabbing"
+              title="拖拽移动 · 双击重命名"
             >
               {renamingId === box.id ? (
                 <input
@@ -743,6 +831,17 @@ export function GridOverlay(): React.JSX.Element {
                   <Plus className="h-3 w-3" />
                 </button>
               ) : null}
+              {editMode ? (
+                <button
+                  type="button"
+                  title="删除格子（里面的文件不受影响）"
+                  onMouseDown={(event) => event.stopPropagation()}
+                  onClick={() => deleteBox(box.id)}
+                  className="shrink-0 rounded p-0.5 opacity-70 transition hover:bg-red-500/80 hover:opacity-100"
+                >
+                  <Trash2 className="h-3 w-3" />
+                </button>
+              ) : null}
               <span className="shrink-0 text-[10px] opacity-40">{boxItems.length}</span>
             </header>
 
@@ -774,7 +873,10 @@ export function GridOverlay(): React.JSX.Element {
               {boxItems.map((item) => (
                 <div
                   key={item.id}
-                  title={`${item.displayName}\n${item.filePath}\n双击打开原文件`}
+                  title={`${item.displayName}\n${item.filePath}\n双击打开原文件 · 拖到其他格子移动`}
+                  draggable
+                  onDragStart={(event) => startItemDrag(item, event)}
+                  onDragEnd={endItemDrag}
                   onDoubleClick={() => openItem(item)}
                   className="group relative flex cursor-pointer flex-col items-center gap-1 rounded-lg p-1.5 transition hover:bg-white/10"
                 >
