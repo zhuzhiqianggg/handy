@@ -171,6 +171,26 @@ function probeTextLab() {
   };
 }
 
+/**
+ * 相对时间：示例把日期串填成 `2026-09-12 09:00:00`，页面必须算出「N 天前」。
+ *
+ * ⚠️ 这里**不能只断言 `body.includes('天前')`** —— 示例 chip 的标签本身就写着「3 天前」，
+ * 它也在 innerText 里，于是断言恒真、测了个寂寞（V25 自查时发现）。
+ * 改成在浏览器里**从当前时间重算期望天数**，再要求页面出现那个数字（示例是固定日期，
+ * 天数会随日子漂移，写死「3」第二天就假失败）。
+ */
+function probeRelativeTime() {
+  const fields = Array.from(document.querySelectorAll('textarea, input')).map((e) => String(e.value));
+  const days = Math.round((Date.now() - new Date(2026, 8, 12, 9, 0, 0).getTime()) / 86_400_000);
+  const text = document.body.innerText;
+  return {
+    hasInput: fields.some((v) => v.includes('2026-09-12')),
+    expected: days,
+    matched: text.includes(`${days} 天前`) || text.includes(`${days}天前`),
+    seen: text.match(/\d+\s*天前/g) ?? [],
+  };
+}
+
 /** 桌面整理控制台：首屏必须是「归类文件」，切到「桌面格子」要给出「不移动」的说明 */
 async function probeDesktopConsole() {
   const tick = () => new Promise((r) => setTimeout(r, 400));
@@ -362,8 +382,9 @@ const CASES = [
   {
     id: 'relative-time',
     chip: '3 天前',
-    check: (r) => r.fields.some((v) => v.includes('2026-09-12')) && r.body.includes('天前'),
-    detail: (r) => (r.body.match(/\d+\s*天前/g) ?? [''])[0],
+    probe: probeRelativeTime,
+    check: (r) => r.probe?.hasInput === true && r.probe?.matched === true,
+    detail: (r) => `期望「${r.probe?.expected} 天前」→ 页面出现：${(r.probe?.seen ?? []).join(' / ')}`,
   },
   {
     id: 'unit-converter',
