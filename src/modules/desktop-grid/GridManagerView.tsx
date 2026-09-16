@@ -322,17 +322,18 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
           <Info className="mt-0.5 h-4 w-4 shrink-0 text-brand" />
           <div className="space-y-1 text-xs leading-relaxed text-muted-foreground">
             <p>
-              <span className="font-medium text-foreground">文件不会被移动</span>
-              ：格子里的图标只是原文件路径的<span className="font-medium text-foreground">引用</span>
-              ，桌面文件保持原位。双击格子里的图标即用系统默认程序打开原文件。
+              <span className="font-medium text-foreground">接管桌面显示</span>
+              ：显示格子层时系统桌面图标自动隐藏、由格子接管（收起即恢复）；
+              桌面文件每 5 秒自动同步 —— 新文件按类型归入对应格子，删掉的自动消失，
+              文件本体<span className="font-medium text-foreground">不会被移动</span>。
             </p>
             <p>
-              「一键收成格子」会扫描桌面并按类型分好格子（文件夹 / 文档 / 图片 / 压缩包 …），
-              已经收进格子的不会重复收。「备份布局」记下当前这套摆法，随时能「还原」回来。
+              格子条目上的「×」= 从桌面视图移除且不再自动收录；把文件再拖回格子即解除。
+              「备份布局」记下当前摆法，随时能「还原」回来。
             </p>
             <p className="text-foreground">
-              想让桌面文件夹真归位，请切到「归类文件」页签 —— 那套会把文件移动到
-              「桌面/Handy整理/类别/」并支持一键撤销。
+              想让桌面文件夹真归位（移动文件到 Handy整理/类别/ 并可撤销），
+              请切到「归类文件」页签。接管期间建议先退出腾讯桌面整理等第三方桌面工具。
             </p>
           </div>
         </div>

@@ -68,6 +68,12 @@ export interface GridRegion {
 // —— 一键整理 / 布局备份与还原（V19）——
 
 /** 一键整理结果摘要 */
+/** 桌面同步报告 = 一键整理结果 + 失效引用清理数（`grid_desktop_sync` 返回） */
+export interface DesktopSyncReport extends AutoArrangeReport {
+  /** 本次清理的失效引用数（桌面文件已被删除 / 移走） */
+  pruned: number;
+}
+
 export interface AutoArrangeReport {
   /** 桌面上扫描到的可见条目数（隐藏 / 系统文件与符号链接已排除） */
   scanned: number;

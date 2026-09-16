@@ -402,6 +402,13 @@ pub async fn grid_item_add(
     )
     .map_err(|err| format!("添加挂件条目失败：{err}"))?;
 
+    // 手动登记 = 用户明确要它进格子 → 从「不再自动收录」名单解除
+    if let Ok(mut dismissed) = read_dismissed(&conn) {
+        if dismissed.remove(&file_path) {
+            let _ = write_dismissed(&conn, &dismissed);
+        }
+    }
+
     Ok(GridItem {
         id: conn.last_insert_rowid(),
         box_id,
@@ -413,14 +420,36 @@ pub async fn grid_item_add(
 }
 
 /// 删除条目（仅移除引用，**文件本体不受任何影响**）。
+///
+/// `dismiss = true`（格子层 × 按钮语义）：把路径记入「不再自动收录」名单，
+/// 桌面同步不会再把它收回来；再次手动拖入同一文件会自动解除。
 #[tauri::command]
-pub async fn grid_item_delete(app: AppHandle, item_id: i64) -> Result<(), String> {
+pub async fn grid_item_delete(
+    app: AppHandle,
+    item_id: i64,
+    dismiss: Option<bool>,
+) -> Result<(), String> {
     let conn = connect(&app)?;
+    // 先取路径再删：dismiss 要记住的是「哪个文件」而不是「哪行记录」
+    let path: Option<String> = conn
+        .query_row(
+            "SELECT file_path FROM grid_items WHERE id = ?1",
+            params![item_id],
+            |row| row.get(0),
+        )
+        .ok();
     let affected = conn
         .execute("DELETE FROM grid_items WHERE id = ?1", params![item_id])
         .map_err(|err| format!("删除挂件条目失败：{err}"))?;
     if affected == 0 {
         return Err("挂件条目不存在或已被删除".to_string());
+    }
+    if dismiss.unwrap_or(false) {
+        if let Some(path) = path {
+            let mut set = read_dismissed(&conn)?;
+            set.insert(path);
+            let _ = write_dismissed(&conn, &set);
+        }
     }
     Ok(())
 }
@@ -599,6 +628,13 @@ const META_KEY_ATTACH: &str = "attach_mode";
 
 /// `grid_meta` 中「系统桌面图标是否被隐藏」的键名（崩溃后启动时据此恢复）。
 const META_KEY_ICONS_HIDDEN: &str = "desktop_icons_hidden";
+
+/// `grid_meta` 中「不再自动收录」名单的键名（JSON 字符串数组）。
+///
+/// 桌面同步会把桌面上还没进格子的文件按类型自动收纳；用户点条目上的 × 移除后，
+/// 若不同步记住这个意愿，下一轮同步就会把它原样收回来 —— 名单就是那块记忆。
+/// 手动把同一文件拖进格子会自动解除（用户用行动推翻了之前的决定）。
+const META_KEY_DISMISSED: &str = "sync_dismissed";
 
 /// 当前生效的基准层（轮询线程读它做周期复位，避免每 tick 查库）。
 static ATTACH_MODE: AtomicU8 = AtomicU8::new(0);
@@ -929,6 +965,38 @@ fn write_icons_hidden(app: &AppHandle, hidden: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// 读「不再自动收录」名单（JSON 数组；损坏 / 缺失视为空集，不让坏数据废掉同步）。
+fn read_dismissed(conn: &Connection) -> Result<std::collections::HashSet<String>, String> {
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT value FROM grid_meta WHERE key = ?1",
+            params![META_KEY_DISMISSED],
+            |row| row.get(0),
+        )
+        .ok();
+    let list = raw
+        .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
+        .unwrap_or_default();
+    Ok(list.into_iter().collect())
+}
+
+/// 写「不再自动收录」名单（排序后落库，保证字节稳定）。
+fn write_dismissed(
+    conn: &Connection,
+    set: &std::collections::HashSet<String>,
+) -> Result<(), String> {
+    let mut list: Vec<String> = set.iter().cloned().collect();
+    list.sort();
+    let json = serde_json::to_string(&list).map_err(|err| format!("序列化名单失败：{err}"))?;
+    conn.execute(
+        "INSERT INTO grid_meta (key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![META_KEY_DISMISSED, json],
+    )
+    .map_err(|err| format!("保存名单失败：{err}"))?;
+    Ok(())
+}
+
 /// 退出 / 启动时无条件恢复桌面系统图标（避免「图标被藏住但应用没了」的尴尬）。
 pub fn restore_desktop_icons() {
     let _ = desktop_icons_apply(false);
@@ -1073,6 +1141,26 @@ fn ensure_poller(app: AppHandle) {
     }
 }
 
+/// 桌面接管开关（对称）：格子层贴上桌面时隐藏系统图标，收起时恢复。
+///
+/// 仅在贴桌模式有意义（普通窗口模式下系统图标本来就看得见，无需也不该去动）。
+/// 隐藏失败不阻断显示（例如桌面图标视图已被第三方桌面工具接管时找不到句柄），
+/// 只留日志 —— 格子层照样可用，只是出现「格子 + 原图标」双层。
+fn takeover_icons(app: &AppHandle, hidden: bool) {
+    match desktop_icons_apply(hidden) {
+        Ok(true) => {
+            let _ = write_icons_hidden(app, hidden);
+        }
+        Ok(false) if hidden => {
+            println!("[Handy] 未找到系统桌面图标视图，跳过自动隐藏（可能已被第三方桌面工具接管）");
+        }
+        Ok(false) => {}
+        Err(err) => {
+            eprintln!("[Handy] {}桌面图标失败：{err}", if hidden { "隐藏" } else { "恢复" })
+        }
+    }
+}
+
 /// 创建（幂等复用）并显示挂件窗。
 fn show_overlay(app: &AppHandle) -> Result<(), String> {
     let mode = read_attach_mode(app);
@@ -1080,6 +1168,9 @@ fn show_overlay(app: &AppHandle) -> Result<(), String> {
     if let Some(existing) = app.get_webview_window(GRID_LABEL) {
         let attach = apply_attach(&existing, mode);
         let _ = existing.show();
+        if attach.is_ok() && mode == AttachMode::Desktop {
+            takeover_icons(app, true);
+        }
         ensure_poller(app.clone());
         return attach;
     }
@@ -1117,6 +1208,9 @@ fn show_overlay(app: &AppHandle) -> Result<(), String> {
     // 按基准层归位（默认「贴到桌面」；失败时窗口仍在，把原因透给前端）
     let attach = apply_attach(&win, mode);
     let _ = win.show();
+    if attach.is_ok() && mode == AttachMode::Desktop {
+        takeover_icons(app, true);
+    }
     ensure_poller(app.clone());
     attach
 }
@@ -1136,6 +1230,8 @@ pub async fn grid_overlay_hide(app: AppHandle) -> Result<(), String> {
         win.hide()
             .map_err(|err| format!("隐藏桌面挂件失败：{err}"))?;
     }
+    // 收起格子层即交还桌面：系统图标恢复显示（与 show 时隐藏对称）
+    takeover_icons(&app, false);
     Ok(())
 }
 
@@ -1238,31 +1334,22 @@ fn arrange_group_rank(name: &str) -> i64 {
     }
 }
 
-/// 一键整理桌面：扫描 → 按类型分组 → 每组一个格子 + 登记引用。
+/// 一键整理核心（连接与目录由调用方给定，命令与桌面同步共用）。
 ///
 /// - **不移动 / 不复制 / 不重命名任何文件**，只新建格子与引用；
 /// - 同名格子直接复用（再次整理是**增量补充**，不会越点越多格子）；
-/// - 已登记过的文件全局去重，不会在多个格子里重复出现。
-///
-/// `dir` 仅供测试 / 自定义目录，缺省为用户桌面。
-#[tauri::command]
-pub async fn grid_auto_arrange(
-    app: AppHandle,
-    dir: Option<String>,
+/// - 已登记过的文件全局去重，不会在多个格子里重复出现；
+/// - `dismissed` 名单里的路径（用户点 × 移除过的）跳过，不违背用户决定。
+fn auto_arrange_inner(
+    conn: &Connection,
+    root: &std::path::Path,
+    dismissed: &std::collections::HashSet<String>,
 ) -> Result<AutoArrangeReport, String> {
     use std::collections::{HashMap, HashSet};
-    use std::path::PathBuf;
-
-    let root: PathBuf = match dir {
-        Some(value) if !value.trim().is_empty() => PathBuf::from(value.trim()),
-        _ => dirs::desktop_dir().ok_or_else(|| "无法定位桌面目录".to_string())?,
-    };
 
     // 复用 organizer 的扫描：已排除隐藏 / 系统文件与 symlink，并带好 by-type 类别
-    let scanned = crate::commands::organizer::scan_items(&root)?;
+    let scanned = crate::commands::organizer::scan_items(root)?;
     let total_scanned = scanned.len();
-
-    let conn = connect(&app)?;
 
     // 已登记的文件路径（跨全部格子）—— 同一文件不重复登记
     let mut known: HashSet<String> = HashSet::new();
@@ -1317,14 +1404,13 @@ pub async fn grid_auto_arrange(
     };
 
     for (label, indices) in grouped {
-        // 本组里还没被登记过的文件
+        // 本组里还没被登记过、且不在「不再收录」名单里的文件
         let fresh: Vec<usize> = indices
             .into_iter()
             .filter(|index| {
-                scanned
-                    .get(*index)
-                    .map(|item| !known.contains(&item.path))
-                    .unwrap_or(false)
+                scanned.get(*index).map_or(false, |item| {
+                    !known.contains(&item.path) && !dismissed.contains(&item.path)
+                })
             })
             .collect();
         if fresh.is_empty() {
@@ -1394,6 +1480,87 @@ pub async fn grid_auto_arrange(
     }
 
     Ok(report)
+}
+
+/// 一键整理桌面：扫描 → 按类型分组 → 每组一个格子 + 登记引用。
+///
+/// `dir` 仅供测试 / 自定义目录，缺省为用户桌面。
+#[tauri::command]
+pub async fn grid_auto_arrange(
+    app: AppHandle,
+    dir: Option<String>,
+) -> Result<AutoArrangeReport, String> {
+    let root: std::path::PathBuf = match dir {
+        Some(value) if !value.trim().is_empty() => std::path::PathBuf::from(value.trim()),
+        _ => dirs::desktop_dir().ok_or_else(|| "无法定位桌面目录".to_string())?,
+    };
+    let conn = connect(&app)?;
+    auto_arrange_inner(&conn, &root, &read_dismissed(&conn)?)
+}
+
+/// 清理失效引用：桌面根目录下的文件已被删除 / 移走的条目直接删除。
+///
+/// 只清**桌面根目录**的失效引用 —— 用户从其他目录手动拖入的引用（如 U 盘、
+/// 网盘路径）可能只是暂时不可达，静默删掉用户手工整理的引用弊大于利；
+/// 打开时自然会报「文件不存在」，由用户自己处置。
+fn prune_missing_items(conn: &Connection, desktop: &std::path::Path) -> Result<usize, String> {
+    let rows: Vec<(i64, String)> = {
+        let mut stmt = conn
+            .prepare("SELECT id, file_path FROM grid_items")
+            .map_err(|err| format!("读取条目清单失败：{err}"))?;
+        let mapped = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|err| format!("读取条目清单失败：{err}"))?;
+        mapped
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| format!("读取条目清单失败：{err}"))?
+    };
+    let desktop_str = desktop.to_string_lossy().trim_end_matches(['\\', '/']).to_string();
+    let mut removed = 0usize;
+    for (id, path) in rows {
+        let parent = std::path::Path::new(&path)
+            .parent()
+            .map(|p| p.to_string_lossy().trim_end_matches(['\\', '/']).to_string());
+        // 只处置「确实住在桌面根目录且已不存在」的引用；其他一律保留
+        let is_desktop_child = parent
+            .map(|p| p.eq_ignore_ascii_case(&desktop_str))
+            .unwrap_or(false);
+        if !is_desktop_child || std::path::Path::new(&path).exists() {
+            continue;
+        }
+        let affected = conn
+            .execute("DELETE FROM grid_items WHERE id = ?1", params![id])
+            .map_err(|err| format!("清理失效引用失败：{err}"))?;
+        removed += affected;
+    }
+    Ok(removed)
+}
+
+/// 桌面同步报告：一键整理结果 + 失效引用清理数。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopSyncReport {
+    #[serde(flatten)]
+    pub arrange: AutoArrangeReport,
+    /// 本次清理的失效引用数（桌面文件已被删除 / 移走）
+    pub pruned: usize,
+}
+
+/// 桌面同步 —— 格子层「接管桌面」的数据引擎（前端周期调用）：
+///
+/// 1. 清理失效引用（桌面文件已被删除 / 移走的条目）；
+/// 2. 增量收纳：桌面上还没进格子的文件按类型收进对应格子（缺格子则新建）；
+/// 3. 用户点 × 移除过的文件（dismissed 名单）不违背其意愿。
+///
+/// 因此**桌面根目录的每个可见文件都始终在某个格子里**：新建的文件几秒内
+/// 自动出现，删掉的自动消失 —— 这是与「腾讯桌面整理」对齐的核心体验。
+#[tauri::command]
+pub async fn grid_desktop_sync(app: AppHandle) -> Result<DesktopSyncReport, String> {
+    let root = dirs::desktop_dir().ok_or_else(|| "无法定位桌面目录".to_string())?;
+    let conn = connect(&app)?;
+    let pruned = prune_missing_items(&conn, &root)?;
+    let arrange = auto_arrange_inner(&conn, &root, &read_dismissed(&conn)?)?;
+    Ok(DesktopSyncReport { arrange, pruned })
 }
 
 /// 布局文件里的单条引用。

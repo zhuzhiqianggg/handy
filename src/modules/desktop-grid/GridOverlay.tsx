@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { EyeOff, File, FolderClosed, Lock, LockOpen, Plus, X } from 'lucide-react';
+import { EyeOff, File, FolderClosed, Lock, LockOpen, Plus, Wand2, X } from 'lucide-react';
 import { ipc } from '@/lib/ipc';
 import { isTauri } from '@/platform/detect';
 import type { GridBox, GridItem, GridRegion } from '@/types/grid';
@@ -103,6 +103,52 @@ export function GridOverlay(): React.JSX.Element {
   useEffect(() => {
     void refresh().catch((error: Error) => showHint(error.message));
   }, [refresh, showHint]);
+
+  // —— 桌面同步：接管桌面的数据引擎（Rust 侧增量收纳 + 清失效引用） ——
+  //
+  // 显示格子层期间，桌面根目录的文件必须始终「每个都在格子里」：
+  // 新建 / 拷进桌面的文件几秒内自动归入对应类型格子，删掉的自动消失；
+  // 用户点 × 移除过的（dismissed 名单）不会被违背意愿地收回来。
+
+  /** 立即同步一次并按需刷新（返回报告供提示文案使用） */
+  const syncDesktop = useCallback(async (): Promise<void> => {
+    const report = await ipc.gridDesktopSync();
+    if (report.itemsAdded > 0 || report.pruned > 0 || report.boxesCreated > 0) {
+      await refresh();
+    }
+  }, [refresh]);
+
+  useEffect(() => {
+    if (!isTauri()) {
+      return;
+    }
+    const tick = (): void => {
+      // 窗口隐藏（挂件收起）时 webview 仍在运行，别白白扫桌面
+      if (document.visibilityState !== 'visible') {
+        return;
+      }
+      void syncDesktop().catch(() => undefined);
+    };
+    const timer = window.setInterval(tick, 5000);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [syncDesktop]);
+
+  // 挂件窗隐藏后再显示不会重新挂载，这里只在窗口创建时提示一次接管状态
+  useEffect(() => {
+    if (!isTauri()) {
+      return;
+    }
+    void ipc
+      .gridDesktopIconsGet()
+      .then((visible) => {
+        if (!visible) {
+          showHint('已接管桌面显示：系统图标已隐藏，收起挂件即恢复');
+        }
+      })
+      .catch(() => undefined);
+  }, [showHint]);
 
   // 透明窗：html/body 的白底会破坏透明（index.css 的 bg-background / index.html 内联底色）
   useEffect(() => {
@@ -325,8 +371,9 @@ export function GridOverlay(): React.JSX.Element {
 
   const removeItem = useCallback(
     (item: GridItem): void => {
+      // dismiss = true：记住「不要它」，桌面同步不会再把它自动收回来
       void ipc
-        .gridItemDelete(item.id)
+        .gridItemDelete(item.id, true)
         .then(() => {
           setItems((prev) => ({
             ...prev,
@@ -536,6 +583,17 @@ export function GridOverlay(): React.JSX.Element {
     void ipc.gridOverlayHide().catch(() => undefined);
   }, []);
 
+  /** 手动触发一次桌面同步（立即整理） */
+  const syncNow = useCallback((): void => {
+    void ipc
+      .gridDesktopSync()
+      .then(async (report) => {
+        await refresh();
+        showHint(`已同步桌面：新收 ${report.itemsAdded} 个 · 清理失效 ${report.pruned} 个`);
+      })
+      .catch((error: Error) => showHint(error.message));
+  }, [refresh, showHint]);
+
   // —— 渲染 ——
 
   return (
@@ -635,7 +693,7 @@ export function GridOverlay(): React.JSX.Element {
                 >
                   <button
                     type="button"
-                    title="移除引用（不影响原文件）"
+                    title="从格子移除（桌面同步不会再自动收录）"
                     onClick={() => removeItem(item)}
                     className="absolute right-0.5 top-0.5 hidden rounded bg-black/50 p-0.5 text-neutral-200 hover:bg-red-500/80 group-hover:block"
                   >
@@ -688,8 +746,9 @@ export function GridOverlay(): React.JSX.Element {
         >
           <p className="text-sm font-medium text-neutral-100">桌面挂件还没有盒子</p>
           <p className="max-w-xs text-xs leading-relaxed text-neutral-300">
-            盒子是桌面上的收纳格：把文件拖进去即建立引用，双击图标用默认程序打开原文件，
-            <span className="text-neutral-100">原文件不会被移动</span>。
+            盒子是桌面上的收纳格。显示挂件时系统桌面图标会自动隐藏、由格子接管显示：
+            桌面上的文件会按类型自动收进格子，新文件几秒内自动出现。
+            也可以把文件拖进盒子，双击图标用默认程序打开原文件。
           </p>
           <button
             type="button"
@@ -731,6 +790,14 @@ export function GridOverlay(): React.JSX.Element {
           className="rounded-full p-1.5 text-neutral-200 transition hover:bg-white/10"
         >
           <Plus className="h-4 w-4" />
+        </button>
+        <button
+          type="button"
+          onClick={syncNow}
+          title="立即整理：扫描桌面，新文件自动归入对应格子"
+          className="rounded-full p-1.5 text-neutral-200 transition hover:bg-white/10"
+        >
+          <Wand2 className="h-4 w-4" />
         </button>
         <button
           type="button"

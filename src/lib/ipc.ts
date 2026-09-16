@@ -12,6 +12,7 @@ import type {
 import type { BackupReport, ImportOutcome } from '@/types/backup';
 import type {
   AutoArrangeReport,
+  DesktopSyncReport,
   GridBox,
   GridBoxInput,
   GridGeometry,
@@ -202,7 +203,10 @@ export const ipc = {
   gridItemAdd: (boxId: number, filePath: string, displayName?: string): Promise<GridItem> =>
     call<GridItem>('grid_item_add', { boxId, filePath, displayName: displayName ?? null }),
   /** 删除条目（仅移除引用） */
-  gridItemDelete: (itemId: number): Promise<void> => call<void>('grid_item_delete', { itemId }),
+  gridItemDelete: (itemId: number, dismiss?: boolean): Promise<void> =>
+    call<void>('grid_item_delete', { itemId, dismiss: dismiss ?? null }),
+  /** 桌面同步：清失效引用 + 增量收纳桌面新文件（dismissed 名单不违背） */
+  gridDesktopSync: (): Promise<DesktopSyncReport> => call<DesktopSyncReport>('grid_desktop_sync'),
   /** 某盒子的条目列表 */
   gridItemList: (boxId: number): Promise<GridItem[]> => call<GridItem[]>('grid_item_list', { boxId }),
   /** 读取挂件窗几何（无记录返回 null） */
