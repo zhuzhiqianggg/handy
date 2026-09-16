@@ -49,6 +49,82 @@ function isDirectoryPath(path: string): boolean {
   return !/\.[^./\\]+$/.test(name);
 }
 
+// —— 系统真实图标（接管桌面的观感关键：和资源管理器一致，一眼认出「这是我的文件」） ——
+
+/** 图标缓存（路径 → dataURL）：挂件窗独立 JS 环境，模块级即可；失败也缓存空串避免反复请求 */
+const iconCache = new Map<string, string>();
+const iconPending = new Map<string, Promise<string | null>>();
+
+async function loadIconDataUrl(path: string): Promise<string | null> {
+  try {
+    const data = await ipc.gridFileIcon(path);
+    if (!data || data.width <= 0 || data.height <= 0) {
+      return null;
+    }
+    const bytes = Uint8Array.from(atob(data.rgbaBase64), (char) => char.charCodeAt(0));
+    const canvas = document.createElement('canvas');
+    canvas.width = data.width;
+    canvas.height = data.height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      return null;
+    }
+    ctx.putImageData(
+      new ImageData(new Uint8ClampedArray(bytes.buffer, bytes.byteOffset, bytes.byteLength), data.width, data.height),
+      0,
+      0,
+    );
+    return canvas.toDataURL('image/png');
+  } catch {
+    return null;
+  }
+}
+
+/** 条目图标：优先系统真实图标，加载失败回退通用线条图标 */
+function FileIcon({ path }: { path: string }): React.JSX.Element {
+  const [url, setUrl] = useState<string | null>(() => iconCache.get(path) ?? null);
+  useEffect(() => {
+    if (url !== null) {
+      return;
+    }
+    let cancelled = false;
+    const pending = iconPending.get(path) ?? loadIconDataUrl(path);
+    iconPending.set(path, pending);
+    void pending
+      .then((data) => {
+        if (data !== null) {
+          iconCache.set(path, data);
+        }
+        if (!cancelled && data !== null) {
+          setUrl(data);
+        }
+      })
+      .finally(() => {
+        iconPending.delete(path);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [path, url]);
+  if (url !== null) {
+    return (
+      <img
+        src={url}
+        alt=""
+        width={32}
+        height={32}
+        draggable={false}
+        className="h-8 w-8 object-contain"
+      />
+    );
+  }
+  return isDirectoryPath(path) ? (
+    <FolderClosed className="h-7 w-7 text-amber-300" />
+  ) : (
+    <File className="h-7 w-7 text-sky-300" />
+  );
+}
+
 export function GridOverlay(): React.JSX.Element {
   // —— 数据态 ——
   const [boxes, setBoxes] = useState<GridBox[]>([]);
@@ -612,8 +688,10 @@ export function GridOverlay(): React.JSX.Element {
               height: box.height,
               pointerEvents: 'auto',
             }}
-            className={`absolute flex flex-col overflow-hidden rounded-xl border border-white/10 bg-neutral-900/55 text-neutral-100 shadow-xl backdrop-blur-md transition-shadow ${
-              editMode ? 'ring-1 ring-sky-400/60' : ''
+            className={`absolute flex flex-col overflow-hidden rounded-xl text-neutral-100 transition-shadow ${
+              editMode
+                ? 'border border-white/15 bg-neutral-900/55 shadow-xl ring-1 ring-sky-400/60 backdrop-blur-md'
+                : 'border border-white/5 bg-neutral-900/20 shadow-sm'
             } ${isDropTarget ? 'ring-2 ring-sky-300' : ''}`}
           >
             {/* 标题栏：编辑态拖拽移动 + 双击重命名 */}
@@ -641,7 +719,11 @@ export function GridOverlay(): React.JSX.Element {
                   className="w-full rounded bg-neutral-800 px-1 text-xs text-neutral-100 outline-none ring-1 ring-sky-400"
                 />
               ) : (
-                <span className="min-w-0 flex-1 truncate text-xs font-medium opacity-80">
+                <span
+                  className={`min-w-0 flex-1 truncate text-xs font-medium ${
+                    editMode ? 'opacity-80' : 'opacity-40 [text-shadow:0_1px_2px_rgba(0,0,0,0.6)]'
+                  }`}
+                >
                   {box.name}
                 </span>
               )}
@@ -699,12 +781,8 @@ export function GridOverlay(): React.JSX.Element {
                   >
                     <X className="h-3 w-3" />
                   </button>
-                  {isDirectoryPath(item.filePath) ? (
-                    <FolderClosed className="h-7 w-7 text-amber-300" />
-                  ) : (
-                    <File className="h-7 w-7 text-sky-300" />
-                  )}
-                  <span className="w-full truncate text-center text-[11px] leading-tight opacity-90">
+                  <FileIcon path={item.filePath} />
+                  <span className="w-full truncate text-center text-[11px] leading-tight text-white opacity-90 [text-shadow:0_1px_2px_rgba(0,0,0,0.85)]">
                     {item.displayName}
                   </span>
                 </div>

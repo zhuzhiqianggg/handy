@@ -68,6 +68,13 @@ export interface GridRegion {
 // —— 一键整理 / 布局备份与还原（V19）——
 
 /** 一键整理结果摘要 */
+/** Shell 真实图标数据（`grid_file_icon` 返回；RGBA 像素 base64） */
+export interface FileIconData {
+  width: number;
+  height: number;
+  rgbaBase64: string;
+}
+
 /** 桌面同步报告 = 一键整理结果 + 失效引用清理数（`grid_desktop_sync` 返回） */
 export interface DesktopSyncReport extends AutoArrangeReport {
   /** 本次清理的失效引用数（桌面文件已被删除 / 移走） */

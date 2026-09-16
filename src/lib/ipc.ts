@@ -13,6 +13,7 @@ import type { BackupReport, ImportOutcome } from '@/types/backup';
 import type {
   AutoArrangeReport,
   DesktopSyncReport,
+  FileIconData,
   GridBox,
   GridBoxInput,
   GridGeometry,
@@ -227,6 +228,9 @@ export const ipc = {
   gridOverlayHide: (): Promise<void> => call<void>('grid_overlay_hide'),
   /** 打开条目原文件（Rust 侧 shell 插件 open；本地路径不受前端 open 作用域限制） */
   gridOpenPath: (path: string): Promise<void> => call<void>('grid_open_path', { path }),
+  /** 提取文件/文件夹的系统真实图标（RGBA base64）；失败或不支持返回 null */
+  gridFileIcon: (path: string): Promise<FileIconData | null> =>
+    call<FileIconData | null>('grid_file_icon', { path }),
 
   // —— 桌面层挂载 / 系统图标显隐（V20：让格子真正画在桌面上）——
 

@@ -1546,6 +1546,185 @@ pub struct DesktopSyncReport {
     pub pruned: usize,
 }
 
+/// Shell 图标数据（RGBA 像素，base64；前端转 dataURL 渲染）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileIconData {
+    pub width: u32,
+    pub height: u32,
+    /// RGBA 像素（逐行、每像素 4 字节）的 base64
+    pub rgba_base64: String,
+}
+
+/// 手写 base64（避免为一个编码器引入依赖；输入 ≤ 32×32×4 字节，性能无感）。
+fn b64_encode(data: &[u8]) -> String {
+    const TBL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b0 = u32::from(chunk[0]);
+        let b1 = chunk.get(1).map_or(0, |v| u32::from(*v));
+        let b2 = chunk.get(2).map_or(0, |v| u32::from(*v));
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TBL[(n >> 18) as usize & 63] as char);
+        out.push(TBL[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            TBL[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TBL[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// 提取文件 / 文件夹的 Shell 真实图标（32×32），转 RGBA 后 base64 返回。
+///
+/// 「接管桌面」的观感关键：格子里渲染**系统真实图标**（与资源管理器一致，
+/// .lnk 自动解析为目标图标），而不是通用线条图标 —— 用户一眼认出「这是我的文件」。
+/// 失败返回 None，前端回退通用图标；先查桌面再查其他路径，绝不做任何写操作。
+#[cfg(target_os = "windows")]
+#[tauri::command]
+pub async fn grid_file_icon(path: String) -> Result<Option<FileIconData>, String> {
+    // SHGetFileInfo 会触达磁盘与图标缓存，放阻塞线程池避免占用 async 运行时
+    tauri::async_runtime::spawn_blocking(move || extract_icon_rgba(&path))
+        .await
+        .map_err(|err| format!("图标提取任务失败：{err}"))
+}
+
+/// 非 Windows 平台暂不支持 Shell 图标提取，前端回退通用图标。
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+pub async fn grid_file_icon(_path: String) -> Result<Option<FileIconData>, String> {
+    Ok(None)
+}
+
+/// SHGetFileInfo → GetIconInfo → GetDIBits 的完整提取链（Windows）。
+#[cfg(target_os = "windows")]
+fn extract_icon_rgba(path: &str) -> Option<FileIconData> {
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows::core::PCWSTR;
+    use windows::Win32::Graphics::Gdi::{
+        CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, BITMAPINFO, BITMAPINFOHEADER,
+        DIB_RGB_COLORS, HBITMAP,
+    };
+    use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL;
+    use windows::Win32::UI::Shell::{
+        SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, ICONINFO};
+
+    let wide: Vec<u16> = std::ffi::OsStr::new(path)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut sfi = SHFILEINFOW::default();
+    let ok = unsafe {
+        SHGetFileInfoW(
+            PCWSTR(wide.as_ptr()),
+            FILE_ATTRIBUTE_NORMAL,
+            Some(&mut sfi as *mut SHFILEINFOW as *mut _),
+            std::mem::size_of::<SHFILEINFOW>() as u32,
+            SHGFI_ICON | SHGFI_LARGEICON,
+        )
+    };
+    if ok == 0 || sfi.hIcon.is_invalid() {
+        return None;
+    }
+
+    // 内联小闭包统一清理；返回值经 Option 透传
+    let result: Option<FileIconData> = (|| {
+        unsafe {
+            let mut info = ICONINFO::default();
+            if GetIconInfo(sfi.hIcon, &mut info).is_err() {
+                return None;
+            }
+            let hdc = CreateCompatibleDC(None);
+            if hdc.is_invalid() {
+                let _ = DeleteObject(info.hbmMask).ok();
+                let _ = DeleteObject(info.hbmColor).ok();
+                return None;
+            }
+
+            let read_bitmap = |hbm: HBITMAP, bit_count: u16| -> Option<Vec<u8>> {
+                let mut bmi = BITMAPINFO::default();
+                bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+                // 第一次调用不取像素，只回填尺寸信息
+                GetDIBits(hdc, hbm, 0, 0, None, &mut bmi, DIB_RGB_COLORS);
+                let w = bmi.bmiHeader.biWidth;
+                if w <= 0 {
+                    return None;
+                }
+                let h = bmi.bmiHeader.biHeight.unsigned_abs();
+                bmi.bmiHeader.biHeight = -bmi.bmiHeader.biHeight; // top-down
+                bmi.bmiHeader.biBitCount = bit_count;
+                bmi.bmiHeader.biCompression = 0u32; // BI_RGB
+                let stride = ((w as usize * bit_count as usize + 31) / 32) * 4;
+                let mut buf = vec![0u8; stride * h as usize];
+                let lines = GetDIBits(
+                    hdc,
+                    hbm,
+                    0,
+                    h,
+                    Some(buf.as_mut_ptr() as *mut _),
+                    &mut bmi,
+                    DIB_RGB_COLORS,
+                );
+                if lines == 0 {
+                    return None;
+                }
+                Some(buf)
+            };
+
+            let color = read_bitmap(info.hbmColor, 32);
+            let mask = if color.is_some() {
+                read_bitmap(info.hbmMask, 1)
+            } else {
+                None
+            };
+            let _ = DeleteDC(hdc).ok();
+            let _ = DeleteObject(info.hbmMask).ok();
+            let _ = DeleteObject(info.hbmColor).ok();
+            let mut color = color?;
+
+            let w = (color.len() / 4).max(1);
+            // GetDIBits 给的是 BGRA 且多为自下而上（biHeight 已取负转 top-down 后即按行序），
+            // 交换 R/B 到 RGBA；全零 alpha（老式无 alpha 通道图标）用掩码位补齐。
+            let all_transparent = color.chunks_exact(4).all(|px| px[3] == 0);
+            for (index, px) in color.chunks_exact_mut(4).enumerate() {
+                px.swap(0, 2);
+                if all_transparent {
+                    let x = index % w;
+                    let byte = mask.as_ref().and_then(|m| m.get(x / 8)).copied().unwrap_or(0);
+                    let opaque = (byte >> (7 - (x % 8))) & 1 == 0; // 0 = 不透明
+                    px[3] = if opaque { 255 } else { 0 };
+                }
+            }
+
+            let side = (w as f64).sqrt().round() as u32;
+            let (width, height) = if w > 0 && side * side == w as u32 {
+                (side, side)
+            } else {
+                (w as u32, 1)
+            };
+            Some(FileIconData {
+                width,
+                height,
+                rgba_base64: b64_encode(&color),
+            })
+        }
+    })();
+
+    unsafe {
+        let _ = DestroyIcon(sfi.hIcon);
+    }
+    result
+}
+
 /// 桌面同步 —— 格子层「接管桌面」的数据引擎（前端周期调用）：
 ///
 /// 1. 清理失效引用（桌面文件已被删除 / 移走的条目）；

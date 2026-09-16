@@ -102,6 +102,7 @@ pub fn run() {
             // —— 桌面整理：一键整理 / 布局备份与还原（V19）——
             commands::grid::grid_auto_arrange,
             commands::grid::grid_desktop_sync,
+            commands::grid::grid_file_icon,
             commands::grid::grid_layout_export,
             commands::grid::grid_layout_import,
             commands::grid::grid_layout_save,
