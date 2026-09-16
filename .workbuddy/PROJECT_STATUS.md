@@ -1,7 +1,7 @@
 # Handy · 顺手 — 项目现状与续接指引
 
 > **从 `handy` 目录打开项目，先读这一份。** 它回答三个问题：**做到哪了 → 还剩什么 → 怎么继续**。
-> 最近更新：2026-09-16 凌晨（**V23 批次**，跨零点完成） · 长期约定见 [`.workbuddy/memory/MEMORY.md`](memory/MEMORY.md) · 逐日进展见 [`memory/`](memory/) · 规划文档见 [`../docs/README.md`](../docs/README.md)
+> 最近更新：2026-09-16（**V24 批次**） · 长期约定见 [`.workbuddy/memory/MEMORY.md`](memory/MEMORY.md) · 逐日进展见 [`memory/`](memory/) · 规划文档见 [`../docs/README.md`](../docs/README.md)
 
 ---
 
@@ -9,13 +9,15 @@
 
 **Phase 1（MVP）功能已全部交付，并完成六轮用户自测反馈大修（V18–V23）**：命令面板统一入口 + 工具箱 **24 个工具** + **桌面网格挂件（V21 起以顶层窗贴在桌面之上，透明可点）** + **桌面整理主控台** + **工作台（日历含农历/节气/节假日/纪念日 · 计划 · 便签所见即所得 · 自适应竖排快捷入口）** + **桌面顶部贴条（可展开折叠、置顶可关）** + 密码存储器；**Windows 安装包已重新产出（V23）**；`cargo check`、`tsc`、回归全绿。V23 做的是**「去掉重复、标清边界、补齐文本处理能力、并用实测代替肉眼」**：合并 Cron 工具里重复的「字段拆解」面板并给 Quartz 语法标上适用平台与误用警示、新增 **文本处理台**（查找替换/正则筛选/20 项行操作/取列/统计）、把「响应式布局」从口头要求变成**可复跑的自动审计**（`scripts/audit/layout-audit.mjs`，实测抓出并修掉工作台在窄窗口下「日历被裁两周 + 计划面板被压成 19px 空壳」两处真缺陷）。
 
+**V24 做的是「把界面做现代、把工具做成能无限扩展的」**：设计令牌升级（页面底色 `--canvas` 与纯白卡片拉开层次、圆角/阴影/动效统一）、工具箱**分类体系与首页重做**（搜索 + 分类页签 + 收藏/最近 + 按分类分组）、**19 个工具接上状态持久化 + 8 个工具补示例条**，并把「加工具容易漏配」做成**脚手架 + 静态自检 + 编写指南**三件套 —— 首次运行自检即抓到 **3 个工具的图标从未登记**（一直静默显示扳手）。
+
 **当前卡点：唯一剩下的是「用户装机做 GUI 验收」**（沙箱无法验证窗口/托盘/透明/桌面挂载/拖放等真实 GUI 行为）。
 
 | 项 | 值 |
 | --- | --- |
-| 阶段 | Phase 1 收尾 + V18–V23 反馈修复（MVP 完成，待装机验收） |
-| git | **V23 = `f81a914`**（17 文件，+3334/−184：Cron 收敛 + 文本处理台 + 响应式审计工具，见 §1.9）；V22 = `d49857c`（13 文件，+2614/−286）；V21 = `685b8a7`（31 文件，+3524/−522）；V20 = `f96a374`（37 文件，+6118/−999）；V19 = `64e3008`；`be1dc58` = V18 文档回填；`862d5bf` = V18 批次 |
-| 安装包（**V23 已重新打包**） | `src-tauri/target/release/bundle/nsis/Handy_0.1.0_x64-setup.exe`（3.7 MB）<br>`src-tauri/target/release/bundle/msi/Handy_0.1.0_x64_en-US.msi`（4.7 MB）<br>`src-tauri/target/release/handy.exe`（9.3 MB，免安装可直接跑）<br>取证：`dist/index.html` 16:25:37 → `handy.exe` 16:30:45（晚于 dist，且 `beforeBuildCommand` 已覆盖为空操作 ⇒ 打进二进制的就是本批前端） |
+| 阶段 | Phase 1 收尾 + V18–**V24** 反馈修复（MVP 完成，待装机验收） |
+| git | **V24 = `ef9bba4`**（41 文件，+2273/−326：设计令牌 + 分类体系 + 易扩展基建 + 逐工具持久化/示例条，见 §1.10）；**V23 = `f81a914`**（17 文件，+3334/−184：Cron 收敛 + 文本处理台 + 响应式审计工具，见 §1.9）；V22 = `d49857c`（13 文件，+2614/−286）；V21 = `685b8a7`（31 文件，+3524/−522）；V20 = `f96a374`（37 文件，+6118/−999）；V19 = `64e3008`；`be1dc58` = V18 文档回填；`862d5bf` = V18 批次 |
+| 安装包（**V24 已重新打包**） | `src-tauri/target/release/bundle/nsis/Handy_0.1.0_x64-setup.exe`（**3.70 MB**）<br>`src-tauri/target/release/bundle/msi/Handy_0.1.0_x64_en-US.msi`（**4.74 MB**）<br>`src-tauri/target/release/handy.exe`（**9.33 MB**，免安装可直接跑）<br>取证：`dist/index.html` 07:57:30 → `handy.exe` 08:01:49（晚于 dist，且 `beforeBuildCommand` 已覆盖为空操作 ⇒ 打进二进制的就是本批前端） |
 
 ---
 
@@ -523,6 +525,17 @@ node scripts/regression/run.mjs          # 6/6 套通过时 exit 0
 #   起 vite dev server + 无头浏览器，对 24 个工具 + 3 个模块页 × 3 档视口（680/1024/1680）实测
 #   量 4 个指标：ox/mox 横向溢出 · clipX/clipY 内容溢出但不滚 · overlap 非祖孙块级矩形相交 · 截图
 #   注意：dev server 与浏览器必须在同一条命令里（沙箱会回收后台进程）；结果写 _shots/audit/layout-audit.json
+#   ⚠️ 跑完它会吃光本回合的删除额度 —— 别在同一个回合里接着 vite build（见 §3 约束 17）
+
+# 工具注册项静态自检（加/改工具后必跑；313 项，0 FAIL / 0 WARN 时 exit 0）
+#   查：id 唯一且 kebab · 名称 ≤18 字 · 描述 ≤60 字 · **图标已登记** · category 合法 ·
+#       组件文件存在 · 用了 CommandShell · 关键词 ≥5 · 别名 ≥1 · 示例条 · 状态持久化 · 模块图标
+#   提示项可写显式豁免：组件里加一行 `// tool-audit-ignore: samples`（或 persist）并说明原因
+node scripts/audit/tool-audit.mjs
+node scripts/audit/tool-audit.mjs --strict    # 把提示项也当失败（CI 用）
+
+# 新工具脚手架（生成组件 + 注册项，keywords 自动补齐到 ≥5）
+node scripts/new-tool.mjs --id=my-tool --name="我的工具" --category=text --icon=Wand2 --desc="一句话说明"
 node scripts/audit/layout-audit.mjs                       # 默认 3 档视口
 node scripts/audit/layout-audit.mjs --widths=680,1680     # 自定义视口
 node scripts/audit/layout-audit.mjs --only=toolbox        # 只跑某一组（toolbox/module）
@@ -566,13 +579,21 @@ node -e "…起 vite :41779 → 轮询 fetch 就绪 → node \$AB open 'http://l
 | `docs/02-architecture/TASKS.md` | V01–V15 任务分解与依赖图 |
 | `docs/03-development/DEVELOPMENT.md` | 开发规范与环境准备 |
 | **`docs/03-development/TOOL-OPTIMIZATION.md`** | **工具优化评估报告（V20）**：23 个工具评分总表 + 逐工具方案 + P0/P1/P2 + 明确取舍 |
-| [`memory/MEMORY.md`](memory/MEMORY.md) | 长期约定：标识、环境坑、验证纪律、V18–**V23** 架构约定 |
-| `memory/2026-09-*.md` | 逐日进展日志（含 V01–**V23** 全过程） |
+| **`docs/03-development/TOOL-AUTHORING.md`** | **新增工具编写指南（V24）**：分层铁律、注册项字段规范、响应式铁律、常见坑、完工清单 |
+| [`memory/MEMORY.md`](memory/MEMORY.md) | 长期约定：标识、路径、协作坑、开发环境、验证纪律 + **当前生效**的 V22–**V24** 约定 |
+| [`memory/CONVENTIONS.md`](memory/CONVENTIONS.md) | 历史批次约定（V18–V23 架构与实现），V24 从 MEMORY.md 拆出来（原文件 16.9k 字符导致注入被截断） |
+| `memory/2026-09-*.md` | 逐日进展日志（含 V01–**V24** 全过程） |
 
 ---
 
 ## 6. 续接开工三件事
 
-1. **先跑四绿确认树健康**：`cargo check`（经 `scripts/rust-env.sh`）+ `tsc --noEmit` + `node scripts/regression/run.mjs`（**6/6 套 / 715 条断言**）+ `node scripts/audit/layout-audit.mjs`（**0 溢出 / 0 裁切 / 0 重叠**），均应为 exit 0。`vite build` 见 §3 约束 16（**别先跑 `clean-dist.mjs`**）。
+1. **先跑五绿确认树健康**：`cargo check`（经 `scripts/rust-env.sh`）+ `tsc --noEmit` + `node scripts/regression/run.mjs`（**6/6 套 / 715 条断言**）+ `node scripts/audit/tool-audit.mjs`（**0 FAIL / 0 WARN**）+ `node scripts/audit/layout-audit.mjs`（**0 溢出 / 0 裁切 / 0 重叠**），均应为 exit 0。`vite build` 见 §3 约束 16 / 17（**别先跑 `clean-dist.mjs`；也别和布局审计同回合**）。
 2. **确认上一轮验收结论**：若用户已装机验收，把发现的问题按「现象 + 期望」记录到本文档 §2 或当日日志，再派人修。
-3. **选下一个方向**：默认优先级 = ① 修验收问题 → ② §2.2 技术债（其中「**文本处理台 Phase 2**」是价值最高的待办）→ ③ §2.3 Phase 2 模块。
+3. **选下一个方向**：默认优先级 = ① 修验收问题 → ② §2.2 技术债（其中「**文本处理台 Phase 2**」是价值最高的待办；其次是「清空工具草稿」的界面入口，`usePersistedState` 已导出 `clearPersisted` 但没接界面）→ ③ §2.3 Phase 2 模块。
+
+17. **布局审计同样会吃光删除额度（V24 补充约束 16）**：`scripts/audit/layout-audit.mjs` 要开关 28 个页面，
+    无头浏览器每页都会删临时文件 —— 实测**跑完审计之后，同一回合里的 `vite build` 必然被垫片拦下**
+    （报 `count:57, threshold:50, scope:"turn"`）。两条出路：① **审计与 build 分回合跑**（正解）；
+    ② 加 `--emptyOutDir=false` 跳过清空（**构建全程不删文件**，代价是 dist 里会留旧哈希产物、
+    安装包体积涨约 0.5 MB —— V24 实测 exe 从 9.33 MB 涨到 9.85 MB，额度恢复后重跑干净构建才回落）。
