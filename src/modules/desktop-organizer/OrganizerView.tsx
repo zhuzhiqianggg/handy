@@ -4,6 +4,7 @@ import {
   ArrowRight,
   CalendarDays,
   FolderOpen,
+  ExternalLink,
   History,
   Loader2,
   Square,
@@ -20,18 +21,32 @@ import {
   listPlans,
   planStatus,
   previewPlan,
+  scanDesktop,
   undoPlan,
   updatePlanItems,
 } from '@/core/data/organizerService';
+import { ipc } from '@/lib/ipc';
 import { cn } from '@/lib/utils';
 import { toast } from '@/components/ui/toast';
 
 /**
- * 桌面整理视图（V12）。
+ * 桌面归类整理视图（V12；V25 成为模块首屏）。
  *
  * 流程：规则选择（by-type / by-date）→「生成预览」（只算不搬）→ 分组预览清单
  * （可勾选排除，回写计划）→「应用」（**二次确认弹层**，列明将移动 N 项及目标目录）
  * → 结果摘要（成功/失败）→「一键撤销」→ 历史计划列表（可撤销 applied 且未撤销的计划）。
+ *
+ * # V25：这是「真·操作系统桌面整理」
+ *
+ * 用户反馈「桌面整理还是在自己的框里面玩，没有真正操作系统桌面」。查证结果是：
+ * **这套能力其实早就做到位了**（Rust `organizer.rs`：`dirs::desktop_dir()` 认
+ * OneDrive 重定向后的真实桌面、按类型 / 日期分组、同名自动改名不覆盖、
+ * 跳过隐藏与系统文件及快捷方式、计划落库、可逆序撤销）—— 问题出在**入口**：
+ * 侧边栏模块首屏指向的是「桌面格子」（只登记引用、一个文件都不动），
+ * 用户自然觉得在自娱自乐。
+ *
+ * 于是本视图被提到模块首屏，并在最上方常驻一行**作用目录**（就是真实桌面路径）
+ * 与「打开桌面 / 打开整理目录」两个按钮 —— 让「它到底动了谁」无需猜测。
  *
  * 安全边界：
  *   - 预览/应用/撤销全部经 Rust（安全策略与冲突处理在 Rust 侧）；
@@ -89,6 +104,11 @@ export default function OrganizerView(_props: OrganizerViewProps = {}): React.JS
   const [plans, setPlans] = useState<OrganizerPlan[]>([]);
   const [loadedPlans, setLoadedPlans] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** 真实桌面目录（Rust `dirs::desktop_dir()` 解析结果，含 OneDrive 重定向） */
+  const [rootDir, setRootDir] = useState<string | null>(null);
+  const [rootError, setRootError] = useState<string | null>(null);
+  /** 桌面上当前可整理的条目数（证明「读的是真实桌面」） */
+  const [desktopCount, setDesktopCount] = useState<number | null>(null);
 
   const refreshPlans = useCallback(async (): Promise<void> => {
     try {
@@ -104,6 +124,49 @@ export default function OrganizerView(_props: OrganizerViewProps = {}): React.JS
   useEffect(() => {
     void refreshPlans();
   }, [refreshPlans]);
+
+  // 定位真实桌面目录：只读扫描，用于把「作用对象」摆在界面上（不触发任何移动）
+  useEffect(() => {
+    let alive = true;
+    void scanDesktop()
+      .then((result) => {
+        if (!alive) {
+          return;
+        }
+        setRootDir(result.dir);
+        setDesktopCount(result.items.length);
+        setRootError(null);
+      })
+      .catch((err: unknown) => {
+        if (alive) {
+          setRootError(err instanceof Error ? err.message : String(err));
+        }
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  /** 用系统默认程序打开目录（走 Rust `grid_open_path`，不受 shell 作用域限制） */
+  const openDir = useCallback((dir: string): void => {
+    void ipc.gridOpenPath(dir).catch((err: unknown) => {
+      toast.error('打开目录失败', {
+        description: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }, []);
+
+  /** 整理目标根目录：已生成计划时用计划锁定的那个，否则按约定推出来 */
+  const targetDir = useMemo<string | null>(() => {
+    if (plan !== null) {
+      return plan.payload.targetDir;
+    }
+    if (rootDir === null) {
+      return null;
+    }
+    const sep = rootDir.includes('\\') ? '\\' : '/';
+    return `${rootDir.replace(/[\\/]+$/, '')}${sep}Handy整理`;
+  }, [plan, rootDir]);
 
   /** 生成预览（只算不搬；计划已落库 applied=0） */
   const handlePreview = async (): Promise<void> => {
@@ -212,6 +275,44 @@ export default function OrganizerView(_props: OrganizerViewProps = {}): React.JS
 
   return (
     <div className="flex h-full flex-col">
+      {/* 作用目录（V25）：把「动的是真实操作系统桌面」摆在最上面，不用猜 */}
+      <div className="flex flex-wrap items-center gap-2 border-b border-border bg-muted/30 px-4 py-2">
+        <FolderOpen className="h-3.5 w-3.5 shrink-0 text-brand" />
+        <span className="shrink-0 text-[11px] text-muted-foreground">作用目录</span>
+        <code
+          className="min-w-0 flex-1 truncate font-mono text-[11px] text-foreground"
+          title={rootDir ?? undefined}
+        >
+          {rootDir ?? (rootError !== null ? `读取失败：${rootError}` : '正在定位桌面目录…')}
+        </code>
+        {desktopCount !== null ? (
+          <span className="shrink-0 text-[11px] text-muted-foreground">
+            扫描到 {desktopCount} 个条目
+          </span>
+        ) : null}
+        {rootDir !== null ? (
+          <button
+            type="button"
+            onClick={() => openDir(rootDir)}
+            className="inline-flex shrink-0 items-center gap-1 rounded-md border border-border px-2 py-0.5 text-[11px] text-muted-foreground transition hover:bg-accent hover:text-foreground"
+          >
+            <ExternalLink className="h-3 w-3" />
+            打开桌面
+          </button>
+        ) : null}
+        {targetDir !== null ? (
+          <button
+            type="button"
+            onClick={() => openDir(targetDir)}
+            title="整理后会移动到这里（不存在时由程序创建）"
+            className="inline-flex shrink-0 items-center gap-1 rounded-md border border-border px-2 py-0.5 text-[11px] text-muted-foreground transition hover:bg-accent hover:text-foreground"
+          >
+            <ExternalLink className="h-3 w-3" />
+            打开整理目录
+          </button>
+        ) : null}
+      </div>
+
       {/* 工具栏：规则选择 + 生成预览 */}
       <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-3">
         <div className="flex items-center gap-1">

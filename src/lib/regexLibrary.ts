@@ -46,6 +46,20 @@ export interface RegexExample {
   description: string;
   /** 配套测试文本（点「连示例文本一起填」时使用；缺省则用通用混合样本） */
   text?: string;
+  /**
+   * 示例文本的语义（V25）。
+   *
+   *   - `'text'`（缺省）：一段**连续文本**（日志、YAML、脏数据……），
+   *     正则在里面「捞出」片段，命中数可以是任意多；
+   *   - `'list'`：一列**候选值**，每行一个，配合 `m` 标志让 `^ $` 按行生效，
+   *     于是「整串校验」变成**批量校验** —— 一眼看出哪几行通过、哪几行被拒。
+   *
+   * 之所以要显式标出来：日志类正则里也有 `^(?<unit>...)$` 这种写法（逐行匹配结构），
+   * 它**每一行都该命中**；而校验类必须能拒绝非法值。靠「有没有 ^ $」猜不出来，
+   * 回归测试也就守不住。标出来之后，`test-regex-library.mjs` 就能要求
+   * `'list'` 类型的示例必定「既有命中、也不是全部命中」。
+   */
+  sampleKind?: 'text' | 'list';
   /** 断言用例（可选；用于「复杂场景」自证） */
   cases?: readonly RegexCase[];
 }
@@ -199,6 +213,142 @@ if [[ -z "$NEBULA_GRAPH_PID" ]]; then
 fi
 echo "graphd pid=$NEBULA_GRAPH_PID"`;
 
+// ————————————————————————————————————————————————————————————————
+// 「整串校验」类正则的候选值清单（V25 新增）
+//
+// # 为什么必须单独准备这些
+//
+// 用户反馈：「正则表达式应该有问题，例如邮箱用示例根本无法匹配，还有其他的示例中的
+// 正则和示例文本没有匹配项目，不知道是哪个错误了」。
+//
+// 根因是**语义错配**：`^1[3-9]\d{9}$` 这类「整串校验」的正则，不配 `m` 标志时
+// `^` / `$` 只认整段文本的首尾；而它之前配的示例是「脏数据混合样本」——
+// 13 行的多行文本。于是**无论怎么点都是 0 处命中**，看起来像正则写错了。
+// 更糟的是：库里 30 条有 16 条都是这样，用户根本无从判断该怀疑哪一条。
+//
+// 正解不是把 `m` 加上就完事，而是**换一种更贴合的示例**：一列候选值，每行一个。
+// 加上 `m` 后 `^...$` 按行生效，一次就能看出「哪几行通过、哪几行被拒」——
+// 这正是校验类正则的真实用法（批量校验一份名单），教学价值比一段日志高得多。
+//
+// 清单里**刻意混入非法值**：只放合法值的示例证明不了正则「该拒绝的会拒绝」。
+// 下面每条都在 `scripts/regression/test-regex-library.mjs` 里被强制要求
+// 「既有命中、也不是全部命中」。
+// ————————————————————————————————————————————————————————————————
+
+/** 手机号候选（含带国际区号、位数不足等常见非法写法） */
+const PHONE_LIST = `13812345678
+15900001111
+12812345678
+1381234567
++8613812345678`;
+
+/** 邮箱候选（含双 @、无顶级域、顶级域只有一位等常见非法写法） */
+const EMAIL_LIST = `zhangsan@example.com
+li.si+ops@sub.example.co
+ops.notify@example.io
+zhangsan@@example.com
+admin@localhost
+user@example.c`;
+
+/** IPv4 候选（含越界段、段数不足、前导零） */
+const IPV4_LIST = `10.20.30.204
+192.168.1.1
+0.0.0.0
+256.1.1.1
+10.20.30
+01.2.3.4`;
+
+/** 密码候选（含位数不足、缺大小写、带空格） */
+const PASSWORD_LIST = `Handy@2026
+Abcdef123!
+aB3!kQ9
+ABCDEFG123!
+abcdefg123!
+Handy 2026`;
+
+/** 日期候选（含非闰年 2-29、13 月、4 月 31 日、缺前导零） */
+const DATE_LIST = `2026-09-15
+2024-02-29
+2026-02-29
+2026-13-01
+2026-04-31
+2026-9-15`;
+
+/** 端口候选（含越界、0、前导零） */
+const PORT_LIST = `80
+8080
+443
+65535
+65536
+0
+08080`;
+
+/** 金额候选（含三位小数、只有小数点、负数） */
+const AMOUNT_LIST = `1234
+99.9
+0.5
+12.345
+12.
+-8.5`;
+
+/** URL 候选（含非 http(s) 协议、缺协议、带端口与锚点） */
+const URL_LIST = `https://console.example.com:8443/ops?tab=db#detail
+http://10.20.30.204:49200/metrics
+https://example.com/
+ftp://files.example.com/pub
+example.com/path`;
+
+/** MAC 候选（含段数不足 / 过多、无分隔符） */
+const MAC_LIST = `3C:52:82:1A:0F:9B
+3C-52-82-1A-0F-9B
+3C:52:82:1A:0F
+3C:52:82:1A:0F:9B:00
+3c52821a0f9b`;
+
+/** 版本号候选（含缺 patch 段、段数过多） */
+const SEMVER_LIST = `v1.29.3-rc.2
+3.8.0
+2.0.0
+1.2
+v1.2.3.4
+1.29.3-beta.1`;
+
+/** 汉字候选（含混字母、单字、五字） */
+const HAN_LIST = `张伟
+欧阳娜娜
+王小明字
+张伟A
+李
+司马相如传`;
+
+/**
+ * 重复词检测用的英文样本。
+ *
+ * 第三行是**故意**这么写的：`\b` 与 `\w` 都不是为中日韩设计的，
+ * 中文重复词抓不到 —— 这条正则在说明里也点破了这一点，示例要能自证。
+ */
+const DUP_WORD_TEXT = `This is is a duplicated word test.
+The deployment deployment failed twice.
+中文的「我们的 我们的」靠 \b 抓不到，见说明
+He said said it again.`;
+
+/** 待清洗的 HTML 片段（说明里的「只适合清洗、不适合解析」） */
+const HTML_TEXT = `<div class="card">
+  <h3>资源平台改造记录</h3>
+  <p>已迁移 <strong>8 类</strong> 数据库，详见 <a href="/ops/db">列表</a>。</p>
+  <img src="/static/topology.png" alt="拓扑图" />
+</div>`;
+
+/**
+ * 灾难性回溯的演示文本。
+ *
+ * 刻意只有几行、且每行的 `a` 不超过 4 个 —— `^(a+)+$` 的失败路径是
+ * **指数级**的，样本写长一点（比如 20 个 a）这个工具自己就先卡住了。
+ */
+const REDOS_TEXT = `aaaa
+aaaab
+aaaaX`;
+
 export const SAMPLE_TEXTS: readonly RegexSample[] = [
   { group: '运维日志', label: 'Nginx access log', note: '含 IPv6、状态码、耗时字段', text: NGINX_LOG },
   { group: '运维日志', label: '应用日志 + 异常堆栈', note: '带级别、时间戳、Java 堆栈', text: APP_LOG },
@@ -224,8 +374,11 @@ export const REGEX_LIBRARY: readonly RegexExample[] = [
     group: '常见校验',
     label: '中国大陆手机号',
     pattern: '^1[3-9]\\d{9}$',
-    flags: '',
-    description: '1 开头 + 第二位 3-9 + 9 位数字，共 11 位。加了 ^ $ 才算「整串校验」，否则 139123456789 里的一段也会命中。',
+    flags: 'm',
+    sampleKind: 'list',
+    text: PHONE_LIST,
+    description:
+      '1 开头 + 第二位 3-9 + 9 位数字，共 11 位。加 ^ $ 才是「整串校验」，否则 139123456789 里的一段也会命中。示例是一列候选值，开 m 后 ^ $ 按行生效 —— 一眼看出哪几行通过、哪几行被拒。',
     cases: [
       { input: '13812345678', expect: true, note: '正常号码' },
       { input: '12812345678', expect: false, note: '第二位 2 不合法' },
@@ -236,15 +389,21 @@ export const REGEX_LIBRARY: readonly RegexExample[] = [
     group: '常见校验',
     label: '邮箱（宽松）',
     pattern: '^[\\w.%+-]+@[\\w.-]+\\.[A-Za-z]{2,}$',
-    flags: '',
-    description: '日常够用。真正的 RFC 5322 邮箱正则有两千多字符，工程上不值得——真要严校验就发确认邮件。',
+    flags: 'm',
+    sampleKind: 'list',
+    text: EMAIL_LIST,
+    description:
+      '日常够用：本地部分允许 . % + -，域名部分要求至少一个点且顶级域 ≥2 位。真正的 RFC 5322 邮箱正则有两千多字符，工程上不值得 —— 真要严校验就发确认邮件。示例是候选清单，`admin@localhost`、`user@example.c` 会被拒。',
   },
   {
     group: '常见校验',
     label: 'IPv4（严格 0-255）',
     pattern: '^(?:(?:25[0-5]|2[0-4]\\d|1\\d{2}|[1-9]?\\d)\\.){3}(?:25[0-5]|2[0-4]\\d|1\\d{2}|[1-9]?\\d)$',
-    flags: '',
-    description: '每一段都限定了 0-255，所以 999.1.1.1 不会误判。相比 `\\d{1,3}(\\.\\d{1,3}){3}` 才是可用的写法。',
+    flags: 'm',
+    sampleKind: 'list',
+    text: IPV4_LIST,
+    description:
+      '每一段都限定了 0-255，所以 256.1.1.1 与 01.2.3.4（前导零）都不会误判；相比 \\d{1,3}(\\.\\d{1,3}){3} 才是可用的写法。示例是候选清单，开 m 后逐行校验。',
     cases: [
       { input: '10.20.30.204', expect: true, note: '内网地址' },
       { input: '256.1.1.1', expect: false, note: '第一段超 255' },
@@ -255,15 +414,21 @@ export const REGEX_LIBRARY: readonly RegexExample[] = [
     group: '常见校验',
     label: '强密码（8-20 位三种字符）',
     pattern: '^(?=.*[a-z])(?=.*[A-Z])(?=.*\\d)[A-Za-z\\d!@#$%^&*]{8,20}$',
-    flags: '',
-    description: '三个前瞻（lookahead）分别断言「至少一个小写 / 一个大写 / 一个数字」，最后才是整体长度与字符集。前瞻只判断不消耗，所以能叠加多个条件。',
+    flags: 'm',
+    sampleKind: 'list',
+    text: PASSWORD_LIST,
+    description:
+      '三个前瞻（lookahead）分别断言「至少一个小写 / 一个大写 / 一个数字」，最后才是整体长度与字符集。前瞻只判断不消耗，所以能叠加多个条件。示例里 ABCDEFG123! 缺小写、aB3!kQ9 位数不够、Handy 2026 含空格，都会被拒。',
   },
   {
     group: '常见校验',
     label: '日期 YYYY-MM-DD（含闰年）',
     pattern: '^(?:(?:19|20)\\d{2}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|02-(?:0[1-9]|1\\d|2[0-8]))|(?:19|20)(?:[02468][048]|[13579][26])-02-29)$',
-    flags: '',
-    description: '按月份区分天数：大月 31 天、小月 30 天、2 月 28 天，最后单独放行闰年 2-29。这是「正则能表达复杂业务规则」的典型样本。',
+    flags: 'm',
+    sampleKind: 'list',
+    text: DATE_LIST,
+    description:
+      '按月份区分天数：大月 31 天、小月 30 天、2 月 28 天，最后单独放行闰年 2-29。这是「正则能表达复杂业务规则」的典型样本。示例里 2026-02-29（非闰年）与 2026-04-31 会被拒。',
     cases: [
       { input: '2026-09-15', expect: true, note: '普通日期' },
       { input: '2026-02-29', expect: false, note: '2026 不是闰年' },
@@ -275,8 +440,11 @@ export const REGEX_LIBRARY: readonly RegexExample[] = [
     group: '常见校验',
     label: '端口号 1-65535',
     pattern: '^(?:[1-9]\\d{0,3}|[1-5]\\d{4}|6[0-4]\\d{3}|65[0-4]\\d{2}|655[0-2]\\d|6553[0-5])$',
-    flags: '',
-    description: '按位分段穷举区间，比 `\\d{1,5}` 准得多。填防火墙 / 白名单时很有用。',
+    flags: 'm',
+    sampleKind: 'list',
+    text: PORT_LIST,
+    description:
+      '按位分段穷举区间，比 \\d{1,5} 准得多 —— 65536 越界、0 与前导零 08080 都不合法。填防火墙 / 白名单时很有用。',
     cases: [
       { input: '65535', expect: true, note: '上界' },
       { input: '65536', expect: false, note: '越界' },
@@ -287,8 +455,11 @@ export const REGEX_LIBRARY: readonly RegexExample[] = [
     group: '常见校验',
     label: '金额（最多两位小数）',
     pattern: '^\\d+(?:\\.\\d{1,2})?$',
-    flags: '',
-    description: '注意别写成 `^\\d+\\.\\d{2}$`——那样整数金额会被判为非法。',
+    flags: 'm',
+    sampleKind: 'list',
+    text: AMOUNT_LIST,
+    description:
+      '注意别写成 ^\\d+\\.\\d{2}$ —— 那样整数金额会被判为非法。示例里 12.345（三位小数）、12.（只有小数点）、-8.5（负数）都会被拒。',
   },
 
   // —— 网络与运维 ——
@@ -312,8 +483,11 @@ export const REGEX_LIBRARY: readonly RegexExample[] = [
     group: '网络与运维',
     label: 'URL 全量拆解',
     pattern: '^(?<proto>https?)://(?<host>[^/:?#]+)(?::(?<port>\\d+))?(?<path>[^?#]*)(?:\\?(?<query>[^#]*))?(?:#(?<hash>.*))?$',
-    flags: '',
-    description: '协议 / 主机 / 端口 / 路径 / 查询串 / 锚点分别成组，缺省部分全部可选。测试时用多行样本才看得出效果。',
+    flags: 'gm',
+    sampleKind: 'list',
+    text: URL_LIST,
+    description:
+      '协议 / 主机 / 端口 / 路径 / 查询串 / 锚点分别成组，缺省部分全部可选。配合 g 标志可逐行拆解；m 让每行各算一条 URL。ftp:// 与不带协议的 example.com/path 会被拒。',
     cases: [
       { input: 'https://console.example.com:8443/ops?tab=db#detail', expect: true, note: '全字段' },
       { input: 'http://10.20.30.204/metrics', expect: true, note: '无端口无查询串' },
@@ -332,22 +506,29 @@ export const REGEX_LIBRARY: readonly RegexExample[] = [
     label: 'IP:端口 批量提取',
     pattern: '(?<ip>\\d{1,3}(?:\\.\\d{1,3}){3}):(?<port>\\d{1,5})',
     flags: 'g',
-    description: '不加 ^ $，用于「从一堆文本里捞出所有 ip:port」。注意这是宽松匹配，真要校验合法性请用上面的严格 IPv4。',
-    text: SYSLOG,
+    description:
+      '不加 ^ $，用于「从一堆文本里捞出所有 ip:port」。注意这是宽松匹配（不校验 0-255），真要校验合法性请用上面的严格 IPv4。示例是应用日志，里面有 mysql://10.20.30.204:3306 与 host=10.20.30.206:8030。',
+    text: APP_LOG,
   },
   {
     group: '网络与运维',
     label: 'MAC 地址',
     pattern: '^([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}$',
-    flags: '',
-    description: '兼容 `3C:52:82:1A:0F:9B` 与 `3C-52-82-1A-0F-9B` 两种分隔符。',
+    flags: 'm',
+    sampleKind: 'list',
+    text: MAC_LIST,
+    description:
+      '兼容 3C:52:82:1A:0F:9B 与 3C-52-82-1A-0F-9B 两种分隔符。示例里 5 段、7 段、无分隔符三种写法都会被拒 —— 段数写死才不会漏。',
   },
   {
     group: '网络与运维',
     label: 'SemVer 版本号',
     pattern: '^v?\\d+\\.\\d+\\.\\d+(?:-[\\w.]+)?$',
-    flags: '',
-    description: '匹配 `1.29.3`、`v3.8.0`、`2.0.0-rc.2`。`(?:...)` 是非捕获组——不需要引用的分组就别捕获，省内存也避免编号错位。',
+    flags: 'm',
+    sampleKind: 'list',
+    text: SEMVER_LIST,
+    description:
+      '匹配 1.29.3、v3.8.0、2.0.0-rc.2。(?:...) 是非捕获组 —— 不需要引用的分组就别捕获，省内存也避免编号错位。示例里 1.2（缺 patch 段）与 v1.2.3.4（段数过多）会被拒。',
     cases: [
       { input: 'v3.8.0', expect: true, note: '带 v 前缀' },
       { input: '1.29.3-rc.2', expect: true, note: '预发布标识' },
@@ -369,7 +550,9 @@ export const REGEX_LIBRARY: readonly RegexExample[] = [
     label: 'Docker 容器 ID（短/长）',
     pattern: '\\b[0-9a-f]{12,64}\\b',
     flags: 'g',
-    description: '`{12,64}` 一个量词覆盖短 ID 与完整 ID。`\\b` 边界防止把长十六进制串从中间切开。',
+    description:
+      '{12,64} 一个量词覆盖短 ID 与完整 ID。\\b 边界防止把长十六进制串从中间切开。示例是 Linux syslog，其中 id=8f2c1a9b4d0e 就是标准短 ID。',
+    text: SYSLOG,
   },
   {
     group: '日志分析',
@@ -393,8 +576,10 @@ export const REGEX_LIBRARY: readonly RegexExample[] = [
     group: '文本处理',
     label: '重复词检测',
     pattern: '\\b(\\w+)\\s+\\1\\b',
-    flags: 'gi',
-    description: '`\\1` 反向引用第 1 个捕获组，专治「的 的」「the the」。注意英文单词才有 \\b 边界，中文需改用 `(\\S{1,3})\\s*\\1`。',
+    flags: 'gim',
+    description:
+      '\\1 反向引用第 1 个捕获组，专治「的 的」「the the」。注意 \\b 与 \\w 都不是为中日韩设计的：示例第三行的中文重复词抓不到，中文需改用 (\\S{1,3})\\s*\\1 —— 这条示例就是拿来证明这个边界的。',
+    text: DUP_WORD_TEXT,
   },
   {
     group: '文本处理',
@@ -433,7 +618,9 @@ export const REGEX_LIBRARY: readonly RegexExample[] = [
     label: '剥离 HTML 标签',
     pattern: '</?[a-zA-Z][^>]*>',
     flags: 'g',
-    description: '粗糙但实用。注意不要用正则去「解析」HTML——真要解析请上 DOM 解析器，正则只适合清洗。',
+    description:
+      '粗糙但实用：抓标签形状，不管嵌套与属性引号。注意不要用正则去「解析」HTML —— 真要解析请上 DOM 解析器，正则只适合清洗。示例是一段真实卡片片段，可配合替换面板一键清成纯文本。',
+    text: HTML_TEXT,
   },
   {
     group: '文本处理',
@@ -455,8 +642,11 @@ export const REGEX_LIBRARY: readonly RegexExample[] = [
     group: '文本处理',
     label: 'Unicode 汉字（\\p{Script=Han}）',
     pattern: '^\\p{Script=Han}{2,4}$',
-    flags: 'u',
-    description: '必须带 `u` 标志才支持 `\\p{...}`。比 `[\\u4e00-\\u9fa5]` 覆盖更全（含扩展区汉字）。',
+    flags: 'um',
+    sampleKind: 'list',
+    text: HAN_LIST,
+    description:
+      '必须带 u 标志才支持 \\p{...}。比 [\\u4e00-\\u9fa5] 覆盖更全（含扩展区汉字）。示例是姓名的候选清单：单字「李」与五字「司马相如传」会被拒，混拉丁字母的也会被拒。',
     cases: [
       { input: '张伟', expect: true, note: '两字姓名' },
       { input: '张伟A', expect: false, note: '混入拉丁字母' },
@@ -476,8 +666,10 @@ export const REGEX_LIBRARY: readonly RegexExample[] = [
     group: '进阶与陷阱',
     label: '⚠ 灾难性回溯（反面教材）',
     pattern: '^(a+)+$',
-    flags: '',
-    description: '别在生产用：嵌套量词会让失败输入的回溯次数指数级暴涨（20 个 a 加一个 b 就能卡住线程）。正确写法是 `^a+$`。列在这里是为了让你认得它。',
+    flags: 'm',
+    text: REDOS_TEXT,
+    description:
+      '别在生产用：嵌套量词会让失败输入的回溯次数指数级暴涨（20 个 a 加一个 b 就能卡住线程）。正确写法是 ^a+$。列在这里是为了让你认得它 —— 示例第三行 aaaaX 就是那条「一失败就贵得离谱」的路径，所以样本刻意只给 4 个 a。',
     cases: [
       { input: 'aaaa', expect: true, note: '能命中' },
       { input: 'aaaab', expect: false, note: '输入越长，耗时越离谱 —— 这就是 ReDoS' },
@@ -500,6 +692,58 @@ export const REGEX_GROUPS: readonly string[] = [
   '文本处理',
   '进阶与陷阱',
 ];
+
+// ————————————————————————————————————————————————————————————————
+// 示例自洽性（V25）
+//
+// 用户当时的问题是「不知道是哪个错误了」。30 条里 16 条零命中，
+// 光看列表根本分不清是正则写错还是示例不合适 —— 所以把这件事**做进界面**：
+// 每条在列表上直接标出「它在自己的示例文本里命中几处」。
+// 0 处就是编写缺陷，`scripts/regression/test-regex-library.mjs` 会直接拦住它。
+// ————————————————————————————————————————————————————————————————
+
+/** 条目对应的示例文本（未配自带文本时用默认混合样本） */
+export function sampleTextOf(entry: RegexExample): string {
+  return entry.text ?? DEFAULT_SAMPLE_TEXT;
+}
+
+/** 命中数缓存（键为 `分类/名称`） */
+const hitCache = new Map<string, number>();
+
+/**
+ * 某条目在自身示例文本里的命中数。
+ *
+ * @returns 命中次数；`0` 表示示例与该正则不匹配（编写缺陷）；`-1` 表示正则本身编译不过
+ */
+export function sampleHitCount(entry: RegexExample): number {
+  const key = `${entry.group}/${entry.label}`;
+  const cached = hitCache.get(key);
+  if (cached !== undefined) {
+    return cached;
+  }
+  let count = 0;
+  try {
+    const flags = entry.flags.includes('g') ? entry.flags : `${entry.flags}g`;
+    const regex = new RegExp(entry.pattern, flags);
+    const text = sampleTextOf(entry);
+    let match: RegExpExecArray | null;
+    let guard = 0;
+    while ((match = regex.exec(text)) !== null) {
+      count += 1;
+      if (match.index === regex.lastIndex) {
+        regex.lastIndex += 1; // 零宽匹配防死循环
+      }
+      guard += 1;
+      if (guard >= 5000) {
+        break;
+      }
+    }
+  } catch {
+    count = -1;
+  }
+  hitCache.set(key, count);
+  return count;
+}
 
 // ————————————————————————————————————————————————————————————————
 // 语法解释（把 pattern 拆成 token 讲人话）

@@ -22,6 +22,8 @@ const SUITES = [
   'test-holidays.mjs',
   'test-sql.mjs',
   'test-textlab.mjs',
+  'test-password.mjs',
+  'test-regex-library.mjs',
 ];
 
 let failed = 0;

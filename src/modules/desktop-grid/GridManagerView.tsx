@@ -20,25 +20,36 @@ import { cn } from '@/lib/utils';
 import type { GridBox, LayoutSnapshotMeta } from '@/types/grid';
 
 /**
- * 桌面整理（内页）。
+ * 桌面格子（原「桌面整理」内页）。
  *
- * # 定位（V19 重新对齐用户预期）
+ * # 它到底是什么（V25 说清楚，别再让人误会）
  *
- * 用户要的是「像桌面整理工具那样：**一键把满屏图标归置成几个格子**，布局能备份能还原」。
- * 因此本视图从「挂件盘点页」升级为**整理主控台**：
+ * 用户反馈原话：「桌面整理还是在自己的框里面玩，没有真正操作系统桌面」。
+ * 这话是对的 —— 本视图**不移动任何文件**：格子里的条目只是原文件路径的
+ * **引用**，双击用系统默认程序打开原文件。真正会去动操作系统桌面的那套
+ * （扫描 → 预览 → 移动 → 可撤销）在 `../desktop-organizer/OrganizerView.tsx`。
  *
- *   - **一键整理**：扫描桌面 → 按类型分组 → 每组一个格子 + 登记引用；
- *   - **备份 / 还原布局**：把当前摆法存成本机快照，随时切回来（还原前还会自动再备份一次）；
- *   - **格子重命名 / 删除**：格子是「图标的归置方式」，不是文件夹；
- *   - **显示 / 隐藏格子层**：格子层浮在桌面之上、普通窗口之下，平时不打扰。
+ * 所以 V25 把两者的关系摆正：
+ *   - 模块首页改成 `DesktopOrganizerConsole`，**首屏就是「归类文件」**（真整理）；
+ *   - 本视图降为该控制台的第二个页签「桌面格子」，并在顶部明说它不动文件。
  *
- * # 与文件系统的关系（一定要说清楚）
+ * # 本视图保留的能力
  *
- * **文件不会被移动、复制或重命名**。格子里的条目只是原文件路径的**引用**，
- * 双击即用系统默认程序打开原文件。所以「还原布局」只是换一套格子摆法，
- * 不涉及任何文件回迁 —— 这正是它敢叫「备份 / 还原」的底气。
+ *   - **一键整理成格子**：扫描桌面 → 按类型分组 → 每组一个格子 + 登记引用；
+ *   - **备份 / 还原布局**：把当前摆法存成本机快照，随时切回来；
+ *   - **格子重命名 / 删除**、**显示 / 隐藏格子层**（浮在桌面之上、普通窗口之下）。
  */
-export function GridManagerView(): React.JSX.Element {
+export interface GridManagerViewProps {
+  /**
+   * 嵌入控制台时用紧凑工具条替代自带头部。
+   *
+   * 控制台已经有模块标题（`ModuleView` 的 header）与页签栏，这里再来一个
+   * 「桌面整理」大标题就是同一件事的两种排版（V23 删「字段拆解」时定下的判据）。
+   */
+  embedded?: boolean;
+}
+
+export function GridManagerView({ embedded = false }: GridManagerViewProps = {}): React.JSX.Element {
   const [boxes, setBoxes] = useState<GridBox[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -133,7 +144,7 @@ export function GridManagerView(): React.JSX.Element {
           return;
         }
         const created = report.boxesCreated > 0 ? `新建 ${report.boxesCreated} 个格子、` : '';
-        toast.success(`整理完成：${created}收进 ${report.itemsAdded} 个图标`, {
+        toast.success(`已收成格子：${created}收进 ${report.itemsAdded} 个图标`, {
           description:
             report.itemsAdded === 0
               ? '桌面上的图标都已经在格子里了，没有重复收纳'
@@ -253,40 +264,57 @@ export function GridManagerView(): React.JSX.Element {
 
   const totalItems = boxes.reduce((sum, box) => sum + box.itemCount, 0);
 
+  /** 工具条按钮（自带头部与嵌入模式共用，避免两处抄一遍） */
+  const toolbarActions = (
+    <>
+      <Button variant="outline" size="sm" onClick={refresh} disabled={loading}>
+        <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} />
+        刷新
+      </Button>
+      <Button variant="outline" size="sm" onClick={addBox} disabled={busy}>
+        <Plus className="h-3.5 w-3.5" />
+        新建格子
+      </Button>
+      <Button size="sm" onClick={autoArrange} disabled={arranging}>
+        {arranging ? (
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        ) : (
+          <Sparkles className="h-3.5 w-3.5" />
+        )}
+        一键收成格子
+      </Button>
+      <Button variant="secondary" size="sm" onClick={toggleOverlay} disabled={busy}>
+        {overlayVisible ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+        {overlayVisible ? '隐藏格子' : '显示格子'}
+      </Button>
+    </>
+  );
+
   return (
     <div className="flex h-full flex-col overflow-hidden">
-      {/* 头部 */}
-      <header className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border px-6 py-4">
-        <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-brand/10 text-brand">
-          <LayoutGrid className="h-5 w-5" />
+      {embedded ? (
+        <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border px-4 py-2">
+          <span className="text-[11px] leading-relaxed text-muted-foreground">
+            格子只登记
+            <span className="font-medium text-foreground">文件引用</span>
+            ，不移动文件 —— 要真把桌面文件归类，用另一个页签
+          </span>
+          <div className="ml-auto flex items-center gap-2">{toolbarActions}</div>
         </div>
-        <div className="min-w-0 flex-1">
-          <h1 className="text-base font-semibold text-foreground">桌面整理</h1>
-          <p className="truncate text-xs text-muted-foreground">
-            一键把桌面图标归置成格子 · 布局可备份可还原 · 文件本体不动
-          </p>
-        </div>
-        <Button variant="outline" size="sm" onClick={refresh} disabled={loading}>
-          <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} />
-          刷新
-        </Button>
-        <Button variant="outline" size="sm" onClick={addBox} disabled={busy}>
-          <Plus className="h-3.5 w-3.5" />
-          新建格子
-        </Button>
-        <Button size="sm" onClick={autoArrange} disabled={arranging}>
-          {arranging ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          ) : (
-            <Sparkles className="h-3.5 w-3.5" />
-          )}
-          一键整理
-        </Button>
-        <Button variant="secondary" size="sm" onClick={toggleOverlay} disabled={busy}>
-          {overlayVisible ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-          {overlayVisible ? '隐藏格子' : '显示格子'}
-        </Button>
-      </header>
+      ) : (
+        <header className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border px-6 py-4">
+          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-brand/10 text-brand">
+            <LayoutGrid className="h-5 w-5" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h1 className="text-base font-semibold text-foreground">桌面格子</h1>
+            <p className="truncate text-xs text-muted-foreground">
+              把桌面图标归置成格子 · 布局可备份可还原 · 文件本体不动（只登记引用）
+            </p>
+          </div>
+          {toolbarActions}
+        </header>
+      )}
 
       <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto px-6 py-5">
         {/* 语义说明卡 */}
@@ -299,8 +327,12 @@ export function GridManagerView(): React.JSX.Element {
               ，桌面文件保持原位。双击格子里的图标即用系统默认程序打开原文件。
             </p>
             <p>
-              「一键整理」会扫描桌面并按类型分好格子（文件夹 / 文档 / 图片 / 压缩包 …），
+              「一键收成格子」会扫描桌面并按类型分好格子（文件夹 / 文档 / 图片 / 压缩包 …），
               已经收进格子的不会重复收。「备份布局」记下当前这套摆法，随时能「还原」回来。
+            </p>
+            <p className="text-foreground">
+              想让桌面文件夹真归位，请切到「归类文件」页签 —— 那套会把文件移动到
+              「桌面/Handy整理/类别/」并支持一键撤销。
             </p>
           </div>
         </div>
@@ -384,15 +416,15 @@ export function GridManagerView(): React.JSX.Element {
         ) : boxes.length === 0 ? (
           <div className="py-14 text-center">
             <p className="text-sm font-medium text-foreground">还没有格子</p>
-            <p className="mx-auto mt-1 max-w-md text-xs leading-relaxed text-muted-foreground">
-              点「一键整理」让程序扫描桌面、按类型自动分好格子；也可以点「新建格子」自己摆。
-              格子层会浮在桌面之上，把图标拖进去即登记引用（文件本体不会被移动）。
-            </p>
-            <div className="mt-4 flex justify-center gap-2">
-              <Button size="sm" onClick={autoArrange} disabled={arranging}>
-                <Sparkles className="h-3.5 w-3.5" />
-                一键整理桌面
-              </Button>
+              <p className="mx-auto mt-1 max-w-md text-xs leading-relaxed text-muted-foreground">
+                点「一键收成格子」让程序扫描桌面、按类型分好格子；也可以点「新建格子」自己摆。
+                格子层会浮在桌面之上，把图标拖进去即登记引用（文件本体不会被移动）。
+              </p>
+              <div className="mt-4 flex justify-center gap-2">
+                <Button size="sm" onClick={autoArrange} disabled={arranging}>
+                  <Sparkles className="h-3.5 w-3.5" />
+                  一键收成格子
+                </Button>
               <Button variant="outline" size="sm" onClick={addBox} disabled={busy}>
                 <Plus className="h-3.5 w-3.5" />
                 手动新建格子

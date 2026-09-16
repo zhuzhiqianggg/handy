@@ -21,6 +21,7 @@ import {
   REGEX_LIBRARY,
   SAMPLE_TEXTS,
   explainPattern,
+  sampleHitCount,
   type RegexExample,
 } from '@/lib/regexLibrary';
 import { cn } from '@/lib/utils';
@@ -51,6 +52,49 @@ interface MatchInfo {
 }
 
 type PanelTab = 'matches' | 'replace' | 'explain' | 'cases';
+
+/**
+ * 「在配套示例里命中几处」徽标。
+ *
+ * V25 之前，库里 30 条有 16 条是**零命中**（整串校验配了多行文本），
+ * 但界面上没有任何地方为此负责 —— 用户只能怀疑自己写错了正则。
+ * 现在每条都把自己的命中数亮出来：`0` 与 `-1` 都是编写缺陷，必须显眼。
+ */
+function HitBadge({ hits }: { hits: number }): React.JSX.Element {
+  if (hits < 0) {
+    return (
+      <span
+        title="这条正则编译不过"
+        className="shrink-0 rounded bg-destructive/10 px-1 text-[9px] text-destructive"
+      >
+        正则无效
+      </span>
+    );
+  }
+  if (hits === 0) {
+    return (
+      <span
+        title="配套示例文本与这条正则不匹配（编写缺陷）"
+        className="shrink-0 rounded bg-amber-500/10 px-1 text-[9px] text-amber-600"
+      >
+        示例不匹配
+      </span>
+    );
+  }
+  return (
+    <span
+      title={`在配套示例文本里命中 ${hits} 处`}
+      className="shrink-0 rounded bg-emerald-500/10 px-1 text-[9px] text-emerald-600"
+    >
+      {hits} 处
+    </span>
+  );
+}
+
+/** 带断言用例的条目名称（「用例验证」页签的空态用） */
+const CASE_ENTRY_LABELS: string = REGEX_LIBRARY.filter((item) => (item.cases?.length ?? 0) > 0)
+  .map((item) => item.label)
+  .join(' / ');
 
 interface RegexToolState {
   pattern: string;
@@ -244,6 +288,24 @@ export function RegexTester({ initialInput = '' }: CommandProps): React.JSX.Elem
     });
   };
 
+  /**
+   * 每条在**自身示例文本**里的命中数。
+   *
+   * 计算量很小（30 条短正则），且有模块级缓存；换来的是「哪条示例是坏的」
+   * 一眼可见，而不是让人怀疑自己。`scripts/regression/test-regex-library.mjs`
+   * 会保证这里永远不该出现 0。
+   */
+  const hitCounts = React.useMemo<Map<string, number>>(
+    () =>
+      new Map(
+        libraryFiltered.map((item) => [
+          `${item.group}/${item.label}`,
+          sampleHitCount(item),
+        ]),
+      ),
+    [libraryFiltered],
+  );
+
   const matchSummary = React.useMemo(
     () =>
       analysis.matches
@@ -261,7 +323,7 @@ export function RegexTester({ initialInput = '' }: CommandProps): React.JSX.Elem
   return (
     <CommandShell
       title="正则表达式测试"
-      description="30 条实战正则 + 多行真实样本 + 替换预览 + 语法解释"
+      description="30 条实战正则 + 配套示例（逐条自检命中数）+ 多行真实样本 + 替换预览 + 语法解释"
       icon={<Regex className="h-4 w-4" />}
       onBack={shell.onBack}
       favorite={shell.favorite}
@@ -320,7 +382,7 @@ export function RegexTester({ initialInput = '' }: CommandProps): React.JSX.Elem
             <BookOpen className="h-3.5 w-3.5 text-muted-foreground" />
             <span className="text-sm font-medium text-foreground">正则库</span>
             <span className="text-[11px] text-muted-foreground">
-              {REGEX_LIBRARY.length} 条 · 点整行展开，双击直接连示例文本一起填
+              {REGEX_LIBRARY.length} 条 · 每条标了在配套示例里的命中数 · 点整行展开，双击直接连示例文本一起填
             </span>
             <div className="relative ml-auto">
               <Search className="pointer-events-none absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
@@ -402,6 +464,7 @@ export function RegexTester({ initialInput = '' }: CommandProps): React.JSX.Elem
                               <span className="shrink-0 text-xs font-medium text-foreground">
                                 {item.label}
                               </span>
+                              <HitBadge hits={hitCounts.get(key) ?? 0} />
                               <code
                                 className="min-w-0 flex-1 truncate text-left font-mono text-[10px] text-muted-foreground"
                                 title={item.pattern}
@@ -555,7 +618,38 @@ export function RegexTester({ initialInput = '' }: CommandProps): React.JSX.Elem
             {/* —— 匹配明细 —— */}
             {state.tab === 'matches' ? (
               analysis.matches.length === 0 ? (
-                <p className="py-6 text-center text-xs text-muted-foreground">暂无匹配</p>
+                <div className="flex flex-col items-center gap-3 py-6 text-center">
+                  <p className="text-xs text-muted-foreground">
+                    {state.pattern.trim() === '' ? '还没有填写表达式' : '暂无匹配'}
+                  </p>
+                  {state.pattern.trim() === '' ? null : (
+                    <p className="max-w-xl text-[11px] leading-relaxed text-muted-foreground">
+                      匹配不上往往不是正则写错，而是
+                      <span className="font-medium text-foreground">示例不合适</span>
+                      ：整串校验类正则（开头 ^ 结尾 $）需要「每行一个值」的清单，
+                      而日志类正则需要在日志里捞片段。
+                      上方正则库每条都标了它在配套示例里的命中数，点
+                      <span className="mx-0.5 font-medium text-foreground">
+                        「连示例文本一起填」
+                      </span>
+                      就能拿到配好该正则的示例。
+                    </p>
+                  )}
+                  {selectedEntry !== null ? (
+                    <button
+                      type="button"
+                      onClick={() => useExample(selectedEntry, true)}
+                      className="inline-flex items-center gap-1.5 rounded-md bg-brand px-3 py-1.5 text-xs font-medium text-white transition hover:bg-brand/90"
+                    >
+                      <Sparkles className="h-3 w-3" />
+                      连「{selectedEntry.label}」的示例文本一起填
+                    </button>
+                  ) : (
+                    <span className="text-[11px] text-muted-foreground/70">
+                      也可以点上方「测试文本」旁的场景按钮换一段样本
+                    </span>
+                  )}
+                </div>
               ) : (
                 <div className="flex flex-col gap-1.5">
                   {analysis.matches.slice(0, 200).map((item, i) => {
@@ -668,9 +762,11 @@ export function RegexTester({ initialInput = '' }: CommandProps): React.JSX.Elem
             {/* —— 用例验证 —— */}
             {state.tab === 'cases' ? (
               selectedEntry === null || selectedEntry.cases === undefined ? (
-                <p className="py-6 text-center text-xs text-muted-foreground">
-                  从正则库展开带用例的条目（手机号 / IPv4 / 日期 / SemVer / 端口 / 灾难性回溯）
-                  并点「连示例文本一起填」，这里会逐条验证它「该命中的命中、该拒绝的拒绝」。
+                <p className="max-w-2xl py-6 text-center text-xs leading-relaxed text-muted-foreground">
+                  带断言用例的条目：
+                  <span className="ml-1 text-foreground">{CASE_ENTRY_LABELS}</span>。
+                  从上方正则库点开任意一条并点「连示例文本一起填」，这里会逐条验证它
+                  「该命中的命中、该拒绝的拒绝」—— 这是判断一条正则是否名副其实最直接的方式。
                 </p>
               ) : (
                 <div className="flex flex-col gap-1.5">

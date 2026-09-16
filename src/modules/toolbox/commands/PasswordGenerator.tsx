@@ -10,6 +10,15 @@ import { Slider } from '@/components/ui/slider';
 import { Switch } from '@/components/ui/switch';
 import { toast } from '@/components/ui/toast';
 import { useCommandShell } from '@/hooks/useCommandShell';
+import {
+  DEFAULT_MAX_SYMBOL_RATIO,
+  dedupeChars,
+  evaluatePasswordStrength,
+  generatePassword,
+  hasAdjacentSymbols,
+  isAlphanumeric,
+  type GenerateResult,
+} from '@/lib/passwordGen';
 import type { CommandProps } from '@/core/types';
 import { cn } from '@/lib/utils';
 import { downloadTextFile, timestampSuffix } from '@/modules/toolbox/lib/download';
@@ -112,7 +121,6 @@ interface Strength {
   entropy: number;
 }
 
-const STRENGTH_LABELS: readonly string[] = ['很弱', '弱', '中等', '强', '极强'];
 const STRENGTH_COLORS: readonly string[] = [
   'bg-red-500',
   'bg-orange-500',
@@ -128,232 +136,11 @@ const STRENGTH_TEXT: readonly string[] = [
   'text-emerald-600',
 ];
 
-/**
- * 密码学安全的随机整数 `[0, maxExclusive)`。
- *
- * 用 `crypto.getRandomValues` + 拒绝采样（rejection sampling）消除模偏差；
- * 无 Web Crypto 时降级 `Math.random`（仅功能兜底，不用于真实密钥场景）。
- */
-function randomInt(maxExclusive: number): number {
-  if (maxExclusive <= 0) {
-    return 0;
-  }
-  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
-    const limit = Math.floor(0x100000000 / maxExclusive) * maxExclusive;
-    const buf = new Uint32Array(1);
-    for (;;) {
-      crypto.getRandomValues(buf);
-      const value = buf[0] ?? 0;
-      if (value < limit) {
-        return value % maxExclusive;
-      }
-    }
-  }
-  return Math.floor(Math.random() * maxExclusive);
+/** 强度分档 → 进度条 / 圆点配色（评分数值来自 @/lib/passwordGen，配色留在界面层） */
+function strengthColor(score: number): string {
+  return STRENGTH_COLORS[score] ?? 'bg-red-500';
 }
 
-/** 是否为字母或数字（用于统计符号占比）。 */
-function isAlphanumeric(char: string): boolean {
-  return /[A-Za-z0-9]/.test(char);
-}
-
-/** 是否含连续（abc / 321）或重复（aaa / 111）片段。 */
-function hasSequentialOrRepeated(password: string): boolean {
-  let repeat = 1;
-  let ascend = 1;
-  let descend = 1;
-  for (let i = 1; i < password.length; i += 1) {
-    const prev = password.charCodeAt(i - 1);
-    const curr = password.charCodeAt(i);
-    repeat = curr === prev ? repeat + 1 : 1;
-    ascend = curr === prev + 1 ? ascend + 1 : 1;
-    descend = curr === prev - 1 ? descend + 1 : 1;
-    if (repeat >= 3 || ascend >= 3 || descend >= 3) {
-      return true;
-    }
-  }
-  return false;
-}
-
-/** 生成约束条件。 */
-interface GenerateOptions {
-  /** 最大符号占比（0–1） */
-  maxSymbolRatio: number;
-  /**
-   * 位置优化（推荐开启）：首尾收敛为字母，把符号与数字集中到中段。
-   *
-   * 好处：手动输入时不会在首尾漏掉符号；复制粘贴、命令行粘贴、
-   * 表格/表单填写时首尾符号更不容易被吞掉或与相邻内容粘连。
-   */
-  edgeLetter: boolean;
-}
-
-/** Fisher-Yates 原地洗牌（随机源为密码学安全的 `randomInt`）。 */
-function shuffleInPlace(items: string[]): void {
-  for (let i = items.length - 1; i > 0; i -= 1) {
-    const j = randomInt(i + 1);
-    const a = items[i];
-    const b = items[j];
-    if (a === undefined || b === undefined) {
-      continue;
-    }
-    items[i] = b;
-    items[j] = a;
-  }
-}
-
-/**
- * 把第 `pos` 位换成满足 `accept` 的字符（与数组内任一合格位互换，保持字符组成不变）。
- * 池中不存在合格字符时返回 `false`（由调用方的界面警告兜底，不抛错、不死循环）。
- */
-function enforceAt(items: string[], pos: number, accept: (char: string) => boolean): boolean {
-  const current = items[pos];
-  if (current === undefined) {
-    return true;
-  }
-  if (accept(current)) {
-    return true;
-  }
-  for (let i = 0; i < items.length; i += 1) {
-    const candidate = items[i];
-    if (i !== pos && candidate !== undefined && accept(candidate)) {
-      items[pos] = candidate;
-      items[i] = current;
-      return true;
-    }
-  }
-  return false;
-}
-
-/**
- * 生成单条密码。
- *
- * 生成顺序（V18 重写，解决「勾了数字却一个数字都没有」「符号位置不可控」两个痛点）：
- *   1. **各字符类先各占一位**：每个勾选的分类（大写 / 小写 / 数字 / 符号）先强制出现一次，
- *      满足「必须同时包含数字与符号」类站点校验；
- *   2. 余位从整池随机填充，受最大符号占比约束（非符号池为空时自动放宽，永不死循环）；
- *   3. Fisher-Yates 洗牌，打散「先插入的分类总排在前几位」的痕迹；
- *   4. **位置优化**：首尾收敛为字母，符号与数字自然集中在中段。
- */
-function generateOne(
-  length: number,
-  pool: string,
-  requiredSets: readonly string[],
-  nonSymbols: string,
-  options: GenerateOptions,
-): string {
-  if (pool.length === 0 || length <= 0) {
-    return '';
-  }
-  const maxSymbols = Math.floor(length * options.maxSymbolRatio);
-  const out: string[] = [];
-  let symbolCount = 0;
-
-  // 1) 每个启用的字符类各先落一位
-  for (const set of requiredSets) {
-    if (out.length >= length) {
-      break;
-    }
-    const char = set.charAt(randomInt(set.length));
-    if (!isAlphanumeric(char)) {
-      symbolCount += 1;
-    }
-    out.push(char);
-  }
-
-  // 2) 余位随机填充
-  while (out.length < length) {
-    const candidates = symbolCount >= maxSymbols && nonSymbols.length > 0 ? nonSymbols : pool;
-    const char = candidates.charAt(randomInt(candidates.length));
-    if (!isAlphanumeric(char)) {
-      symbolCount += 1;
-    }
-    out.push(char);
-  }
-
-  // 3) 洗牌
-  shuffleInPlace(out);
-
-  // 4) 位置优化：首尾为字母（池中无字母时自动跳过，界面会给出警告）
-  if (options.edgeLetter) {
-    const isLetter = (char: string): boolean => /[A-Za-z]/.test(char);
-    enforceAt(out, out.length - 1, isLetter);
-    enforceAt(out, 0, isLetter);
-  }
-
-  return out.join('');
-}
-
-/** 综合强度评分：熵值定档，字符种类与连续/重复缺陷扣分。 */
-function evaluateStrength(password: string, poolSize: number): Strength {
-  const entropy = password.length * Math.log2(Math.max(2, poolSize));
-  const hasUpper = /[A-Z]/.test(password);
-  const hasLower = /[a-z]/.test(password);
-  const hasDigit = /\d/.test(password);
-  const hasSymbol = /[^A-Za-z0-9]/.test(password);
-  const classCount = [hasUpper, hasLower, hasDigit, hasSymbol].filter(Boolean).length;
-  const sequential = hasSequentialOrRepeated(password);
-
-  const feedback: string[] = [];
-  if (password.length < 12) {
-    feedback.push('长度低于 12，建议至少 12 位');
-  }
-  if (!hasUpper) {
-    feedback.push('缺少大写字母');
-  }
-  if (!hasLower) {
-    feedback.push('缺少小写字母');
-  }
-  if (!hasDigit) {
-    feedback.push('缺少数字');
-  }
-  if (!hasSymbol) {
-    feedback.push('缺少符号');
-  }
-  if (sequential) {
-    feedback.push('包含连续或重复字符（如 abc / 111）');
-  }
-
-  let score = 0;
-  if (entropy >= 100) {
-    score = 4;
-  } else if (entropy >= 75) {
-    score = 3;
-  } else if (entropy >= 55) {
-    score = 2;
-  } else if (entropy >= 35) {
-    score = 1;
-  }
-  if (classCount <= 2) {
-    score = Math.max(0, score - 1);
-  }
-  if (sequential) {
-    score = Math.max(0, score - 1);
-  }
-
-  if (feedback.length === 0) {
-    feedback.push(`熵约 ${Math.round(entropy)} bit，字符组合充分`);
-  }
-
-  return {
-    score,
-    label: STRENGTH_LABELS[score] ?? '很弱',
-    color: STRENGTH_COLORS[score] ?? 'bg-red-500',
-    feedback,
-    entropy,
-  };
-}
-
-/** 字符去重（保持首次出现顺序）。 */
-function dedupeChars(value: string): string {
-  let out = '';
-  for (const char of value) {
-    if (!out.includes(char)) {
-      out += char;
-    }
-  }
-  return out;
-}
 
 /**
  * 密码生成器（对齐 ops-tools 的 PasswordGenerator）：
@@ -379,7 +166,15 @@ export function PasswordGenerator(_props: CommandProps): React.JSX.Element {
   const [customCharset, setCustomCharset] = usePersistedState<string>(COMMAND_ID, 'customCharset', '');
   const [count, setCount] = usePersistedState<number>(COMMAND_ID, 'count', 1);
   const [edgeLetter, setEdgeLetter] = usePersistedState<boolean>(COMMAND_ID, 'edgeLetter', true);
-  const [maxSymbolPercent, setMaxSymbolPercent] = usePersistedState<number>(COMMAND_ID, 'maxSymbolPercent', 100);
+  const [separateSymbols, setSeparateSymbols] = usePersistedState<boolean>(COMMAND_ID, 'separateSymbols', true);
+  // 键名由 maxSymbolPercent 改为 symbolPercent，默认值从「不限制」降到 25%（V25）。
+  // 沿用旧键名会让已有用户继续吃 100% 的默认值 —— 那正是被投诉的行为
+  // （16 位密码里冒出 5~6 个符号，还常常两个挨在一起）。
+  const [symbolPercent, setSymbolPercent] = usePersistedState<number>(
+    COMMAND_ID,
+    'symbolPercent',
+    Math.round(DEFAULT_MAX_SYMBOL_RATIO * 100),
+  );
   const [advancedOpen, setAdvancedOpen] = React.useState<boolean>(false);
   const [visible, setVisible] = React.useState<boolean>(true);
   const [nonce, setNonce] = React.useState<number>(0);
@@ -457,37 +252,92 @@ export function PasswordGenerator(_props: CommandProps): React.JSX.Element {
     if (edgeLetter && letters.length === 0) {
       list.push('字符集不含字母，「首尾为字母」无法保证（已自动跳过）');
     }
-    if (maxSymbolPercent === 0 && nonSymbols.length === 0) {
+    if (symbolPercent === 0 && nonSymbols.length === 0) {
       list.push('字符集只剩符号，「最大符号占比 0%」无法保证');
+    }
+    if (separateSymbols && symbolChars.length > 0 && nonSymbols.length === 0) {
+      list.push('字符集只含符号，「符号不连续」无法成立');
     }
     if (symbolChars.length === 0 && enabled.symbol && !customMode) {
       list.push('符号分组交集为空，已不含任何符号');
     }
     return list;
-  }, [pool.length, customMode, edgeLetter, letters.length, maxSymbolPercent, nonSymbols.length, symbolChars.length, enabled.symbol]);
+  }, [
+    pool.length,
+    customMode,
+    edgeLetter,
+    letters.length,
+    symbolPercent,
+    separateSymbols,
+    nonSymbols.length,
+    symbolChars.length,
+    enabled.symbol,
+  ]);
 
-  /** 批量生成结果。 */
-  const passwords = React.useMemo<string[]>(() => {
+  /**
+   * 批量生成。生成算法在 `@/lib/passwordGen`（与密码库共用同一份），
+   * 这里只负责把界面上的选项翻译成约束，并把各次生成的收敛说明合并去重。
+   */
+  const generated = React.useMemo<{ list: string[]; notes: string[]; symbolCount: number }>(() => {
     if (pool.length === 0) {
-      return [];
+      return { list: [], notes: [], symbolCount: 0 };
     }
-    const options: GenerateOptions = {
-      maxSymbolRatio: maxSymbolPercent / 100,
-      edgeLetter,
-    };
     const list: string[] = [];
+    const notes = new Set<string>();
+    let symbolCount = 0;
     for (let i = 0; i < count; i += 1) {
-      list.push(generateOne(length, pool, requiredSets, nonSymbols, options));
+      const result: GenerateResult = generatePassword({
+        length,
+        pool,
+        requiredSets,
+        nonSymbols,
+        symbols: symbolChars,
+        maxSymbolRatio: symbolPercent / 100,
+        edgeLetter,
+        separateSymbols,
+      });
+      list.push(result.password);
+      for (const note of result.notes) {
+        notes.add(note);
+      }
+      if (i === 0) {
+        symbolCount = result.symbolCount;
+      }
     }
-    return list;
+    return { list, notes: [...notes], symbolCount };
     // nonce 变化触发重新生成
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [length, pool, requiredSets, nonSymbols, count, edgeLetter, maxSymbolPercent, nonce]);
+  }, [
+    length,
+    pool,
+    requiredSets,
+    nonSymbols,
+    symbolChars,
+    count,
+    edgeLetter,
+    separateSymbols,
+    symbolPercent,
+    nonce,
+  ]);
+
+  const passwords = generated.list;
+
+  /** 全部提示（静态约束 + 本次生成实际被收敛掉的约束） */
+  const warningList = React.useMemo<string[]>(
+    () => [...warnings, ...generated.notes],
+    [warnings, generated.notes],
+  );
 
   /** 首条密码的强度（列表逐条强度单独计算）。 */
-  const strength = React.useMemo<Strength>(
-    () => evaluateStrength(passwords[0] ?? '', Math.max(2, pool.length)),
-    [passwords, pool.length],
+  const strength = React.useMemo<Strength>(() => {
+    const base = evaluatePasswordStrength(passwords[0] ?? '', Math.max(2, pool.length));
+    return { ...base, color: strengthColor(base.score) };
+  }, [passwords, pool.length]);
+
+  /** 首条密码里是否仍有相邻符号（用于把「不连续」是否真的达成摆在明面上） */
+  const adjacentSymbols = React.useMemo<boolean>(
+    () => (passwords[0] !== undefined ? hasAdjacentSymbols(passwords[0]) : false),
+    [passwords],
   );
 
   const regenerate = React.useCallback((): void => {
@@ -534,7 +384,7 @@ export function PasswordGenerator(_props: CommandProps): React.JSX.Element {
   return (
     <CommandShell
       title="密码生成器"
-      description="本地随机强密码：符号安全分组、排除易混淆字符、批量生成（敏感内容不写历史）"
+      description="本地随机强密码：符号不连排、符号占比可控、符号安全分组、排除易混淆字符、批量生成（敏感内容不写历史）"
       icon={<ShieldCheck className="h-4 w-4" />}
       onBack={shell.onBack}
       favorite={shell.favorite}
@@ -546,7 +396,7 @@ export function PasswordGenerator(_props: CommandProps): React.JSX.Element {
       samples={[
         {
           label: '16 位通用',
-          description: '四类字符全开 + 排除易混淆的 il1Lo0O，日常账号够用',
+          description: '四类字符全开 + 排除易混淆的 il1Lo0O；符号最多 25% 且不连排',
           apply: () => {
             setLength(16);
             setEnabled({ upper: true, lower: true, digit: true, symbol: true });
@@ -554,16 +404,35 @@ export function PasswordGenerator(_props: CommandProps): React.JSX.Element {
             setExcludeAmbiguous(false);
             setCustomCharset('');
             setCount(1);
+            setSymbolPercent(25);
+            setSeparateSymbols(true);
+            setEdgeLetter(true);
+          },
+        },
+        {
+          label: '少符号易手输',
+          description: '要照着敲的场合：16 位、符号最多 10%、排除模糊字符',
+          apply: () => {
+            setLength(16);
+            setEnabled({ upper: true, lower: true, digit: true, symbol: true });
+            setExcludeSimilar(true);
+            setExcludeAmbiguous(true);
+            setCustomCharset('');
+            setCount(1);
+            setSymbolPercent(10);
+            setSeparateSymbols(true);
+            setEdgeLetter(true);
           },
         },
         {
           label: '只字母数字',
-          description: '有些老系统不收符号 —— 32 位补足强度',
+          description: '有些老系统不收符号 —— 32 位把强度补回来',
           apply: () => {
             setLength(32);
             setEnabled({ upper: true, lower: true, digit: true, symbol: false });
             setExcludeSimilar(false);
             setCustomCharset('');
+            setCount(1);
           },
         },
         {
@@ -575,6 +444,9 @@ export function PasswordGenerator(_props: CommandProps): React.JSX.Element {
             setExcludeSimilar(false);
             setExcludeAmbiguous(false);
             setCustomCharset('');
+            setCount(1);
+            setSymbolPercent(25);
+            setSeparateSymbols(true);
           },
         },
         {
@@ -584,6 +456,8 @@ export function PasswordGenerator(_props: CommandProps): React.JSX.Element {
             setCount(10);
             setLength(16);
             setEnabled({ upper: true, lower: true, digit: true, symbol: true });
+            setSymbolPercent(25);
+            setSeparateSymbols(true);
           },
         },
       ]}
@@ -653,13 +527,41 @@ export function PasswordGenerator(_props: CommandProps): React.JSX.Element {
                 <span className="ml-1 text-[11px] font-normal text-brand">推荐</span>
               </span>
               <span className="mt-0.5 block text-[11px] leading-relaxed text-muted-foreground">
-                首尾固定为字母，符号与数字集中在中段；每类勾选的字符至少出现一次
+                首尾固定为字母；每类勾选的字符至少出现一次
               </span>
             </span>
             <Switch
               checked={edgeLetter}
               onCheckedChange={(value) => setEdgeLetter(value === true)}
               aria-label="位置优化（首尾为字母）"
+            />
+          </label>
+
+          {/* 符号不连续（V25）：用户反馈「特殊字符尽量不要连着出现多个特殊字符」。
+              用「同奇偶位置互不相邻」一次选点，不是生成完再修补 —— 所以是硬保证。 */}
+          <label className="flex items-start justify-between gap-3 rounded-lg border border-brand/30 bg-brand-muted/40 px-3 py-2">
+            <span className="min-w-0">
+              <span className="block text-sm font-medium text-foreground">
+                符号不连续
+                <span className="ml-1 text-[11px] font-normal text-brand">推荐</span>
+              </span>
+              <span className="mt-0.5 block text-[11px] leading-relaxed text-muted-foreground">
+                任意两个符号都不相邻，不出现「a!!b」这类连排
+                {pool.length > 0 && symbolChars.length > 0 ? (
+                  <>
+                    {' '}
+                    · 本批首位 {generated.symbolCount} 个符号
+                    {adjacentSymbols ? (
+                      <span className="text-amber-600">（未达成，见下方提示）</span>
+                    ) : null}
+                  </>
+                ) : null}
+              </span>
+            </span>
+            <Switch
+              checked={separateSymbols}
+              onCheckedChange={(value) => setSeparateSymbols(value === true)}
+              aria-label="符号不连续"
             />
           </label>
 
@@ -711,11 +613,10 @@ export function PasswordGenerator(_props: CommandProps): React.JSX.Element {
                   </div>
                 </div>
 
-                {/* 排除字符 */}
+                {/* 排除字符（位置优化 / 符号不连续已提到一级选项，这里不再重复摆放） */}
                 <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                   {switchRow('排除相似字符', excludeSimilar, setExcludeSimilar, `(${SIMILAR_CHARS})`)}
                   {switchRow('排除模糊字符', excludeAmbiguous, setExcludeAmbiguous, `(${AMBIGUOUS_CHARS.slice(0, 8)}…)`)}
-                  {switchRow('位置优化（首尾为字母）', edgeLetter, setEdgeLetter, '推荐')}
                 </div>
 
                 {/* 自定义字符集 */}
@@ -735,20 +636,30 @@ export function PasswordGenerator(_props: CommandProps): React.JSX.Element {
                 <div className="flex flex-col gap-2">
                   <div className="flex items-center justify-between">
                     <span className="text-xs text-foreground">最大符号占比</span>
-                    <span className="font-mono text-xs text-brand">{maxSymbolPercent}%</span>
+                    <span className="font-mono text-xs text-brand">
+                      {symbolPercent}%
+                      {pool.length > 0 && symbolChars.length > 0 ? (
+                        <span className="ml-1 text-muted-foreground">
+                          （{length} 位最多 {Math.floor((length * symbolPercent) / 100)} 个）
+                        </span>
+                      ) : null}
+                    </span>
                   </div>
                   <Slider
                     min={0}
                     max={100}
                     step={5}
-                    value={[maxSymbolPercent]}
+                    value={[symbolPercent]}
                     onValueChange={(values) => {
                       const next = values[0];
                       if (typeof next === 'number') {
-                        setMaxSymbolPercent(next);
+                        setSymbolPercent(next);
                       }
                     }}
                   />
+                  <span className="text-[11px] leading-relaxed text-muted-foreground">
+                    符号越少越好敲：一般账号 25% 足够，需要照着输入时建议 10%。勾了「符号」类就至少 1 个。
+                  </span>
                 </div>
               </div>
             ) : null}
@@ -791,7 +702,8 @@ export function PasswordGenerator(_props: CommandProps): React.JSX.Element {
                   </span>
                 )}
                 <span className="ml-1 text-muted-foreground">
-                  （约 {Math.round(strength.entropy)} bit 熵 · 字符池 {pool.length}）
+                  （约 {Math.round(strength.entropy)} bit 熵 · 字符池 {pool.length}
+                  {pool.length > 0 ? ` · 符号 ${generated.symbolCount} 个` : ''}）
                 </span>
               </span>
             </div>
@@ -815,9 +727,9 @@ export function PasswordGenerator(_props: CommandProps): React.JSX.Element {
             ) : null}
           </div>
 
-          {warnings.length > 0 ? (
+          {warningList.length > 0 ? (
             <ul className="flex flex-col gap-1">
-              {warnings.map((item) => (
+              {warningList.map((item) => (
                 <li key={item} className="text-[11px] text-amber-600">
                   · {item}
                 </li>
@@ -872,7 +784,7 @@ export function PasswordGenerator(_props: CommandProps): React.JSX.Element {
           {passwords.length > 1 ? (
             <div className="scrollbar-thin flex max-h-[280px] flex-col gap-2 overflow-auto rounded-xl border border-border bg-card p-3">
               {passwords.map((password, index) => {
-                const rowStrength = evaluateStrength(password, Math.max(2, pool.length));
+                const rowStrength = evaluatePasswordStrength(password, Math.max(2, pool.length));
                 return (
                   <div
                     key={`${index}-${password}`}
@@ -884,7 +796,7 @@ export function PasswordGenerator(_props: CommandProps): React.JSX.Element {
                     <span
                       className={cn(
                         'h-1.5 w-1.5 shrink-0 rounded-full',
-                        rowStrength.color,
+                        strengthColor(rowStrength.score),
                       )}
                       title={`强度：${rowStrength.label}`}
                     />

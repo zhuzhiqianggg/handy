@@ -109,13 +109,24 @@ if (only !== null) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function ab(callArgs) {
+/**
+ * 调一次 agent-browser CLI。
+ *
+ * ⚠️ `timeout` 必须可调：**脚本还没起过浏览器时，第一次 `open` 会顺带冷启动无头浏览器，
+ * 实测要 60~90 秒**。用固定的 60s 去调它，等于每次都把冷启动掐断在半路 ——
+ * 浏览器留在半活状态，之后每一步都会慢到超时（整轮看起来像卡死）。
+ * 所以开局先用 `WARMUP_TIMEOUT` 显式热一次（见下方 `open`），之后换页只要 ~0.3 秒。
+ */
+function ab(callArgs, timeout = 60_000) {
   const result = spawnSync(process.execPath, [AB, ...callArgs], {
     encoding: 'utf8',
-    timeout: 60_000,
+    timeout,
   });
   return `${result.stdout ?? ''}${result.stderr ?? ''}`.trim();
 }
+
+/** 冷启动无头浏览器的预算（实测 60~90 秒，给一倍余量） */
+const WARMUP_TIMEOUT = 180_000;
 
 /**
  * 页面内测量。**用 `truncate` 类元素要过滤掉** ——
@@ -257,6 +268,10 @@ push(`dev server ready: ${ready}（http://localhost:${PORT}）`);
 const rows = [];
 if (ready) {
   try {
+    // 预热一次：无头浏览器冷启动要 60~90 秒，只在这里付；否则每页都在冷启动里被掐断
+    const warmStart = Date.now();
+    ab(['open', `http://localhost:${PORT}/?tool=timestamp`], WARMUP_TIMEOUT);
+    push(`  （已预热无头浏览器：${Date.now() - warmStart}ms）`);
     for (const width of widths) {
       push(`\n--- viewport ${width}×${height} ---`);
       ab(['set', 'viewport', String(width), String(height)]);
