@@ -27,7 +27,7 @@
 | 自检三件套 | `scripts/audit/tool-audit.mjs`（静态）/ `layout-audit.mjs`（几何）/ `sample-smoke.mjs`（真点示例） |
 | 回归 | `scripts/regression/run.mjs` + `test-*.mjs`；`scripts/new-tool.mjs` 脚手架 |
 
-## 3. 状态快照（2026-09-17 00:20 · V34 已交付、已打包装机，**待提交**）
+## 3. 状态快照（2026-09-17 00:20 · V34 已交付、已提交、已打包装机）
 
 - Phase 1（MVP）功能全部交付；**最近一次打包是 V34**（nsis 4,302,332 B / msi 5,537,792 B /
   handy.exe 11,121,664 B，09-17 00:15 产出），**已静默安装到用户机**
@@ -51,7 +51,7 @@
   **v6/v7 尚未在真实库生效**（应用没跑到 `db::init`），由用户首次启动时顺次自动应用；
   已由 `cargo test --lib db::migrations` 3 条断言守住。
 - 批次明细与提交号 → PROJECT_STATUS §1（最近提交 `git log --oneline -6`）。
-  **V34**（见 §3.2）；V33 `eeed5f9`；V28 `bc05a8c`；V27 `f7e825f`+`4268257`；V26 `2969256`+`43a8a06`；V25 `5f8fe8a`+`3001510`。
+  **V34 `d366340`**；V33 `eeed5f9`；V28 `bc05a8c`；V27 `f7e825f`+`4268257`；V26 `2969256`+`43a8a06`；V25 `5f8fe8a`+`3001510`。
 
 ### 3.1 V25–V27 事实源（细节见 PROJECT_STATUS §1.11–§1.13 与日志）
 

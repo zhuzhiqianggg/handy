@@ -35,7 +35,7 @@
 | 项 | 值 |
 | --- | --- |
 | 阶段 | Phase 1 收尾 + V18–**V34** 反馈修复（MVP 完成，待装机验收） |
-| git | **V33 = `eeed5f9`**（12 文件，+1637/−399：格子改真实收纳 + 挂件容器 + 心跳判据纠正 + 迁移回归测试，见 §1.19）；**V28 = `bc05a8c`**（7 文件：唤醒保留工具视图 + 贴条搜索直达工具，见 §1.14）；**V27 = `f7e825f`**（19 文件，+2251/−31：新增接口测试工具 `api-tester`（首个网络类 Rust 命令）+ 清掉建议条 14 处识别误报 + 回归扩到 17 套 1778 条，见 §1.13）；**V26 = `2969256`**（19 文件，+2364/−158）+ `43a8a06`（文档回填：提交号 + §2.2 三处 STALE 校正 + 日志）；**V25 = `5f8fe8a`**（18 文件，+2649/−565）+ `3001510`（文档回填：修恒真断言 + 回填提交号/包体量）；**V24 = `ef9bba4`**（41 文件，+2273/−326）+ `5d16a0c`（示例条冒烟）；**V23 = `f81a914`**（17 文件，+3334/−184）；V22 = `d49857c`；V21 = `685b8a7`；V20 = `f96a374`；V19 = `64e3008`；`be1dc58` = V18 文档回填；`862d5bf` = V18 批次 |
+| git | **V34 = `d366340`**（12 文件，+1272/−409：修 Z 序/驻留 + 挂件对齐工作台 + 收纳与视觉收口，见 §1.20）；**V33 = `eeed5f9`**（12 文件，+1637/−399：格子改真实收纳 + 挂件容器 + 心跳判据纠正 + 迁移回归测试，见 §1.19）+ `3322cc3`（文档回填）；**V28 = `bc05a8c`**（7 文件：唤醒保留工具视图 + 贴条搜索直达工具，见 §1.14）；**V27 = `f7e825f`**（19 文件，+2251/−31：新增接口测试工具 `api-tester`（首个网络类 Rust 命令）+ 清掉建议条 14 处识别误报 + 回归扩到 17 套 1778 条，见 §1.13）；**V26 = `2969256`**（19 文件，+2364/−158）+ `43a8a06`（文档回填：提交号 + §2.2 三处 STALE 校正 + 日志）；**V25 = `5f8fe8a`**（18 文件，+2649/−565）+ `3001510`（文档回填：修恒真断言 + 回填提交号/包体量）；**V24 = `ef9bba4`**（41 文件，+2273/−326）+ `5d16a0c`（示例条冒烟）；**V23 = `f81a914`**（17 文件，+3334/−184）；V22 = `d49857c`；V21 = `685b8a7`；V20 = `f96a374`；V19 = `64e3008`；`be1dc58` = V18 文档回填；`862d5bf` = V18 批次 |
 | 安装包（**V34 已重新打包并静默安装**，09-17 00:15） | `src-tauri/target/release/bundle/nsis/Handy_0.1.0_x64-setup.exe`（**4,302,332 B**）<br>`src-tauri/target/release/bundle/msi/Handy_0.1.0_x64_en-US.msi`（**5,537,792 B**）<br>`src-tauri/target/release/handy.exe`（免安装可直接跑，**11,121,664 B**）<br>取证：`handy.exe`(00:15:50) 晚于 `dist/index.html`(00:10:43)，**且安装后的 exe 与构建产物逐字节只差 3 字节**（Tauri bundle 标记位）⇒ 装上去的就是本次 V34 产物；一键脚本 `bash scripts/build-release.sh` 见 §5。**本轮装完即止，未代为启动**（见 §1.19.2） |
 | ⚠️ 首次启动会做数据库迁移 | v6/v7 尚未在真实库上生效（应用从没跑到 `db::init`，见 §1.19.2）。用户**首次正常启动时**会依次应用：v6 `grid_boxes` 加 `kind`/`content` + 把「系统」格子标成 `system` → **v7 随后把「系统」格子及其登记行删掉**（用户要求：原生快捷方式不动态整理，系统格不需要）。已由 `cargo test --lib db::migrations` 3 条断言覆盖，命令行可复跑 |
 
@@ -1265,11 +1265,12 @@ node scripts/regression/run.mjs          # 17/17 套通过时 exit 0
 #   量 4 个指标：ox/mox 横向溢出 · clipX/clipY 内容溢出但不滚 · overlap 非祖孙块级矩形相交 · 截图
 #   注意：dev server 与浏览器必须在同一条命令里（沙箱会回收后台进程）；结果写 _shots/audit/layout-audit.json
 #   V25：脚本开局先做一次预热 open（WARMUP_TIMEOUT=180s）付掉浏览器冷启动，之后每页只要 ~0.3 秒
-#   ⚠️ 跑完它会吃光本回合的删除额度 —— 别在同一个回合里接着 vite build（见 §3 约束 18）
+#   ⚠️ 它会吃掉本回合的删除额度 —— 别和 vite build 写在同一条 Bash 调用里（见 §3 约束 18）。
+#      V34 实测：审计与 build **分成两条 Bash 调用**（等审计自己跑完）就不会互相拦，无需跨回合。
 
 # 示例条 / 关键功能冒烟（V24 起；改了任何工具的 samples 或界面首屏就该跑）
 #   静态自检只能证明「文件里写了 samples=」，证明不了「点下去真填进去了」——
-#   本脚本在真实 dist + 无头浏览器里跑 28 个用例（V27 起 25 个工具 + 3 个模块页全覆盖），断言的是**用户能看到的后果**
+#   本脚本在真实 dist + 无头浏览器里跑 29 个用例（V27 起 25 个工具 + 3 个模块页 + 1 个独立窗口全覆盖），断言的是**用户能看到的后果**
 #   （哈希工具点了示例必须真出现那段摘要；密码示例必须真生成 16 位且符号 ≤4 个、不连排）
 #   两类用例：chip 用例（点示例 chip）/ probe 用例（不点 chip，在页面里跑探针断言
 #   —— 正则库 30 条自检徽标、桌面整理控制台首屏、JWT 解码四态、Cron 常用表达式、SQL 示例填充与错误徽标）
@@ -1292,8 +1293,17 @@ node scripts/audit/layout-audit.mjs --only=toolbox        # 只跑某一组（to
 node scripts/audit/layout-audit.mjs --shots               # 同时存截图到 _shots/audit/
 
 # 打包（V27 起推荐一键脚本：tsc → 分批清 dist → vite build → tauri build → 自动取证 mtime）
-bash scripts/build-release.sh              # 完整打包，日志落 .build-logs/
+#   ⚠️ 必须用 PortableGit 全路径 bash 并显式构造 PATH（WorkBuddy 的 bash shim 会假成功、沙箱缺 coreutils）；
+#      node 目录要放 PATH 最前，否则会挑到系统 v24 而不是受管 v22。见 §3 约束。
+bash scripts/build-release.sh              # 完整打包 + 装机 + 启动核验，日志落 .build-logs/
 bash scripts/build-release.sh --skip-tsc   # 跳过类型检查（赶时间用）
+# V34 起推荐的两段式（本会话 GUI 起不来 ⇒ 装完即止）：
+bash scripts/build-release.sh --no-deploy --skip-tsc --skip-regression   # 只构建（后两项前提是刚单独跑绿）
+# 然后手工装机（可控 + 能逐字节取证）：
+#   MSYS_NO_PATHCONV=1 taskkill /IM handy.exe /F          ← 注意不是 //IM（Git Bash 下不认）
+#   ./src-tauri/target/release/bundle/nsis/Handy_0.1.0_x64-setup.exe /S
+#   cmp -l src-tauri/target/release/handy.exe "$LOCALAPPDATA/Handy/handy.exe"   # 应只差 3 字节
+#   —— 写 `//IM`、用 PowerShell 的 Move/Remove、或从 Bash 里调 powershell 都会被拦/失效
 
 # 手动等价流程（脚本内部做的事，排查问题时用）：
 #   1) node node_modules/typescript/bin/tsc --noEmit -p tsconfig.json
@@ -1348,6 +1358,11 @@ node -e "…起 vite :41779 → 轮询 fetch 就绪 → node \$AB open 'http://l
 
 ## 6. 续接开工三件事
 
-1. **先跑五绿确认树健康**：`cargo check`（经 `scripts/rust-env.sh`）+ `tsc --noEmit` + `node scripts/regression/run.mjs`（**6/6 套 / 715 条断言**）+ `node scripts/audit/tool-audit.mjs`（**0 FAIL / 0 WARN**）+ `node scripts/audit/layout-audit.mjs`（**0 溢出 / 0 裁切 / 0 重叠**），均应为 exit 0。`vite build` 见 §3 约束 16 / 18（**别先跑 `clean-dist.mjs`；也别和布局审计同回合**）。
+1. **先跑六绿确认树健康**（V34 起把 Rust 单测也纳入）：`cargo check`（经 `scripts/rust-env.sh`）+
+   `cargo test --lib`（**12/12**，含迁移断言）+ `tsc --noEmit`（0 错）+
+   `node scripts/regression/run.mjs`（**17/17 套**）+ `node scripts/audit/tool-audit.mjs`（**325 PASS / 0 FAIL / 0 WARN**）+
+   `node scripts/audit/layout-audit.mjs`（**0 / 84 组合有问题**，约 10 分钟），均应为 exit 0。
+   需要看真实交互面时再补 `node scripts/audit/sample-smoke.mjs`（**29/29**，**必须先 `vite build`**）。
+   `vite build` 见 §4 打包段（**别先跑 `clean-dist.mjs`；也别和布局审计写在同一条 Bash 调用里**）。
 2. **确认上一轮验收结论**：若用户已装机验收，把发现的问题按「现象 + 期望」记录到本文档 §2 或当日日志，再派人修。
 3. **选下一个方向**：默认优先级 = ① 修验收问题 → ② §2.2 技术债（其中「**文本处理台 Phase 2**」是价值最高的待办；其次是「清空工具草稿」的界面入口，`usePersistedState` 已导出 `clearPersisted` 但没接界面）→ ③ §2.3 Phase 2 模块。
