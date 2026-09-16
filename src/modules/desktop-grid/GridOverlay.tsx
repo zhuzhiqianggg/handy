@@ -234,6 +234,54 @@ export function GridOverlay(): React.JSX.Element {
       .catch(() => undefined);
   }, [showHint]);
 
+  // —— 健康监控（V32）：心跳 + 故障自捕获 ——
+
+  // 心跳：每 10s 向 Rust 报一次「JS 还活着」。Rust 侧 90s 收不到心跳就判定 webview
+  // 白屏（透明窗里白屏 = 什么都看不见，用户只会觉得「格子显示了一下就没了」），
+  // 自动销毁重建挂件窗 —— 自愈过程无需用户发现。
+  useEffect(() => {
+    if (!isTauri()) {
+      return;
+    }
+    const beat = (): void => {
+      void ipc.gridOverlayHeartbeat().catch(() => undefined);
+    };
+    beat();
+    const timer = window.setInterval(beat, 10_000);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  // 故障自捕获：白屏的根因（JS 异常把 React 树整棵卸掉）此前无据可查。
+  // 这里把未捕获错误/Promise 拒绝上报落库，管理页展示、用户截图即可反馈。
+  useEffect(() => {
+    if (!isTauri()) {
+      return;
+    }
+    const report = (kind: string, detail: unknown): void => {
+      const message =
+        detail instanceof Error
+          ? `${detail.name}: ${detail.message}`
+          : typeof detail === 'string'
+            ? detail
+            : String(detail);
+      void ipc.gridOverlayFault(`[${kind}] ${message}`).catch(() => undefined);
+    };
+    const onError = (event: ErrorEvent): void => {
+      report('error', event.error ?? event.message);
+    };
+    const onRejection = (event: PromiseRejectionEvent): void => {
+      report('unhandled-rejection', event.reason);
+    };
+    window.addEventListener('error', onError);
+    window.addEventListener('unhandledrejection', onRejection);
+    return () => {
+      window.removeEventListener('error', onError);
+      window.removeEventListener('unhandledrejection', onRejection);
+    };
+  }, []);
+
   // 透明窗：html/body/**#root** 的白底都会破坏透明（index.css 的 bg-background /
   // index.html 内联 #root{background:#fff} —— V30.1 前格子层白底盖壁纸的真凶）
   useEffect(() => {

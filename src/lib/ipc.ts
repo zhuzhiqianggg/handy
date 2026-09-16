@@ -225,6 +225,14 @@ export const ipc = {
   /** 上报命中区域（挂件窗内物理像素，Rust 光标轮询用；全量替换） */
   gridOverlayUpdateRegions: (regions: GridRegion[]): Promise<void> =>
     call<void>('grid_overlay_update_regions', { regions }),
+  /** 挂件前端心跳（每 10s；Rust 据此判定 webview 白屏并自动重建） */
+  gridOverlayHeartbeat: (): Promise<void> => call<void>('grid_overlay_heartbeat'),
+  /** 挂件前端故障上报（window.onerror / unhandledrejection） */
+  gridOverlayFault: (message: string): Promise<void> =>
+    call<void>('grid_overlay_fault', { message }),
+  /** 读取挂件最近一次前端故障（无记录返回 null） */
+  gridOverlayFaultGet: (): Promise<string | null> =>
+    call<string | null>('grid_overlay_fault_get'),
   /** 显示（幂等）桌面挂件窗（Rust 侧创建无边框透明窗并压回桌面层） */
   gridOverlayShow: (): Promise<void> => call<void>('grid_overlay_show'),
   /** 隐藏桌面挂件窗（不销毁，盒子配置保留） */

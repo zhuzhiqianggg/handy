@@ -64,6 +64,8 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
   /** 行内重命名：正在编辑的格子 id + 草稿 */
   const [renamingId, setRenamingId] = useState<number | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
+  /** 挂件前端最近一次故障（白屏/JS 崩溃取证；无记录为 null） */
+  const [fault, setFault] = useState<string | null>(null);
 
   const refresh = useCallback(async (): Promise<void> => {
     setLoading(true);
@@ -89,6 +91,10 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
   useEffect(() => {
     void refresh();
     void refreshSnapshots();
+    void ipc
+      .gridOverlayFaultGet()
+      .then(setFault)
+      .catch(() => undefined);
   }, [refresh, refreshSnapshots]);
 
   const toggleOverlay = useCallback((): void => {
@@ -322,19 +328,29 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
           <Info className="mt-0.5 h-4 w-4 shrink-0 text-brand" />
           <div className="space-y-1 text-xs leading-relaxed text-muted-foreground">
             <p>
-              <span className="font-medium text-foreground">接管桌面显示</span>
-              ：显示格子层时系统桌面图标自动隐藏、由格子接管（收起即恢复）；
+              <span className="font-medium text-foreground">原桌面 + 格子共存</span>
+              ：显示格子层
+              <span className="font-medium text-foreground">不会隐藏</span>
+              系统桌面图标（快捷方式、此电脑都还在原位）；
               桌面文件每 5 秒自动同步 —— 新文件按类型归入对应格子，删掉的自动消失，
               文件本体<span className="font-medium text-foreground">不会被移动</span>。
+              想纯格子接管可手动开「隐藏系统桌面图标」（高级选项）。
             </p>
             <p>
-              格子条目上的「×」= 从桌面视图移除且不再自动收录；把文件再拖回格子即解除。
-              「备份布局」记下当前摆法，随时能「还原」回来。
+              格子条目：双击打开原文件、
+              <span className="font-medium text-foreground">拖到其他格子即移动</span>
+              ；标题栏随时可拖动移位、双击重命名。「×」= 不再自动收录；
+              把文件再拖回格子即解除。「备份布局」记下当前摆法，随时能「还原」回来。
             </p>
             <p className="text-foreground">
               想让桌面文件夹真归位（移动文件到 Handy整理/类别/ 并可撤销），
               请切到「归类文件」页签。接管期间建议先退出腾讯桌面整理等第三方桌面工具。
             </p>
+            {fault && (
+              <p className="rounded bg-red-500/10 px-2 py-1 text-[11px] text-red-600 dark:text-red-400">
+                挂件最近一次故障（已自动恢复过）：{fault}
+              </p>
+            )}
           </div>
         </div>
 

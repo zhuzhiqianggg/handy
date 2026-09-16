@@ -19,7 +19,7 @@
 //! 全部命令均为 `async fn`（项目 P0 约定：同步命令会楔死 WebView2 COM STA），
 //! 错误一律中文可读，SQL 一律参数化绑定。
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Mutex;
 
 #[cfg(target_os = "windows")]
@@ -1170,6 +1170,28 @@ fn ensure_poller(app: AppHandle) {
                 if tick % REASSERT_TICKS == 0 {
                     reassert_attach(&win);
                 }
+                // 白屏自愈（V32）：窗口可见但前端心跳停了 = webview 已死（JS 崩溃 / 白屏，
+                // 用户看到的就是「格子显示了一下就没了」）。销毁重建，无需用户发现。
+                {
+                    let last = LAST_HEARTBEAT.load(Ordering::Relaxed);
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    if last > 0 && now.saturating_sub(last) > HEARTBEAT_TIMEOUT_SECS {
+                        eprintln!(
+                            "[Handy] 挂件前端心跳超时（{now} - {last} = {}s 无心跳），自动重建挂件窗",
+                            now - last
+                        );
+                        LAST_HEARTBEAT.store(0, Ordering::Relaxed);
+                        let _ = win.close();
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                        if let Err(err) = show_overlay(&app) {
+                            eprintln!("[Handy] 挂件窗重建失败：{err}");
+                        }
+                        continue;
+                    }
+                }
                 let want_interactive =
                     cursor_hit(&win) || FORCED_INTERACTIVE.load(Ordering::Relaxed);
                 if last_ignore != Some(!want_interactive) {
@@ -1223,6 +1245,10 @@ fn release_icons_if_taken(app: &AppHandle) {
 }
 
 /// 创建（幂等复用）并显示挂件窗。
+///
+/// V32 起格子层**不再自动隐藏系统桌面图标**（用户明确要求「原桌面 + 多一些格子」
+/// 的共存形态；自动隐藏还制造过图标泄漏 —— 挂件白屏时图标跟着一起失踪）。
+/// 想隐藏图标仍有手动开关（`grid_desktop_icons_set`，管理页）。
 fn show_overlay(app: &AppHandle) -> Result<(), String> {
     let mode = read_attach_mode(app);
     // 已存在 → 先归位再显示：避免「先以旧层级画一帧、再跳位」的闪动
@@ -1230,9 +1256,7 @@ fn show_overlay(app: &AppHandle) -> Result<(), String> {
         let attach = apply_attach(&existing, mode);
         let _ = existing.show();
         let _ = write_overlay_visible(app, true);
-        if attach.is_ok() && mode == AttachMode::Desktop {
-            takeover_icons(app, true);
-        }
+        store_heartbeat_now();
         ensure_poller(app.clone());
         return attach;
     }
@@ -1271,9 +1295,8 @@ fn show_overlay(app: &AppHandle) -> Result<(), String> {
     let attach = apply_attach(&win, mode);
     let _ = win.show();
     let _ = write_overlay_visible(app, true);
-    if attach.is_ok() && mode == AttachMode::Desktop {
-        takeover_icons(app, true);
-    }
+    // 心跳基线：给 webview 启动 + React 挂载留出宽限（超时判定见轮询线程）
+    store_heartbeat_now();
     ensure_poller(app.clone());
     attach
 }
@@ -1362,6 +1385,70 @@ pub async fn grid_overlay_update_regions(regions: Vec<GridRegion>) -> Result<(),
     Ok(())
 }
 
+// —— 挂件健康监控（V32）：心跳 + 故障上报 + 白屏自愈 ——
+
+/// 挂件前端最近一次心跳的 UNIX 秒时间戳（0 = 尚未心跳过）。
+static LAST_HEARTBEAT: AtomicU64 = AtomicU64::new(0);
+
+/// 心跳超时阈值（秒）：超过即判定 webview 已死（白屏 / JS 崩溃），重建挂件窗。
+const HEARTBEAT_TIMEOUT_SECS: u64 = 90;
+
+/// `grid_meta` 中「挂件最近一次前端故障」的键名（管理页展示，供用户截图反馈）。
+const META_KEY_OVERLAY_FAULT: &str = "overlay_last_fault";
+
+/// 记录当前时间为中心跳基线。
+fn store_heartbeat_now() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    LAST_HEARTBEAT.store(now, Ordering::Relaxed);
+}
+
+/// 挂件前端心跳（每 10 秒一次；JS 存活即有心跳）。
+#[tauri::command]
+pub async fn grid_overlay_heartbeat() -> Result<(), String> {
+    store_heartbeat_now();
+    Ok(())
+}
+
+/// 挂件前端故障上报（window.onerror / unhandledrejection 捕获）。
+///
+/// 写日志 + 落库（管理页展示）——白屏这类「看不见的故障」从此有据可查。
+#[tauri::command]
+pub async fn grid_overlay_fault(app: AppHandle, message: String) -> Result<(), String> {
+    eprintln!("[Handy][挂件故障] {message}");
+    let conn = connect(&app)?;
+    conn.execute(
+        "INSERT INTO grid_meta (key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![
+            META_KEY_OVERLAY_FAULT,
+            format!(
+                "{} {}",
+                chrono::Local::now().format("%m-%d %H:%M"),
+                message.chars().take(300).collect::<String>()
+            )
+        ],
+    )
+    .map_err(|err| format!("记录挂件故障失败：{err}"))?;
+    Ok(())
+}
+
+/// 读取挂件最近一次故障（无记录返回 null）。
+#[tauri::command]
+pub async fn grid_overlay_fault_get(app: AppHandle) -> Result<Option<String>, String> {
+    let conn = connect(&app)?;
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT value FROM grid_meta WHERE key = ?1",
+            params![META_KEY_OVERLAY_FAULT],
+            |row| row.get(0),
+        )
+        .ok();
+    Ok(raw)
+}
+
 /// 打开条目原文件（经 shell 插件 Rust API 唤起系统默认程序）。
 ///
 /// 说明：本地路径打开走 Rust 侧 `shell().open`，不经前端 `shell:allow-open` 的
@@ -1373,6 +1460,35 @@ pub async fn grid_open_path(app: AppHandle, path: String) -> Result<(), String> 
     let path = path.trim().to_string();
     if path.is_empty() {
         return Err("文件路径为空".to_string());
+    }
+    // 「系统」格子的虚拟条目（::{CLSID}，如此电脑 / 回收站）：不走 shell 插件，
+    // 直接 ShellExecuteW 打开 shell 命名空间 —— 插件对非文件系统路径的校验
+    // 不可控，这里显式处理并检查返回值（≤32 = 失败码）。
+    #[cfg(target_os = "windows")]
+    if path.starts_with("::") {
+        use windows::core::PCWSTR;
+        use windows::Win32::UI::Shell::ShellExecuteW;
+        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+        let verb = wide("open");
+        let target = wide(&path);
+        let result = unsafe {
+            ShellExecuteW(
+                None,
+                PCWSTR(verb.as_ptr()),
+                PCWSTR(target.as_ptr()),
+                None,
+                None,
+                SW_SHOWNORMAL,
+            )
+        };
+        if (result.0 as isize) <= 32 {
+            return Err(format!(
+                "打开系统位置失败（ShellExecute 返回 {}）",
+                result.0 as isize
+            ));
+        }
+        return Ok(());
     }
     use tauri_plugin_shell::ShellExt;
     // shell::open 自 2.1 起标记 deprecated（官方建议迁移 tauri-plugin-opener）；
