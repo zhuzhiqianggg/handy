@@ -369,6 +369,53 @@ export function WorkstationBar(): React.JSX.Element {
     });
   }, []);
 
+  /**
+   * V28.1（用户反馈）：候选下拉被贴条窗口裁掉。
+   *
+   * 贴条是独立透明窗口，高度 = 量高壳报给 Rust 的内容高度；候选面板是 `absolute`
+   * 定位、不占布局高度，窗口底边正好压在卡片下沿 —— 面板一露头就被窗口裁没了。
+   * 修法：面板打开时量出它超出**卡片**底边多少，往量高壳里垫一块等高的透明占位
+   * （ spacer ），窗口随之长高把面板完整包进来；面板一收起占位即撤、窗口缩回。
+   *
+   * 注意参照物必须是**卡片**而不是量高壳：壳的高度里已经含占位，拿壳当参照
+   * 会「垫高 → 量出超出为 0 → 撤占位 → 又垫高」地抖个不停。
+   */
+  const cardRef = useRef<HTMLDivElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const [panelOverflow, setPanelOverflow] = useState(0);
+
+  useEffect(() => {
+    if (!toolPanelOpen) {
+      setPanelOverflow(0);
+      return undefined;
+    }
+    let raf = 0;
+    const measure = (): void => {
+      const panel = panelRef.current;
+      const card = cardRef.current;
+      if (panel === null || card === null) {
+        return;
+      }
+      const overflow = Math.ceil(
+        panel.getBoundingClientRect().bottom - card.getBoundingClientRect().bottom,
+      );
+      setPanelOverflow(overflow > 0 ? overflow : 0);
+    };
+    const schedule = (): void => {
+      window.cancelAnimationFrame(raf);
+      raf = window.requestAnimationFrame(measure);
+    };
+    schedule();
+    const observer = new ResizeObserver(schedule);
+    if (panelRef.current !== null) {
+      observer.observe(panelRef.current);
+    }
+    return () => {
+      observer.disconnect();
+      window.cancelAnimationFrame(raf);
+    };
+  }, [toolPanelOpen, toolMatches.length]);
+
   const onToolKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLInputElement>): void => {
       if (event.key === 'Escape') {
@@ -490,6 +537,7 @@ export function WorkstationBar(): React.JSX.Element {
   return (
     <div ref={measureRef} className="w-full">
       <div
+        ref={cardRef}
         className={cn(
           'flex w-full rounded-xl bg-neutral-900/90 text-neutral-100 ring-1 ring-white/10 backdrop-blur-md',
           expanded ? 'flex-col' : 'h-11 flex-row items-center gap-3 px-3',
@@ -610,6 +658,7 @@ export function WorkstationBar(): React.JSX.Element {
             />
             {toolPanelOpen ? (
               <div
+                ref={panelRef}
                 id="bar-tool-matches"
                 role="listbox"
                 aria-label="工具候选"
@@ -686,6 +735,9 @@ export function WorkstationBar(): React.JSX.Element {
           </div>
         ) : null}
       </div>
+
+      {/* 候选面板的透明占位：把面板超出的高度垫进量高壳，窗口才会长高包住它 */}
+      {panelOverflow > 0 ? <div style={{ height: panelOverflow }} aria-hidden="true" /> : null}
     </div>
   );
 }
