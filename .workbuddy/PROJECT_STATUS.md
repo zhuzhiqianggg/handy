@@ -771,6 +771,30 @@ api-tester 异常路径抽查确认闭环（cURL 解析失败 / 传输失败 / �
 
 **提交**：`3ab372d`（代码）+ docs 提交。
 
+### 1.16 V30 批次（桌面格子 → 真·桌面接管，对标腾讯桌面整理）
+
+**用户定性**：「我们就是要替换腾讯桌面整理的，退出桌面整理也不行，格子跟真桌面没关系」。
+诊断：后端能力 21 个命令全在（贴桌层/隐藏图标/一键归类/崩溃自愈），但**前端从没把接管串起来**——
+显示格子层从不隐藏系统图标（观感=桌面纹丝不动+飘了个别的窗）、桌面文件不会自动进格子
+（引用登记是静态的）、管理页文案还在强调「不动文件」。
+
+**① 接管闭环（`grid.rs`）**：
+- `show_overlay`：贴桌模式挂载成功 → `takeover_icons(true)` 自动隐藏系统图标
+  （`SysListView32` ShowWindow，复用既有实现）；`grid_overlay_hide` → `takeover_icons(false)` 恢复。
+  失败不阻断（被第三方接管时找不到句柄只留日志）。退出/崩溃自愈链路 V21 已有，不动。
+- **`grid_desktop_sync`（新命令）**：`prune_missing_items`（只清**桌面根目录**失效引用，其他目录的
+  手工引用可能只是暂时不可达，保留）+ `auto_arrange_inner`（从 `grid_auto_arrange` 提取的增量收纳
+  内核：同名格子复用、全局去重、**dismissed 名单跳过**）→ 桌面根目录每个可见文件**始终在某个格子里**。
+- **「不再自动收录」名单**：`grid_meta/sync_dismissed`（JSON 数组）。`grid_item_delete` 加 `dismiss`
+  参数（格子层 × 按钮=记住不要它）；`grid_item_add` 自动解除（用户用行动推翻决定）。
+
+**② 前端（`GridOverlay.tsx`）**：5 秒周期 `grid_desktop_sync`（`document.visibilityState` 守卫，
+挂件收起不白扫）+ 有变化才 refresh；工具栏加 Wand2「立即整理」；× 改 dismiss 语义；
+挂载时图标已隐藏则提示「已接管桌面显示」；空态文案改写。`GridManagerView` 说明卡同步改写
+（接管语义 + 建议先退出腾讯桌面整理）。
+
+**验证**：`tsc` 0 错 · `cargo check` EXIT=0 · 回归/自检/冒烟由打包流水线门禁执行（全绿）。
+
 ---
 
 ## 2. 剩余任务与已知风险
