@@ -1112,13 +1112,17 @@ fn ensure_poller(app: AppHandle) {
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS));
                 let Some(win) = app.get_webview_window(GRID_LABEL) else {
-                    break; // 窗口已销毁 → 线程退出
+                    // 窗口已销毁 → 图标若仍在代管必须先还回去，再退出线程
+                    release_icons_if_taken(&app);
+                    break;
                 };
                 if !win.is_visible().unwrap_or(false) {
                     if last_ignore != Some(true) {
                         let _ = win.set_ignore_cursor_events(true);
                         last_ignore = Some(true);
                     }
+                    // 挂件不可见却还代管着图标 = 泄漏（非 grid_overlay_hide 路径的隐藏）
+                    release_icons_if_taken(&app);
                     continue;
                 }
                 tick += 1;
@@ -1141,23 +1145,40 @@ fn ensure_poller(app: AppHandle) {
     }
 }
 
+/// 图标当前是否由挂件层代管（true = 已被我们藏起、必须负责恢复）。
+/// 挂件窗任何**非正常收起**路径（窗口被销毁、被外部隐藏）由轮询线程据此兜底恢复 ——
+/// V30.1 用户实测踩坑：最小化 Handy 后原生桌面回来了、图标却还是空的。
+static ICONS_TAKEN: AtomicBool = AtomicBool::new(false);
+
 /// 桌面接管开关（对称）：格子层贴上桌面时隐藏系统图标，收起时恢复。
 ///
 /// 仅在贴桌模式有意义（普通窗口模式下系统图标本来就看得见，无需也不该去动）。
 /// 隐藏失败不阻断显示（例如桌面图标视图已被第三方桌面工具接管时找不到句柄），
 /// 只留日志 —— 格子层照样可用，只是出现「格子 + 原图标」双层。
 fn takeover_icons(app: &AppHandle, hidden: bool) {
-    match desktop_icons_apply(hidden) {
-        Ok(true) => {
-            let _ = write_icons_hidden(app, hidden);
+    let applied = matches!(desktop_icons_apply(hidden), Ok(true));
+    match (hidden, applied) {
+        (true, true) => {
+            let _ = write_icons_hidden(app, true);
         }
-        Ok(false) if hidden => {
+        (true, false) => {
             println!("[Handy] 未找到系统桌面图标视图，跳过自动隐藏（可能已被第三方桌面工具接管）");
         }
-        Ok(false) => {}
-        Err(err) => {
-            eprintln!("[Handy] {}桌面图标失败：{err}", if hidden { "隐藏" } else { "恢复" })
+        (false, false) => {}
+        (false, true) => {
+            let _ = write_icons_hidden(app, false);
         }
+    }
+    // 只有真正把图标藏起来才标记代管；恢复或失败一律解除
+    ICONS_TAKEN.store(applied && hidden, Ordering::Relaxed);
+}
+
+/// 兜底恢复：挂件层已不可见但图标仍在代管 → 立即还给系统（轮询线程调用）。
+fn release_icons_if_taken(app: &AppHandle) {
+    if ICONS_TAKEN.swap(false, Ordering::Relaxed) {
+        let _ = desktop_icons_apply(false);
+        let _ = write_icons_hidden(app, false);
+        println!("[Handy] 检测到挂件层已不可见，自动恢复系统桌面图标");
     }
 }
 
@@ -1603,8 +1624,27 @@ pub async fn grid_file_icon(_path: String) -> Result<Option<FileIconData>, Strin
 }
 
 /// SHGetFileInfo → GetIconInfo → GetDIBits 的完整提取链（Windows）。
+///
+/// 外壳负责 COM 生命周期：`.lnk` 快捷方式的图标解析走 shell 命名空间，
+/// 阻塞线程池的线程默认没有 COM —— 不初始化的话文件夹图标能出、快捷方式全失败
+/// （V30.1 实测：格子里的 .lnk 全是回退图标）。
 #[cfg(target_os = "windows")]
 fn extract_icon_rgba(path: &str) -> Option<FileIconData> {
+    use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
+    unsafe {
+        // 已初始化（模式不同）也不报错，沿用现态即可
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+    }
+    let result = extract_icon_rgba_impl(path);
+    unsafe {
+        CoUninitialize();
+    }
+    result
+}
+
+/// 提取链本体（调用方需保证本线程已初始化 COM）。
+#[cfg(target_os = "windows")]
+fn extract_icon_rgba_impl(path: &str) -> Option<FileIconData> {
     use std::os::windows::ffi::OsStrExt;
 
     use windows::core::PCWSTR;
@@ -1725,6 +1765,85 @@ fn extract_icon_rgba(path: &str) -> Option<FileIconData> {
     result
 }
 
+/// 「系统」格子兜底：桌面图标被隐藏后，「此电脑 / 回收站」也随之消失 ——
+/// 这两个系统入口不该跟着没了。同步时确保存在一个「系统」格子放这两个虚拟路径
+/// （CLSID；打开经 ShellExecute、图标经 SHGetFileInfo 均可正常解析）。
+/// 用户点 × 移除过（dismissed 名单）的不强行塞回。
+fn ensure_system_box(
+    conn: &Connection,
+    dismissed: &std::collections::HashSet<String>,
+) -> Result<(), String> {
+    const SYSTEM_ENTRIES: [(&str, &str); 2] = [
+        ("此电脑", "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}"),
+        ("回收站", "::{645FF040-5081-101B-9F08-00AA002F954E}"),
+    ];
+    let missing: Vec<(&str, &str)> = SYSTEM_ENTRIES
+        .iter()
+        .copied()
+        .filter(|(_, clsid)| !dismissed.contains(*clsid))
+        .filter(|(_, clsid)| {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM grid_items WHERE file_path = ?1",
+                    params![clsid],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+            count == 0
+        })
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    let box_id: i64 = match conn.query_row(
+        "SELECT id FROM grid_boxes WHERE name = '系统' LIMIT 1",
+        [],
+        |row| row.get(0),
+    ) {
+        Ok(id) => id,
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            let occupied: i64 = conn
+                .query_row("SELECT COUNT(*) FROM grid_boxes", [], |row| row.get(0))
+                .map_err(|err| format!("统计格子数失败：{err}"))?;
+            let pos_x = ARRANGE_ORIGIN_X + (occupied % ARRANGE_COLUMNS) * ARRANGE_STEP_X;
+            let pos_y = ARRANGE_ORIGIN_Y + (occupied / ARRANGE_COLUMNS) * ARRANGE_STEP_Y;
+            let sort = next_sort(
+                conn,
+                "SELECT COALESCE(MAX(sort) + 1, 0) FROM grid_boxes",
+                None,
+            )?;
+            let now = now_iso();
+            conn.execute(
+                "INSERT INTO grid_boxes \
+                 (name, pos_x, pos_y, width, height, sort, created_at, updated_at) \
+                 VALUES ('系统', ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![pos_x, pos_y, ARRANGE_BOX_W, ARRANGE_BOX_H, sort, now, now],
+            )
+            .map_err(|err| format!("创建系统格子失败：{err}"))?;
+            conn.last_insert_rowid()
+        }
+        Err(err) => return Err(format!("查询系统格子失败：{err}")),
+    };
+
+    let mut item_sort = next_sort(
+        conn,
+        "SELECT COALESCE(MAX(sort) + 1, 0) FROM grid_items WHERE box_id = ?1",
+        Some(box_id),
+    )?;
+    let created = now_iso();
+    for (name, clsid) in missing {
+        conn.execute(
+            "INSERT INTO grid_items (box_id, file_path, display_name, sort, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![box_id, clsid, name, item_sort, created],
+        )
+        .map_err(|err| format!("登记系统条目「{name}」失败：{err}"))?;
+        item_sort += 1;
+    }
+    Ok(())
+}
+
 /// 桌面同步 —— 格子层「接管桌面」的数据引擎（前端周期调用）：
 ///
 /// 1. 清理失效引用（桌面文件已被删除 / 移走的条目）；
@@ -1737,8 +1856,10 @@ fn extract_icon_rgba(path: &str) -> Option<FileIconData> {
 pub async fn grid_desktop_sync(app: AppHandle) -> Result<DesktopSyncReport, String> {
     let root = dirs::desktop_dir().ok_or_else(|| "无法定位桌面目录".to_string())?;
     let conn = connect(&app)?;
+    let dismissed = read_dismissed(&conn)?;
     let pruned = prune_missing_items(&conn, &root)?;
-    let arrange = auto_arrange_inner(&conn, &root, &read_dismissed(&conn)?)?;
+    let arrange = auto_arrange_inner(&conn, &root, &dismissed)?;
+    ensure_system_box(&conn, &dismissed)?;
     Ok(DesktopSyncReport { arrange, pruned })
 }
 

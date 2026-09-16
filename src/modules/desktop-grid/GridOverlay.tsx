@@ -226,17 +226,22 @@ export function GridOverlay(): React.JSX.Element {
       .catch(() => undefined);
   }, [showHint]);
 
-  // 透明窗：html/body 的白底会破坏透明（index.css 的 bg-background / index.html 内联底色）
+  // 透明窗：html/body/**#root** 的白底都会破坏透明（index.css 的 bg-background /
+  // index.html 内联 #root{background:#fff} —— V30.1 前格子层白底盖壁纸的真凶）
   useEffect(() => {
-    const html = document.documentElement;
-    const body = document.body;
-    const prevHtml = html.style.background;
-    const prevBody = body.style.background;
-    html.style.background = 'transparent';
-    body.style.background = 'transparent';
+    const nodes: HTMLElement[] = [document.documentElement, document.body];
+    const root = document.getElementById('root');
+    if (root) {
+      nodes.push(root);
+    }
+    const prev = nodes.map((node) => node.style.background);
+    for (const node of nodes) {
+      node.style.background = 'transparent';
+    }
     return () => {
-      html.style.background = prevHtml;
-      body.style.background = prevBody;
+      nodes.forEach((node, index) => {
+        node.style.background = prev[index] ?? '';
+      });
     };
   }, []);
 
