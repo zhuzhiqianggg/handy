@@ -105,5 +105,27 @@ const six = analyzeCron('0 30 9 * * ?', now);
 ok('6 段 fields 长度 = 6', six.fields.length === 6, String(six.fields.length));
 ok('6 段 fields 顺序 = 秒分时日月周', six.fields.map((f) => f.key).join(',') === 'second,minute,hour,dayOfMonth,month,dayOfWeek');
 
+// —— 8) 中文文案（2026-09-16 用户反馈：日段灰字只有裸数字、星期写成「1 至 5星期」、
+// summary 拼出「每月3」「第 每 5 分」病句，且黄条把 Quartz 的 ? 说成能表达「且」）——
+// 以下期望串全部经探针逐字符核对；summary 锁死措辞，防止文案再悄悄劣化。
+const d = (expr) => analyzeCron(expr, now);
+ok('文案 日段单值带单位', d('*/5 * 3 5 1-5').fields[2]?.text === '3日');
+ok('文案 星期区间用中文名', d('*/5 * 3 5 1-5').fields[4]?.text === '周一 至 周五');
+ok('文案 月份单值', d('*/5 * 3 5 1-5').fields[3]?.text === '5月');
+ok('文案 日/周取或点破「或」字', d('*/5 * 3 5 1-5').summary === '5月的每月3日 或 每周一至周五（满足其一） 每 5 分钟 执行', d('*/5 * 3 5 1-5').summary);
+ok('文案 每5分钟自成一句', d('*/5 * * * *').summary === '每天 每 5 分钟 执行', d('*/5 * * * *').summary);
+ok('文案 工作日 9 点', d('0 9 * * 1-5').summary === '每周一至周五 09:00 执行', d('0 9 * * 1-5').summary);
+ok('文案 小时步长+分钟单值带单位', d('0 */2 * * *').summary === '每天 每 2 时，第 0 分 执行', d('0 */2 * * *').summary);
+ok('文案 仅限月份=「5月的每天」', d('0 0 * 5 *').summary === '5月的每天 00:00 执行', d('0 0 * 5 *').summary);
+ok('文案 多日列表', d('0 0 1,15 * *').summary === '每月1日、15日 00:00 执行', d('0 0 1,15 * *').summary);
+ok('文案 单个星期', d('0 1 * * 1').summary === '每周一 01:00 执行');
+ok('文案 星期步长列出中文名', d('*/2 * * * 0').fields[4]?.text === '周日' && d('*/5 * * * 2').fields[4]?.text === '周二');
+ok('文案 月份步长列出中文名', d('0 0 * */2 *').fields[3]?.text === '1月、3月、5月、7月、9月、11月', d('0 0 * */2 *').fields[3]?.text);
+ok('文案 月份步长进 summary 当前提', d('0 0 * */2 *').summary === '1月、3月、5月、7月、9月、11月的每天 00:00 执行', d('0 0 * */2 *').summary);
+ok('文案 dom 步长超 12 个退回紧凑写法', d('0 0 */2 * *').fields[2]?.text === '1-31 每 2 日', d('0 0 */2 * *').fields[2]?.text);
+ok('文案 L 最后一天', d('0 0 L * ?').summary === '每月最后一天 00:00 执行', d('0 0 L * ?').summary);
+ok('文案 第 n 个周一挂「每月」', d('0 10 ? * 1#2').summary === '每月第 2 个周一 10:00 执行', d('0 10 ? * 1#2').summary);
+ok('文案 月份+日=前提式', d('0 0 1 1 *').summary === '1月的每月1日 00:00 执行', d('0 0 1 1 *').summary);
+
 console.log([`PASS ${pass}`, `FAIL ${fail}`, ...bad.map((item) => `  ✗ ${item}`)].join('\n'));
 process.exit(fail === 0 ? 0 : 1);

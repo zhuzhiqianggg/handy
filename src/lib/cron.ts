@@ -130,6 +130,9 @@ const SPECS: readonly FieldSpec[] = [
     min: 1,
     max: 31,
     quartzy: true,
+    // 给「日」配上中文名（3 → 3日）：否则逐段编辑的灰字只会显示裸的「3」，
+    // 一句话描述也会拼出「每月3」这种缺单位的句子
+    nameOf: (value: number): string => `${value}日`,
     hint: '1-31；Quartz 可用 L（最后一天）/ 15W',
   },
   {
@@ -378,10 +381,26 @@ function compileField(spec: FieldSpec, raw: string): CompiledField {
       texts.push(spec.nameOf ? spec.nameOf(from) : String(from));
       continue;
     }
+    const partValues: number[] = [];
     for (let value = from; value <= to; value += stride) {
       values.add(value);
+      partValues.push(value);
     }
-    if (step === null) {
+    if (spec.nameOf) {
+      // 有中文名的段（日 / 月 / 星期）一律用名字说话：
+      //   区间   → 「周一 至 周五」「1月 至 3月」（旧的「1 至 5星期」语序是坏的）
+      //   带步长 → 直接把取值列出来（dow 最多 7 个、月 12 个，dom 超 12 个再退回紧凑写法）
+      if (step === null) {
+        texts.push(`${spec.nameOf(from)} 至 ${spec.nameOf(to)}`);
+        single = null;
+      } else if (partValues.length <= 12) {
+        texts.push(partValues.map((value) => spec.nameOf!(value)).join('、'));
+        single = null;
+      } else {
+        texts.push(`${from}-${to} 每 ${step} ${spec.unit}`);
+        single = null;
+      }
+    } else if (step === null) {
       texts.push(`${from} 至 ${to}${spec.unit}`);
       single = null;
     } else if (base === '*') {
@@ -673,36 +692,46 @@ function describe(compiled: Partial<Record<CronFieldKey, CompiledField>>, cron: 
   const secondField = compiled.second;
 
   // —— 日期部分 ——
-  const pieces: string[] = [];
   const monthRestricted = monthField !== undefined && !monthField.result.wildcard;
   const domRestricted = domField !== undefined && !domField.result.wildcard;
   const dowRestricted = dowField !== undefined && !dowField.result.wildcard;
 
-  if (monthRestricted && monthField) {
-    pieces.push(monthField.result.text);
-  }
+  // 月份是**前提条件**（「5月的…」），不参与日 / 周的二选一——
+  // 否则会拼出「5月 或 每月3日 或 …」这种把前提当选项的病句
+  const monthText = monthRestricted && monthField ? monthField.result.text : null;
+  const dayPieces: string[] = [];
   if (domRestricted && domField) {
-    pieces.push(`每月${domField.result.text}`);
+    // nameOf 让 text 自带单位（「3日」），拼出来是「每月3日」而不是旧的「每月3」
+    dayPieces.push(`每月${domField.result.text}`);
   }
   if (dowRestricted && dowField) {
     const text = dowField.result.text;
-    pieces.push(dowField.specials.nthWeekday !== null || dowField.specials.lastWeekday !== null
-      ? `每月${text}`
-      : /^每/.test(text) ? text : `每月${text}`);
+    // 特殊语法（第 n 个周一 / 最后一个周五）挂「每月」；普通写法（周三 / 周一 至 周五 /
+    // 周日、周二…）挂「每」—— 旧的 `每月${text}` 会拼出「每月1 至 5星期」这种坏句子
+    dayPieces.push(/^第|^最/.test(text) ? `每月${text}` : `每${text}`);
   }
+  const monthPrefix = monthText !== null ? `${monthText}的` : '';
   let datePart: string;
-  if (pieces.length === 0) {
-    datePart = '每天';
+  if (dayPieces.length === 0) {
+    datePart = monthText !== null ? `${monthPrefix}每天` : '每天';
   } else if (domRestricted && dowRestricted) {
-    // Vixie 语义：或
-    datePart = `${pieces.join(' ')}（满足其一）`;
+    // Vixie 语义：或 —— 用「或」字点破，比光秃秃并列再补一句「满足其一」更直白
+    datePart = `${monthPrefix}${dayPieces.join(' 或 ')}（满足其一）`.replace(/ 至 /g, '至');
   } else {
-    datePart = pieces.join(' ');
+    datePart = `${monthPrefix}${dayPieces[0] ?? ''}`.replace(/ 至 /g, '至');
   }
 
   // —— 时间部分 ——
   const hourText = hourField?.result.text ?? '每小时';
   const minuteText = minuteField?.result.text ?? '每分钟';
+  // 分钟的「每 n 分」接在别的词后面会拼出「第 每 5 分」这种坏句；
+  // 「每 n 分」+「钟」=「每 n 分钟」自成一句，其余（列表 / 区间 / 单值）才用「第 …」
+  const minutePhrase = (text: string): string => {
+    if (/^每/.test(text)) {
+      return `${text}钟`;
+    }
+    return /分$/.test(text) ? `第 ${text}` : `第 ${text} 分`;
+  };
   let timePart: string;
   if (hourField && !hourField.result.wildcard && minuteField && !minuteField.result.wildcard) {
     const hours = hourField.result.values ?? [];
@@ -716,12 +745,12 @@ function describe(compiled: Partial<Record<CronFieldKey, CompiledField>>, cron: 
       }
       timePart = list.join('、');
     } else {
-      timePart = `${hourText} 的 ${minuteText}`;
+      timePart = `${hourText}，${minutePhrase(minuteText)}`;
     }
   } else if (hourField && !hourField.result.wildcard) {
     timePart = `${hourText} 内每分钟`;
   } else if (minuteField && !minuteField.result.wildcard) {
-    timePart = `每小时的第 ${minuteText}`;
+    timePart = minutePhrase(minuteField.result.text).replace(/^第 /, '每小时的第 ');
   } else {
     timePart = '每分钟';
   }

@@ -543,9 +543,9 @@ export function CronDescriptor({ initialInput = '' }: CommandProps): React.JSX.E
                 <span>
                   「日」和「周」<b>同时</b>限定时，两者是<b>或</b>的关系（传统 Vixie cron 语义）：
                   例如「每月 1 日 或 每周一」都会触发，不是「1 日且是周一」。
-                  要表达「且」，在 Quartz 写法里把其中一段设为{' '}
-                  <code className="rounded bg-amber-100 px-1">?</code>（不指定）；
-                  标准 5 段语法本身无法表达「且」。
+                  无论是标准 cron 还是 Quartz，都<b>表达不了「且」</b>——Quartz 甚至强制两段之一必须写成{' '}
+                  <code className="rounded bg-amber-100 px-1">?</code>（不指定），设了之后那一段条件就被丢掉了。
+                  真需要「既在几号、又是周几」的交集，只能拆成两条任务或在脚本里自行判断。
                 </span>
               </p>
             ) : null}
