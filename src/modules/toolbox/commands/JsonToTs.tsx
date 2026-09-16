@@ -168,8 +168,11 @@ export function JsonToTs({ initialInput = '' }: CommandProps): React.JSX.Element
         },
         {
           label: '可空字段',
-          description: '值为 null 的字段会生成 `T | null` —— 检验空值推导',
-          apply: () => setInput('{"id":1,"deletedAt":null,"owner":{"name":null}}'),
+          description: '值为 null 的字段与其它取值合并成「T | null」联合类型 —— 检验空值推导',
+          apply: () =>
+            setInput(
+              '[{"id":1,"deletedAt":null,"owner":{"name":"a"}},{"id":2,"deletedAt":"2026-09-15","owner":{"name":null}}]',
+            ),
         },
         {
           label: '非法标识符键',
@@ -178,13 +181,13 @@ export function JsonToTs({ initialInput = '' }: CommandProps): React.JSX.Element
         },
         {
           label: '顶层数组',
-          description: 'JSON 本身是数组——生成 `XxxItem[]` + `Root` 别名',
+          description: 'JSON 本身是数组 —— 元素对象的字段直接提升为 Root 接口',
           apply: () => setInput('[{"id":1,"name":"a"},{"id":2,"name":"b"}]'),
         },
         {
           label: '重名嵌套',
-          description: '多个同名嵌套对象 —— 看接口名自动追加序号去重',
-          apply: () => setInput('{"left":{"node":{"v":1}},"right":{"node":{"v":2}}}'),
+          description: '两处都叫 node 但结构不同 —— 接口名自动追加序号；结构相同的会复用同一个接口',
+          apply: () => setInput('{"left":{"node":{"v":1}},"right":{"node":{"v":"s"}}}'),
         },
       ]}
     >

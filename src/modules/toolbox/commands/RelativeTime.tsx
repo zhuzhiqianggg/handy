@@ -33,6 +33,15 @@ function zhRelative(target: Date, now: Date): string {
   return future ? `${value}后` : `${value}前`;
 }
 
+/** Date → 本地 `YYYY-MM-DD HH:mm:ss`（示例必须按当前时间现算，写死日期迟早与标签对不上） */
+function toLocalInput(date: Date): string {
+  const pad = (value: number): string => String(value).padStart(2, '0');
+  return (
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ` +
+    `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+  );
+}
+
 /** 解析日期输入：10/13 位时间戳或常见日期串。 */
 function parseDateInput(raw: string): Date | null {
   const token = raw.trim();
@@ -174,10 +183,22 @@ export function RelativeTime({ initialInput = '' }: CommandProps): React.JSX.Ele
         tab === 'describe'
           ? [
               { label: '刚发生', description: '当前秒级时间戳 —— 应输出「几秒前」', apply: () => { setDateInput(String(Math.floor(Date.now() / 1000))); } },
-              { label: '3 天前', description: '固定日期串，跨天/跨月边界是否算对', apply: () => setDateInput('2026-09-12 09:00:00') },
-              { label: '3 小时后', description: '未来时间 —— 输出带「后」字', apply: () => setDateInput('2026-09-15 21:00:00') },
+              {
+                label: '3 天前',
+                description: '按当前时间回推三天 —— 跨天/跨月边界是否算对',
+                apply: () => setDateInput(toLocalInput(new Date(Date.now() - 3 * 86400_000))),
+              },
+              {
+                label: '3 小时后',
+                description: '按当前时间前推三小时（多留 1 分钟，避免渲染耗时把「3」挤成「2」）',
+                apply: () => setDateInput(toLocalInput(new Date(Date.now() + 3 * 3600_000 + 60_000))),
+              },
               { label: '毫秒时间戳', description: '13 位时间戳与 10 位秒级时间戳都能识别（运维日志两种都常见）', apply: () => setDateInput(String(Date.now())) },
-              { label: '跨年', description: '去年的日期 —— 应落到「年前」档位', apply: () => setDateInput('2025-01-01 00:00:00') },
+              {
+                label: '跨年',
+                description: '上一个自然年的起点 —— 应落到「年」档位',
+                apply: () => setDateInput(`${new Date().getFullYear() - 1}-01-01 00:00:00`),
+              },
             ]
           : [
               { label: 'in 2h', description: '英文写法，两小时后', apply: () => setExprInput('in 2h') },

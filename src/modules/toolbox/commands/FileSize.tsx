@@ -7,27 +7,10 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
 import { useCommandShell } from '@/hooks/useCommandShell';
+import { formatAllUnits, toBytesText, toMatchingBase, unitsFor } from '@/lib/byteUnits';
 import type { CommandProps } from '@/core/types';
 
 const COMMAND_ID = 'file-size';
-
-const BINARY_UNITS = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB'] as const;
-const DECIMAL_UNITS = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'] as const;
-
-function humanize(bytes: number, base: number): { value: number; unit: string } {
-  if (!Number.isFinite(bytes) || bytes <= 0) {
-    return { value: 0, unit: 'B' };
-  }
-  const units = base === 1024 ? BINARY_UNITS : DECIMAL_UNITS;
-  const exponent = Math.min(Math.floor(Math.log(bytes) / Math.log(base)), units.length - 1);
-  return { value: bytes / base ** exponent, unit: units[exponent] ?? 'B' };
-}
-
-function unitFactor(unit: string, base: number): number {
-  const units: readonly string[] = base === 1024 ? BINARY_UNITS : DECIMAL_UNITS;
-  const index = units.indexOf(unit);
-  return index < 0 ? 1 : base ** index;
-}
 
 /**
  * 文件大小格式化：字节 ⇄ 人类可读（KB/MB/GB…），base-2 / base-10 可切换。
@@ -40,32 +23,19 @@ export function FileSize({ initialInput = '' }: CommandProps): React.JSX.Element
   const [valueInput, setValueInput] = usePersistedState<string>(COMMAND_ID, 'valueInput', '');
   const [unit, setUnit] = usePersistedState<string>(COMMAND_ID, 'unit', 'MB');
 
-  const base = base2 ? 1024 : 1000;
+  // 进制切换（含持久化状态在冷启动时的回落）后，把单位带到对应的一套上去。
+  // 不做这一步，`unitFactor` 会静默按 1 倍算 —— 见 byteUnits.toMatchingBase 的说明。
+  React.useEffect(() => {
+    setUnit((prev) => toMatchingBase(prev, base2));
+  }, [base2]);
 
   const bytesNum = Number.parseFloat(bytesInput);
-  const b2hList = React.useMemo(() => {
-    if (!Number.isFinite(bytesNum) || bytesNum < 0) {
-      return '';
-    }
-    const units = base2 ? BINARY_UNITS : DECIMAL_UNITS;
-    return units
-      .map((u, i) => {
-        const v = bytesNum / base ** i;
-        const display = Number.isInteger(v) ? String(v) : v.toFixed(2);
-        return `${display} ${u}`;
-      })
-      .join('\n');
-  }, [bytesNum, base2, base]);
+  const b2hList = React.useMemo(() => formatAllUnits(bytesNum, base2), [bytesNum, base2]);
 
-  const h2bResult = React.useMemo<string>(() => {
-    const v = Number.parseFloat(valueInput);
-    if (!Number.isFinite(v) || v < 0) {
-      return '';
-    }
-    const bytes = v * unitFactor(unit, base);
-    const display = Number.isInteger(bytes) ? String(bytes) : bytes.toPrecision(12).replace(/\.?0+$/, '');
-    return `${display} 字节（${base2 ? 'base-2' : 'base-10'}）`;
-  }, [valueInput, unit, base, base2]);
+  const h2bResult = React.useMemo<string>(
+    () => toBytesText(Number.parseFloat(valueInput), unit, base2),
+    [valueInput, unit, base2],
+  );
 
   const copyText = tab === 'b2h' ? b2hList : h2bResult;
 
@@ -73,7 +43,7 @@ export function FileSize({ initialInput = '' }: CommandProps): React.JSX.Element
     setTab(value);
   }, []);
 
-  const units = base2 ? BINARY_UNITS : DECIMAL_UNITS;
+  const units = unitsFor(base2);
 
   return (
     <CommandShell

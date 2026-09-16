@@ -24,6 +24,13 @@ const SUITES = [
   'test-textlab.mjs',
   'test-password.mjs',
   'test-regex-library.mjs',
+  // V26：工具箱底层（此前零覆盖）—— 编码 / URL / 哈希 / JWT / JSON
+  'test-base64.mjs',
+  'test-url.mjs',
+  'test-hash.mjs',
+  'test-jwt.mjs',
+  'test-json.mjs',
+  'test-byte-units.mjs',
 ];
 
 let failed = 0;

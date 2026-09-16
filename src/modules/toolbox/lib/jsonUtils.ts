@@ -232,9 +232,17 @@ function parseBracket(inner: string): PathSegment {
   if (content === '*') {
     return { kind: 'wildcard' };
   }
+  // 明确拒掉**本子集不支持**的写法，而不是把它们当成字段名去查、最后安静地返回 0 条命中
+  // （`[?(@.price<10)]` 被当成键名 `?(@.price<10)`，用户只会以为自己的数据没命中）
+  if (content.startsWith('?')) {
+    throw new Error('本工具只支持 JSONPath 基础子集，不支持过滤表达式 [?(@.字段)]');
+  }
   const parts = splitTopLevel(content);
   if (parts.length === 0) {
     throw new Error(`[] 内内容无效：${content}`);
+  }
+  if (parts.some((part) => !isQuoted(part) && part.includes(':'))) {
+    throw new Error('本工具只支持 JSONPath 基础子集，不支持切片写法（如 [0:2]）；请用 [0,1] 逐个列出下标');
   }
   const allIndex = parts.every((part) => !isQuoted(part) && /^-?\d+$/.test(part));
   if (allIndex) {
@@ -485,10 +493,18 @@ export function queryJsonPath(
 
 /** 命中值 → 单行预览文本 */
 export function formatMatchValue(value: unknown, maxLength: number = 160): string {
-  let text = '';
   if (typeof value === 'string') {
-    text = JSON.stringify(value);
-  } else if (isContainer(value)) {
+    const quoted = JSON.stringify(value);
+    if (quoted.length <= maxLength) {
+      return quoted;
+    }
+    // 字符串在引号**内部**截断：直接切渲染后的文本会切出 `"ab…` 这种引号不闭合的半截样子，
+    // 看起来像是工具坏了。容器仍按渲染文本切（`{"a":1…` 是预览，语义上就是「还有更多」）。
+    const budget = Math.max(0, maxLength - 3); // 两侧引号 + 省略号各占一位，正文补满剩余额度
+    return JSON.stringify(`${value.slice(0, budget)}…`);
+  }
+  let text = '';
+  if (isContainer(value)) {
     text = JSON.stringify(value);
   } else {
     text = String(value);
@@ -734,9 +750,43 @@ function uniqueName(base: string, signature: string, ctx: TsContext): string {
     ctx.signatures.set(base, signature);
     return base;
   }
-  const next = (ctx.counters.get(base) ?? 1) + 1;
-  ctx.counters.set(base, next);
-  return uniqueName(`${base}${next}`, signature, ctx);
+  // 基础名已被**别的结构**占用 → 追加序号。
+  // 这里用 while 逐个找空位，而不是递归调用自己：递归在第三次冲突时会产出
+  // `Item` → `Item2` → `Item22`（序号叠序号），看着就像 bug。
+  let n = Math.max(2, (ctx.counters.get(base) ?? 1) + 1);
+  for (;;) {
+    const candidate = `${base}${n}`;
+    const taken = ctx.signatures.get(candidate);
+    if (taken === undefined || taken === signature) {
+      ctx.signatures.set(candidate, signature);
+      ctx.counters.set(base, n);
+      return candidate;
+    }
+    n += 1;
+  }
+}
+
+/**
+ * 取值 → 粗粒度类型标签（只参与「同键是否同构」的判定，不出现在最终输出里）。
+ *
+ * 为什么签名不能只看键名：`{ item: { a: 1 } }` 与 `{ wrap: { item: { a: 's' } } }`
+ * 的两个 `a` 字段键名相同但类型不同，只看键名的签名会把它们当成同一个接口，
+ * 于是第二处**静默复用**了 `a: number` —— 生成的类型与数据打架，用户完全看不出来。
+ */
+function kindOf(values: readonly unknown[]): string {
+  const kinds = new Set<string>();
+  for (const value of values) {
+    if (value === null) {
+      kinds.add('null');
+    } else if (Array.isArray(value)) {
+      kinds.add('array');
+    } else if (isPlainObject(value)) {
+      kinds.add('object');
+    } else {
+      kinds.add(typeof value);
+    }
+  }
+  return [...kinds].sort().join(',');
 }
 
 /** 把多个同构对象合并为一个字段表 */
@@ -829,7 +879,7 @@ function tsObjectType(
   depth: number,
 ): string {
   const signature = fields
-    .map((field) => field.key)
+    .map((field) => `${field.key}:${kindOf(field.values)}`)
     .sort()
     .join('|');
   const name = uniqueName(pascalCase(hint), signature, ctx);

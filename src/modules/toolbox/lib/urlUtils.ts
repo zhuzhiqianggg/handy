@@ -79,6 +79,29 @@ const EMPTY_PARTS: UrlParts = {
 /** 是否像「带协议」的绝对 URL（`scheme:` 前缀）。 */
 const SCHEME_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:/;
 
+/**
+ * 是否其实是「主机:端口」而不是「协议:」。
+ *
+ * 为什么必须有这个判断：`new URL('example.com:8080/path')` **不会报错** ——
+ * WHATWG 把非特殊协议整段当 opaque path，于是它读成
+ * 「协议 `example.com:` + 路径 `8080/path`」，**hostname / port 双双为空**。
+ * 用户粘一个 `localhost:5173`（本地调试最常见的写法）进来，界面会安静地
+ * 展示一份错误的结构分解 —— 静默错答案比报错危险得多。
+ *
+ * 判据（两条都够实用，且不会误伤 mailto: / tel: / data: / urn: 这类无 `//` 的协议）：
+ *   - 冒号前含 `.` → 是域名（`example.com:8080`）；
+ *   - 冒号后直接跟数字 → 是端口（`localhost:5173`、`weird:8080`）。
+ */
+function looksLikeHostPort(value: string): boolean {
+  const colon = value.indexOf(':');
+  if (colon < 0) {
+    return false;
+  }
+  const before = value.slice(0, colon);
+  const after = value.slice(colon + 1);
+  return before.includes('.') || /^\d/.test(after);
+}
+
 /** 中日韩字符判定：CJK 扩展 A、CJK 基本区、兼容表意文字、日文假名、韩文音节。 */
 const CJK_RE = /[㐀-䶿一-鿿豈-﫿぀-ヿ가-힯]/;
 
@@ -119,8 +142,13 @@ export function parseUrlParts(raw: string): ParsedUrl {
   }
   let candidate = value;
   let repaired = false;
-  if (!SCHEME_RE.test(candidate)) {
-    candidate = `http://${candidate}`;
+  if (value.startsWith('//')) {
+    // 协议相对写法（`//host/path`）：只补协议名，别补成 `http:////host/path` ——
+    // 那样 authority 是空的，hostname 会解析成空串。
+    candidate = `http:${value}`;
+    repaired = true;
+  } else if (!SCHEME_RE.test(candidate) || looksLikeHostPort(candidate)) {
+    candidate = `http://${value}`;
     repaired = true;
   }
   try {
@@ -143,14 +171,15 @@ export function parseUrlParts(raw: string): ParsedUrl {
       ok: false,
       repaired: false,
       parts: null,
-      error: `无法解析为 URL：${cause instanceof Error ? cause.message : String(cause)}`,
+      error: '无法解析为 URL（地址含非法字符，或缺少协议）',
     };
   }
 }
 
 /** 六个部分 → 完整 URL（补全缺失的 `:` `//` `/` `?` `#` 前缀）。 */
 export function buildUrl(parts: UrlParts): string {
-  const protocol = parts.protocol.trim().replace(/:+$/, '');
+  // 协议字段用户可能写成 `https` / `https:` / `https://` 三种形态，统一收敛成 `https`
+  const protocol = parts.protocol.trim().replace(/[:\/]+$/, '');
   const hostname = parts.hostname.trim();
   const port = parts.port.trim().replace(/^:+/, '');
   const pathname = parts.pathname.trim();

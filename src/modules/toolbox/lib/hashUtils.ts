@@ -1,4 +1,7 @@
-import { md5Bytes } from '@/lib/md5';
+// 用相对路径而非 `@/lib/md5`：本文件要被 `scripts/regression/test-hash.mjs` 直接 import
+// （靠 Node ≥ 22.18 的原生类型剥离跑源码），Node 既不认识 vite 的路径别名，
+// 也不做扩展名补全 —— 所以写成带 `.ts` 的显式路径（tsconfig 已开 allowImportingTsExtensions）。
+import { md5Bytes } from '../../../lib/md5.ts';
 
 /**
  * 哈希工具底层能力：算法表、摘要计算、文件分片读取。

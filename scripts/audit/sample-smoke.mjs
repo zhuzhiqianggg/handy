@@ -181,12 +181,16 @@ function probeTextLab() {
  */
 function probeRelativeTime() {
   const fields = Array.from(document.querySelectorAll('textarea, input')).map((e) => String(e.value));
-  const days = Math.round((Date.now() - new Date(2026, 8, 12, 9, 0, 0).getTime()) / 86_400_000);
   const text = document.body.innerText;
+  // 示例现在是按「当前时间 − 3 天」现算的（写死日期会随时间失真），
+  // 所以这里也现算：读回填充值，看它到底是不是三天前。
+  const raw = fields.find((v) => /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(v.trim())) ?? '';
+  const filled = raw.length > 0 ? new Date(raw.trim().replace(' ', 'T')) : null;
+  const diffDays = filled === null ? -1 : Math.floor((Date.now() - filled.getTime()) / 86_400_000);
   return {
-    hasInput: fields.some((v) => v.includes('2026-09-12')),
-    expected: days,
-    matched: text.includes(`${days} 天前`) || text.includes(`${days}天前`),
+    hasInput: raw.length > 0,
+    filledDaysAgo: diffDays,
+    matched: text.includes('3天前') || text.includes('3 天前'),
     seen: text.match(/\d+\s*天前/g) ?? [],
   };
 }
@@ -274,6 +278,132 @@ function buildScript(chip, probeFn) {
  * 能查到派生结果（摘要 / 转码 / 换算 / 去重行数）就一并断言，
  * 这样「填了但算不出来」也逃不掉。
  */
+/**
+ * JWT 解码器：点「正常示例」→ 必须真的解出 header/payload，且过期态落在「将在 N 天后过期」。
+ *
+ * 注意别用 `body.includes('正常')` 当断言：页面上的按钮标签就叫「正常示例」，
+ * 这种条件**必然成立**，等于没测（V25 踩过 `body.includes('天前')` 的同款坑）。
+ * 这里改断言过期描述「将在 N 天后过期」这种只有真解出来才会出现的句子。
+ */
+async function probeJwtDecoder() {
+  const tick = () => new Promise((r) => setTimeout(r, 400));
+  const normal = Array.from(document.querySelectorAll('button')).find(
+    (b) => b.textContent.trim() === '正常示例',
+  );
+  const out = { buttonFound: normal !== undefined, threeSegments: false, decoded: false, activeExpiry: false };
+  if (normal === undefined) {
+    return out;
+  }
+  normal.click();
+  await tick();
+  await tick();
+  const fields = Array.from(document.querySelectorAll('textarea, input')).map((e) => String(e.value));
+  const body = document.body.innerText;
+  out.threeSegments = fields.some((v) => v.split('.').length === 3 && v.length > 40);
+  out.decoded = body.includes('HS256') && body.includes('user-10086') && body.includes('handy.local');
+  out.activeExpiry = /将在\s*\d+\s*天[后前]过期/.test(body);
+  out.secretFilled = fields.some((v) => v === 'handy-demo-secret');
+  return out;
+}
+
+/**
+ * Cron 描述器：点一个「常用表达式」预设 → 输入框被填上合法 cron，页面给出中文描述。
+ *
+ * 预设 chip 的可见文本是「中文标签 + 表达式」拼在一起的（`每天 9 点` + `0 9 * * *`），
+ * 所以按 `button` 的 textContent 找会匹配到中文而落空 —— 要认里面的 `<code>` 子元素。
+ */
+async function probeCronDescriptor() {
+  const tick = () => new Promise((r) => setTimeout(r, 400));
+  const buttons = Array.from(document.querySelectorAll('button'));
+  // 「常用表达式」默认是折叠的（生成器才是主入口）—— 先展开，再找 chip
+  const expander = buttons.find((b) => ['展开', '收起'].includes(b.textContent.trim()));
+  if (expander !== undefined && expander.textContent.trim() === '展开') {
+    expander.click();
+    await tick();
+  }
+  const codeEl = Array.from(document.querySelectorAll('button code')).find((el) => {
+    const text = el.textContent.trim();
+    return /^[\d*/,\-? ]+$/.test(text) && text.split(/\s+/).length >= 5 && /\d/.test(text);
+  });
+  const preset = codeEl?.closest('button') ?? null;
+  const out = { presetFound: preset !== null, filled: false, described: false, expr: '' };
+  if (preset === null) {
+    return out;
+  }
+  preset.click();
+  await tick();
+  await tick();
+  const fields = Array.from(document.querySelectorAll('textarea, input')).map((e) => String(e.value));
+  const body = document.body.innerText;
+  const cronField =
+    fields.find((v) => /^[\d*/,\-? ]+$/.test(v.trim()) && v.trim().split(/\s+/).length >= 5) ?? '';
+  out.expr = cronField.slice(0, 30);
+  out.filled = cronField.length > 0;
+  // 描述区会给「每天 / 每小时 / 工作日 / 09:00 这样的自然语言」
+  out.described = /每天|每周|每月|每小时|每\s*\d+\s*分钟|工作日|点\s*\d{1,2}:\d{2}|\d{1,2}:\d{2}/.test(body);
+  return out;
+}
+
+/**
+ * SQL 格式化 + 语法检查：走原生 setter + input 事件把 SQL 喂进输入框（让 React 收到），
+ * 断言输出里真的出现大写关键字与缩进；再喂一条**确实写错**的 SQL，
+ * 检查面板必须报出 error 档 —— 这条是静态自检证明不了的「lintSql 真的接上界面了吗」。
+ */
+async function probeSqlFormatter() {
+  const textarea = document.querySelector('textarea');
+  const out = {
+    hasTextarea: textarea !== null,
+    uppercased: false,
+    indented: false,
+    cleanWhenValid: false,
+    reportsError: false,
+  };
+  if (textarea === null) {
+    return out;
+  }
+  const setValue = (value) => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(textarea, value);
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+  };
+  const settle = () => new Promise((r) => setTimeout(r, 450));
+
+  setValue('select id,name from users where status=1 order by created_at desc limit 20');
+  await settle();
+  const body = document.body.innerText;
+  out.uppercased =
+    /\bSELECT\b/.test(body) && /\bFROM\b/.test(body) && /\bORDER BY\b/.test(body) && /\bLIMIT\b/.test(body);
+  out.indented = /\n[ \t]{2,}\w/.test(body) || /\n[ \t]{2,}\w/.test(textarea.value);
+  // 档位计数徽标的形态是「N 个错误 / N 个警告 / N 个提示」，
+  // 不能用 /错误/ 判（页面说明文案里就有「查常见写法错误」，那样断言恒真）
+  out.cleanWhenValid = !/\d+\s*个错误/.test(body);
+
+  setValue('select * from');
+  await settle();
+  out.reportsError = /\d+\s*个错误/.test(document.body.innerText);
+  return out;
+}
+
+/**
+ * 图片转 Base64：无头环境选不了文件，所以验的是「空态与开关」——
+ * 空态提示必须给出来，且 data: 前缀开关是可用控件（点击后 aria-checked 真的翻转）。
+ */
+async function probeImageToBase64() {
+  const out = { pickButton: false, emptyHint: false, switchCount: 0, switchToggled: false };
+  const buttons = Array.from(document.querySelectorAll('button'));
+  out.pickButton = buttons.some((b) => b.textContent.includes('选择图片'));
+  out.emptyHint = document.body.innerText.includes('选择图片后显示其 Base64 编码');
+  const switches = Array.from(document.querySelectorAll('[role="switch"]'));
+  out.switchCount = switches.length;
+  const first = switches[0];
+  if (first !== undefined) {
+    const before = first.getAttribute('aria-checked');
+    first.click();
+    await new Promise((r) => setTimeout(r, 250));
+    out.switchToggled = first.getAttribute('aria-checked') !== before;
+  }
+  return out;
+}
+
 const CASES = [
   // ——— V24 建立的用例（chip）———
   {
@@ -383,8 +513,8 @@ const CASES = [
     id: 'relative-time',
     chip: '3 天前',
     probe: probeRelativeTime,
-    check: (r) => r.probe?.hasInput === true && r.probe?.matched === true,
-    detail: (r) => `期望「${r.probe?.expected} 天前」→ 页面出现：${(r.probe?.seen ?? []).join(' / ')}`,
+    check: (r) => r.probe?.hasInput === true && r.probe?.filledDaysAgo === 3 && r.probe?.matched === true,
+    detail: (r) => `填充值距今天数=${r.probe?.filledDaysAgo}（期望 3）→ 页面出现：${(r.probe?.seen ?? []).join(' / ')}`,
   },
   {
     id: 'unit-converter',
@@ -444,6 +574,47 @@ const CASES = [
       r.probe?.gridHint === true,
     detail: (r) =>
       `首屏=归类文件 ✓ 作用目录 ✓ 真移动提示 ✓ 切页签后=不移动 ${r.probe?.gridHint ? '✓' : '✗'}`,
+  },
+
+  // ——— V26 扩展：把剩下 4 个「没有示例条」的工具也补上（补齐 24/24）———
+  {
+    id: 'jwt-decoder',
+    probe: probeJwtDecoder,
+    check: (r) =>
+      r.probe?.buttonFound === true &&
+      r.probe?.threeSegments === true &&
+      r.probe?.decoded === true &&
+      r.probe?.activeExpiry === true,
+    detail: (r) =>
+      `三段=${r.probe?.threeSegments} 解出 header/payload=${r.probe?.decoded} ` +
+      `「将在 N 天后过期」=${r.probe?.activeExpiry} 演示密钥已填=${r.probe?.secretFilled}`,
+  },
+  {
+    id: 'cron-descriptor',
+    probe: probeCronDescriptor,
+    check: (r) => r.probe?.presetFound === true && r.probe?.filled === true && r.probe?.described === true,
+    detail: (r) => `预设已填「${r.probe?.expr}」，中文描述=${r.probe?.described}`,
+  },
+  {
+    id: 'sql-formatter',
+    probe: probeSqlFormatter,
+    check: (r) =>
+      r.probe?.hasTextarea === true &&
+      r.probe?.uppercased === true &&
+      r.probe?.indented === true &&
+      r.probe?.cleanWhenValid === true &&
+      r.probe?.reportsError === true,
+    detail: (r) =>
+      `关键字大写=${r.probe?.uppercased} 缩进=${r.probe?.indented} ` +
+      `正常 SQL 零错误=${r.probe?.cleanWhenValid} 错误 SQL 报错=${r.probe?.reportsError}`,
+  },
+  {
+    id: 'image-to-base64',
+    probe: probeImageToBase64,
+    check: (r) => r.probe?.pickButton === true && r.probe?.emptyHint === true && r.probe?.switchToggled === true,
+    detail: (r) =>
+      `选择图片按钮=${r.probe?.pickButton} 空态提示=${r.probe?.emptyHint} ` +
+      `开关 ${r.probe?.switchCount} 个、可切换=${r.probe?.switchToggled}`,
   },
 ];
 
