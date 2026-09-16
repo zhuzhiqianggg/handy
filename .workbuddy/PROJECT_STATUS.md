@@ -530,7 +530,15 @@ node scripts/regression/run.mjs          # 6/6 套通过时 exit 0
 #   起 vite dev server + 无头浏览器，对 24 个工具 + 3 个模块页 × 3 档视口（680/1024/1680）实测
 #   量 4 个指标：ox/mox 横向溢出 · clipX/clipY 内容溢出但不滚 · overlap 非祖孙块级矩形相交 · 截图
 #   注意：dev server 与浏览器必须在同一条命令里（沙箱会回收后台进程）；结果写 _shots/audit/layout-audit.json
-#   ⚠️ 跑完它会吃光本回合的删除额度 —— 别在同一个回合里接着 vite build（见 §3 约束 17）
+#   ⚠️ 跑完它会吃光本回合的删除额度 —— 别在同一个回合里接着 vite build（见 §3 约束 18）
+
+# 示例条功能冒烟（V24 起；改了任何工具的 samples 就该跑）
+#   静态自检只能证明「文件里写了 samples=」，证明不了「点下去真填进去了」——
+#   本脚本在真实 dist + 无头浏览器里逐个点 chip，再读回输入框与页面正文断言
+#   （连「填完以后派生结果算不算得出来」一起验：哈希工具点了示例必须真出现那段摘要）
+#   同样会吃删除额度（要开关浏览器），别和 vite build 放同一回合
+node scripts/audit/sample-smoke.mjs
+node scripts/audit/sample-smoke.mjs --only=timestamp,hash-generator
 
 # 工具注册项静态自检（加/改工具后必跑；313 项，0 FAIL / 0 WARN 时 exit 0）
 #   查：id 唯一且 kebab · 名称 ≤18 字 · 描述 ≤60 字 · **图标已登记** · category 合法 ·

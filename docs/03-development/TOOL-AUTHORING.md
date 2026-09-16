@@ -102,6 +102,10 @@ node scripts/audit/tool-audit.mjs
    示例数据要贴近真实用法（日志片段、真实 JSON……），别写 `abc`。
    > 示例里出现的哈希 / Base64 / 时间戳**必须真算过再写进去**（V24 的 8 个工具示例条就是这么来的）。
    > 编一个「看起来像」的摘要值，用户点开校验会直接对不上，比没有示例更糟。
+   >
+   > 写完跑一遍 `node scripts/audit/sample-smoke.mjs` —— 它会在真实产物里点你的 chip 并断言结果。
+   > 如果这个工具也值得进冒烟，就在脚本的 `CASES` 里加一条用例（`check` 要断言**用户能看到的后果**，
+   > 不是内部状态）。
 4. **结果区**：带高亮用 `<CodeBlock lang="...">`；普通文本用 `<ResultBox>`。
    高亮词法表**只有一份**（`CodeBlock` 的 `LANGS`），加语言只改那里，不要在别处复制正则。
 5. **复制**：`copyText`（静态）或 `getCopyText`（惰性）二选一传给 `CommandShell`。
@@ -168,4 +172,6 @@ node scripts/audit/layout-audit.mjs        # 24 工具 + 3 模块页 × 3 档视
 - [ ] 有纯逻辑 → `node scripts/regression/run.mjs` 全绿
 - [ ] 手动过一遍：填入 → 操作 → 复制，每个按钮的副作用**真的发生了**
 - [ ] 示例条 3-5 条，数据是真实场景，**里面的哈希 / Base64 / 时间戳都真算过**
+- [ ] `node scripts/audit/sample-smoke.mjs` —— 本工具的示例 chip 在真实产物里点了确实生效
+      （新工具建议往脚本 `CASES` 里补一条用例）
 - [ ] 密钥类输入（密码 / secret）**没有**被持久化
