@@ -27,10 +27,11 @@
 | 自检三件套 | `scripts/audit/tool-audit.mjs`（静态）/ `layout-audit.mjs`（几何）/ `sample-smoke.mjs`（真点示例） |
 | 回归 | `scripts/regression/run.mjs` + `test-*.mjs`；`scripts/new-tool.mjs` 脚手架 |
 
-## 3. 状态快照（2026-09-16 · V27 已交付并提交）
+## 3. 状态快照（2026-09-16 · V28 已交付、已打包、已装机）
 
-- Phase 1（MVP）功能全部交付；**安装包可产出**（最近一次打包是 **V27**：nsis 4.07 MB / msi 5.24 MB / handy.exe 10.50 MB，
-  含 `http_request` 命令；一键脚本 `bash scripts/build-release.sh`）；
+- Phase 1（MVP）功能全部交付；**最近一次打包是 V28**（nsis 4.07 MB / msi 5.24 MB / handy.exe 10.50 MB，15:16 产出），
+  **已静默安装到用户机**（`%LOCALAPPDATA%\Handy\handy.exe`，NSIS currentUser，静默参数 `/S`）并启动；
+  一键脚本 `bash scripts/build-release.sh`（含 tsc→清 dist→vite→tauri→自动取证）。
   **唯一阻塞项 = 用户装机验收 GUI**（窗口/托盘/透明/桌面挂载/拖放/真实文件移动与撤销，沙箱验不了）。
 - 工具箱 **25 个命令 / 6 分类**（text · data · encode · convert · generate · dev；V27 新增 `api-tester` 接口测试）；
   **模块目录 4 个**：toolbox / notes / vault / desktop-organizer（workstation、todos、desktop-grid、settings
@@ -55,16 +56,22 @@
 ## 4. 协作与操作约定
 
 - 用户偏好：**先规划后执行**；表格化、结构化输出；**绝对路径**；**改文件前必须先读取**；目录扁平少层级。
+- **批次收尾固定动作（用户 2026-09-16 明确）**：每轮功能做完 → 打包 → **静默安装到用户机** → 启动应用，
+  用户只负责测试提意见，不想自己敲命令。安装流程：关掉运行中的 handy.exe → NSIS 安装器 `/S` 静默装
+  → 验证 `%LOCALAPPDATA%\Handy\handy.exe` mtime 与注册表卸载项 → 启动（**沙箱会回收 GUI 进程，
+  必须用非沙箱方式 Start-Process**）。
 - 先排除无关范围（`node_modules`/`dist`/`target`/旧版验证残留）再聚焦。
-- **红线**：禁止对真实用户目录（Desktop/Documents/Downloads）做任何写操作（测试限 TEMP 沙箱）；
-  打包只在用户明确要求时执行。
+- **红线**：禁止对真实用户目录（Desktop/Documents/Downloads）做任何写操作（测试限 TEMP 沙箱）。
 - **最高频的 6 个坑**（完整清单 → CONVENTIONS.md §12.3 + PROJECT_STATUS §3）：
   1. 同一文件的多处 Edit **必须串行**（同消息并行会写入竞争丢改动）；不同文件可并行。
   2. **`vite build` 必须单独发一条命令**（本机 node 安全删除垫片：单回合累计 >50 次即拒，且会把随后的
      build 连带拦下，表现为 `CLEAN_EXIT=1`+`VITE_EXIT=1`，极易误判成「前端编不过」）。**布局审计与
      build 不同回合**（审计开 28 页、每页都删临时文件）。
   3. `npm.cmd` / `cmd.exe` 被安全层拦截 → 一律 `node node_modules/<cli>/<entry>.js`。
-  4. Bash shim 时好时坏（`ls` 曾 exit 127）→ 降级 PowerShell 或 node 脚本，**输出落盘再 Read**。
+  4. Bash shim 时好时坏（`ls` 曾 exit 127；`bash scripts/xxx.sh` 整条命令可能只写出 16 字节日志就"完成"）
+     → 降级 PowerShell 或 node 脚本，**输出落盘再 Read**；跑构建脚本可用 Git Bash 完整路径：
+     `"C:/Users/Administrator/.workbuddy/binaries/PortableGit/versions/1.2.0/bin/bash.exe" -lc "..."`。
+     ⚠️ 构建后必须核对产物 mtime，防 shim 假成功。
   5. 写进源码的中文文案**不要带反引号和 markdown 星号**（模板字符串会被反引号搞崩，报错位置离真问题很远）。
   6. **跨零点批次以 `Get-Date` 为准**，别信会话注入的「当前时间」；判断脚本是否真卡死看**日志 mtime 差**。
 
