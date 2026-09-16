@@ -20,6 +20,8 @@
  *    探针函数，把结构化结果带回来断言。用于「没有示例条、但界面本身就是验收对象」的地方：
  *    - `regex-tester`：30 条正则的**自检徽标**必须无「示例不匹配 / 正则无效」（V25 修的正是这个）；
  *    - `desktop-organizer`：模块首屏必须是「归类文件」页签 + 作用目录栏（V25 修的入口错位）。
+ *    - `workstation-bar`（V28）：`?window=workstation-bar` 直接开贴条独立窗口，
+ *      实测搜索框「输入 → 候选 → ↓ 键 → 回车派发打开并清空」整条链路。
  *
  * probe 函数用 `String(fn)` 原样注入，因此**正则与转义不会被外层模板串二次解释**
  * （曾因此踩坑：直接在模板串里写 `\s` 会退化成 `s`）。probe 可以是 async。
@@ -434,6 +436,49 @@ async function probeApiTester() {
   return out;
 }
 
+/**
+ * 工作台贴条搜索框（V28）：直接开 `?window=workstation-bar` 独立窗口实测。
+ * 断言四件事都是用户能看到的后果：输入「密码」弹出候选面板、候选里有密码生成器、
+ * ↓ 键真的移动了高亮（aria-selected）、回车后输入被清空（打开动作已派发——
+ * 无头无 Tauri IPC，bar_open_command 调用会走 catch 分支，但清空发生在调用前）。
+ */
+async function probeBarSearch() {
+  const tick = () => new Promise((r) => setTimeout(r, 250));
+  const out = { searchBox: false, panelOpen: false, hasPasswordGen: false, keyboardNav: false, queryCleared: false };
+  const input = document.querySelector('input[aria-label="搜索工具"]');
+  out.searchBox = input !== null;
+  if (input === null) {
+    return out;
+  }
+  input.focus();
+  // React 受控输入：必须走原生 value setter 再派发 input 事件，直接赋值不触发 onChange
+  const setValue = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+  setValue.call(input, '密码');
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  await tick();
+  const listbox = document.querySelector('[role="listbox"][aria-label="工具候选"]');
+  out.panelOpen = listbox !== null;
+  out.hasPasswordGen = listbox !== null && listbox.textContent.includes('密码生成器');
+  if (!out.panelOpen) {
+    return out;
+  }
+  input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+  await tick();
+  // ↓ 键按模循环移动高亮：(i+1) % n。单候选时循环回自身（0→0）也是正确行为，
+  // 所以断言「新选中索引 = 旧索引+1 取模」，不假设候选一定多于一个。
+  const options = Array.from(listbox.querySelectorAll('[role="option"]'));
+  const beforeIdx = options.findIndex((o) => o.getAttribute('aria-selected') === 'true');
+  const afterList = Array.from(listbox.querySelectorAll('[role="option"]'));
+  const afterIdx = afterList.findIndex((o) => o.getAttribute('aria-selected') === 'true');
+  out.keyboardNav =
+    afterList.length > 0 &&
+    afterIdx === ((beforeIdx + 1) % afterList.length + afterList.length) % afterList.length;
+  input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  await tick();
+  out.queryCleared = input.value === '';
+  return out;
+}
+
 const CASES = [
   // ——— V24 建立的用例（chip）———
   {
@@ -659,6 +704,22 @@ const CASES = [
     detail: (r) =>
       `解析按钮=${r.probe?.parseButton} URL 已填=${r.probe?.urlFilled} 方法=POST(${r.probe?.methodPost}) ` +
       `体已填=${r.probe?.bodyFilled} 敏感头打码=${r.probe?.secretMasked}`,
+  },
+
+  // ——— V28：工作台贴条（独立窗口 ?window=workstation-bar，搜工具直达）———
+  {
+    id: 'workstation-bar',
+    url: '?window=workstation-bar',
+    probe: probeBarSearch,
+    check: (r) =>
+      r.probe?.searchBox === true &&
+      r.probe?.panelOpen === true &&
+      r.probe?.hasPasswordGen === true &&
+      r.probe?.keyboardNav === true &&
+      r.probe?.queryCleared === true,
+    detail: (r) =>
+      `搜索框=${r.probe?.searchBox} 候选面板=${r.probe?.panelOpen} 含密码生成器=${r.probe?.hasPasswordGen} ` +
+      `↓ 移动高亮=${r.probe?.keyboardNav} 回车后输入已清空=${r.probe?.queryCleared}`,
   },
 ];
 

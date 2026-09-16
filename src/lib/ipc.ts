@@ -259,6 +259,14 @@ export const ipc = {
   barSetPinned: (pinned: boolean): Promise<void> => call<void>('bar_set_pinned', { pinned }),
   /** 唤出主窗口并切到工作台模块（贴条上的「打开工作台」） */
   barOpenWorkstation: (): Promise<void> => call<void>('bar_open_workstation'),
+  /**
+   * 唤出主窗口并直接打开指定工具（V28，贴条搜索框）。
+   *
+   * 走「show 主窗 + handy:navigate 事件」同一套导航机制；commandId 需为
+   * 工具箱命令 id（`registry.commandsOf('toolbox')` 中的条目）。
+   */
+  barOpenCommand: (commandId: string): Promise<void> =>
+    call<void>('bar_open_command', { commandId }),
 
   // —— 主窗口置顶（默认关；置顶会盖住其它程序，收敛为设置项由用户自选）——
 

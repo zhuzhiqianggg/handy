@@ -1,11 +1,15 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronDown, ChevronUp, LayoutDashboard, Pin, PinOff, Plus, X } from 'lucide-react';
+import { ChevronDown, ChevronUp, LayoutDashboard, Pin, PinOff, Plus, Search, X } from 'lucide-react';
 import { ipc } from '@/lib/ipc';
 import { readSettings } from '@/lib/store';
 import { toast } from '@/components/ui/toast';
 import { cn } from '@/lib/utils';
+import { resolveIcon } from '@/lib/icons';
+import { searchCommands } from '@/lib/search';
+import { registry } from '@/core/moduleRegistry';
 import { useTodosStore } from '@/stores/useTodosStore';
 import { useAppStore } from '@/stores/useAppStore';
+import type { CommandMeta } from '@/core/types';
 import type { Todo } from '@/core/data/todosService';
 import { startOfDay, DAY_MS } from './planUtils';
 
@@ -339,6 +343,60 @@ export function WorkstationBar(): React.JSX.Element {
     });
   }, []);
 
+  // —— 工具搜索框（V28，用户反馈：贴条上直接输入就能调起对应工具）——
+
+  /** 工具箱全部命令（注册表在本窗启动时已由 bootstrapSync 装配，元数据常驻内存） */
+  const toolboxCommands = useMemo(() => registry.commandsOf('toolbox'), []);
+
+  const [toolQuery, setToolQuery] = useState('');
+  const [toolFocused, setToolFocused] = useState(false);
+  const [toolHighlight, setToolHighlight] = useState(0);
+
+  /** 候选 = 命令面板同款搜索引擎（拼音首字母 + 模糊），最多 7 条 */
+  const toolMatches = useMemo(
+    () => searchCommands(toolboxCommands, toolQuery, 7),
+    [toolboxCommands, toolQuery],
+  );
+  const toolPanelOpen = toolFocused && toolQuery.trim().length > 0;
+
+  const openTool = useCallback((commandId: string): void => {
+    setToolQuery('');
+    setToolHighlight(0);
+    void ipc.barOpenCommand(commandId).catch((error: unknown) => {
+      toast.error('打开工具失败', {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    });
+  }, []);
+
+  const onToolKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLInputElement>): void => {
+      if (event.key === 'Escape') {
+        setToolQuery('');
+        setToolHighlight(0);
+        event.currentTarget.blur();
+        return;
+      }
+      if (!toolPanelOpen || toolMatches.length === 0) {
+        return;
+      }
+      if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        setToolHighlight((prev) => (prev + 1) % toolMatches.length);
+      } else if (event.key === 'ArrowUp') {
+        event.preventDefault();
+        setToolHighlight((prev) => (prev - 1 + toolMatches.length) % toolMatches.length);
+      } else if (event.key === 'Enter') {
+        event.preventDefault();
+        const target = toolMatches[Math.min(toolHighlight, toolMatches.length - 1)];
+        if (target !== undefined) {
+          openTool(target.id);
+        }
+      }
+    },
+    [toolPanelOpen, toolMatches, toolHighlight, openTool],
+  );
+
   /** D. 时间 + 计数 + 今日进度（同时是拖拽区） */
   const clockBlock = (
     <div className="flex shrink-0 items-center gap-2" data-tauri-drag-region>
@@ -524,6 +582,73 @@ export function WorkstationBar(): React.JSX.Element {
               ) : null}
             </div>
           )}
+
+          {/* 工具搜索框：输入即出候选，回车/点击唤起主窗口直达工具 */}
+          <div className="relative shrink-0">
+            <Search className="pointer-events-none absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-neutral-400" />
+            <input
+              type="text"
+              value={toolQuery}
+              onChange={(event) => {
+                setToolQuery(event.target.value);
+                setToolHighlight(0);
+              }}
+              onKeyDown={onToolKeyDown}
+              onFocus={() => setToolFocused(true)}
+              onBlur={() => setToolFocused(false)}
+              placeholder="搜工具…"
+              aria-label="搜索工具"
+              role="combobox"
+              aria-expanded={toolPanelOpen}
+              aria-controls="bar-tool-matches"
+              className={cn(
+                'h-6 rounded-md bg-white/10 pl-6 pr-1.5 text-[11px] text-neutral-100 outline-none',
+                'transition-all duration-200 placeholder:text-neutral-400',
+                'focus:w-44 focus:bg-white/15',
+                toolPanelOpen ? 'w-44' : 'w-24',
+              )}
+            />
+            {toolPanelOpen ? (
+              <div
+                id="bar-tool-matches"
+                role="listbox"
+                aria-label="工具候选"
+                className="absolute right-0 top-full z-50 mt-1.5 w-72 overflow-hidden rounded-lg bg-neutral-900/95 py-1 ring-1 ring-white/10 backdrop-blur-md"
+              >
+                {toolMatches.length === 0 ? (
+                  <p className="px-3 py-2 text-[11px] text-neutral-400">没有匹配的工具</p>
+                ) : (
+                  toolMatches.map((command: CommandMeta, index: number) => {
+                    const Icon = resolveIcon(command.icon);
+                    return (
+                      <button
+                        key={command.id}
+                        type="button"
+                        role="option"
+                        aria-selected={index === toolHighlight}
+                        /* mousedown 不让输入框先失焦，否则面板会在 click 前收起 */
+                        onMouseDown={(event) => event.preventDefault()}
+                        onMouseEnter={() => setToolHighlight(index)}
+                        onClick={() => openTool(command.id)}
+                        className={cn(
+                          'flex w-full items-center gap-2 px-3 py-1.5 text-left transition',
+                          index === toolHighlight ? 'bg-white/15' : 'hover:bg-white/10',
+                        )}
+                      >
+                        <Icon className="h-3.5 w-3.5 shrink-0 text-neutral-300" />
+                        <span className="shrink-0 text-[11px] font-medium text-neutral-100">
+                          {command.name}
+                        </span>
+                        <span className="min-w-0 flex-1 truncate text-[10px] text-neutral-400">
+                          {command.description}
+                        </span>
+                      </button>
+                    );
+                  })
+                )}
+              </div>
+            ) : null}
+          </div>
 
           {actions}
         </div>

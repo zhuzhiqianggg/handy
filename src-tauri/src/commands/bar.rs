@@ -176,3 +176,23 @@ pub async fn bar_open_workstation(app: AppHandle) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// 从贴条搜索框直接打开指定工具（V28，用户反馈）。
+///
+/// 与 `bar_open_workstation` 同一套导航机制：显示主窗口 + `handy:navigate` 事件，
+/// payload 为**工具 id**（主窗口侧非 `module:` 前缀的 payload 一律按命令视图处理）。
+/// 工具 id 来自贴条前端的 `registry.commandsOf('toolbox')`，非法 id 由主窗口
+/// `CommandView` 的未知命令兜底处理，这里不做白名单校验（保持命令薄）。
+#[tauri::command]
+pub async fn bar_open_command(app: AppHandle, command_id: String) -> Result<(), String> {
+    let id = command_id.trim().to_string();
+    if id.is_empty() {
+        return Err("工具 id 不能为空".to_string());
+    }
+    crate::window::show_main_palette(&app)?;
+    if let Some(win) = app.get_webview_window(MAIN_LABEL) {
+        win.emit("handy:navigate", id)
+            .map_err(|err| format!("通知主窗口失败：{err}"))?;
+    }
+    Ok(())
+}

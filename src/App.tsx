@@ -1,4 +1,4 @@
-import { useCallback, useEffect, type FC } from 'react';
+import { useEffect, type FC } from 'react';
 import { AppLayout } from './components/AppLayout';
 import { CommandPalette } from './components/CommandPalette';
 import { CommandView } from './components/CommandView';
@@ -10,7 +10,6 @@ import { GridOverlay } from '@/modules/desktop-grid/GridOverlay';
 import { WorkstationBar } from '@/modules/workstation/WorkstationBar';
 import { ReminderScheduler } from '@/modules/todos/ReminderScheduler';
 import { useTheme } from '@/hooks/useTheme';
-import { useHotkeyOpen } from '@/hooks/useHotkeyOpen';
 import { applyViewSize, initWindowShell } from '@/lib/windowShell';
 
 /** 可挂载的窗口根类型（与 Rust 侧 WindowKind 对应） */
@@ -61,11 +60,10 @@ const App: FC<AppProps> = ({ windowRoot = 'main', noteId }) => {
   // 应用主题（light / dark / system）
   useTheme();
 
-  // 全局快捷键呼出：切回命令面板（窗口显隐由 Rust 侧完成）
-  const handleHotkeyOpen = useCallback((): void => {
-    useAppStore.getState().showPalette();
-  }, []);
-  useHotkeyOpen(handleHotkeyOpen);
+  // 全局快捷键呼出（V28）：**不再切回命令面板**。Rust 侧 toggle 后 set_focus 聚焦窗口，
+  // 视图原样保留 —— 用户在密码生成器上收起、再唤醒时仍在密码生成器（工具内输入由
+  // usePersistedState 落盘，一样都在）。只有用户在工具内按 Esc / 返回（CommandShell）
+  // 才回到面板。此前这里调用 showPalette()，是「唤醒后密码框没了」的根因。
 
   const view = useAppStore((state) => state.view);
 
