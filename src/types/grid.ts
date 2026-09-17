@@ -11,7 +11,15 @@
  */
 
 /** 格子类型：收纳格 / 便签 / 日历（含今日计划）/ 系统入口 */
-export type GridBoxKind = 'folder' | 'note' | 'calendar' | 'system';
+export type GridBoxKind = 'folder' | 'note' | 'calendar';
+
+/**
+ * 格子配色键。
+ *
+ * V35（用户反馈「便签应该可以添加多个」）：多个便签并存时必须一眼分清谁是谁。
+ * 白名单与 Rust `clean_accent` 保持一致 —— 后端只认这几个，多余的回落默认色。
+ */
+export type GridAccent = '' | 'amber' | 'rose' | 'sky' | 'emerald' | 'violet' | 'slate';
 
 /** 格子（`itemCount` 来自 grid_box_list 的条目计数子查询） */
 export interface GridBox {
@@ -21,6 +29,8 @@ export interface GridBox {
   kind: GridBoxKind;
   /** 挂件自有数据（便签正文 / 日历配置 JSON）；收纳格为空串 */
   content: string;
+  /** 配色键；`''` = 默认色（跟随格子类型） */
+  accent: GridAccent;
   /** 几何均为逻辑像素（相对挂件窗客户区左上角） */
   posX: number;
   posY: number;
@@ -50,6 +60,8 @@ export interface GridBoxInput {
   name?: string | null;
   kind?: GridBoxKind | null;
   content?: string | null;
+  /** 配色键；缺省不动（更新时）/ 用默认色（创建时） */
+  accent?: GridAccent | null;
   posX?: number | null;
   posY?: number | null;
   width?: number | null;

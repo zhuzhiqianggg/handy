@@ -19,7 +19,8 @@ import { Button } from '@/components/ui/button';
 import { toast } from '@/components/ui/toast';
 import { ipc } from '@/lib/ipc';
 import { cn } from '@/lib/utils';
-import type { GridBox, LayoutSnapshotMeta } from '@/types/grid';
+import { ACCENT_ORDER } from './DesktopWidgets';
+import type { GridAccent, GridBox, LayoutSnapshotMeta } from '@/types/grid';
 
 /**
  * 桌面格子（原「桌面整理」内页）。
@@ -162,28 +163,44 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
       .finally(() => setBusy(false));
   }, [refresh, boxes.length, overlayVisible]);
 
-  /** 新建挂件（便签 / 日历 + 今日计划）—— **同类型全桌面只允许一个** */
+  /**
+   * 新建挂件（便签 / 日历 + 今日计划）。
+   *
+   * V34 曾按用户要求把同类挂件限成一个；**V35 用户改口**：「便签应该可以添加多个」。
+   * 于是拆成两条规则（与桌面上浮动工具栏的 `addWidget` 保持一致）：
+   *   - **便签可以多个**：按 便签 / 便签 2 / 便签 3… 自动起名，并轮流给一个不同配色
+   *     （多个便签长得一模一样，桌面上根本分不清）——桌面上点标题栏调色盘随时可改；
+   *   - **日历仍然只有一个**：日历背后是同一份 `todos`，多开只是重复信息。
+   */
   const addWidget = useCallback(
     (kind: 'note' | 'calendar'): void => {
-      // V34（用户要求「日历挂件只有一个不要点一次就能无限加一堆个」「便签也一个吧」）：
-      // 之前每点一次就多一个，桌面上很快堆满同款挂件。改为幂等——
-      // 已经有就直接把用户引到那一个上，不再新建。
-      const existing = boxes.find((box) => box.kind === kind);
-      if (existing) {
-        toast.info(kind === 'note' ? '便签已经有一个了' : '日历挂件已经有一个了', {
-          description: `直接在桌面上用「${existing.name}」就行；想重来可以先删掉它`,
-        });
-        return;
+      if (kind === 'calendar') {
+        const existing = boxes.find((box) => box.kind === 'calendar');
+        if (existing) {
+          toast.info('日历挂件已经有一个了', {
+            description: `直接在桌面上用「${existing.name}」就行；想重来可以先删掉它`,
+          });
+          return;
+        }
       }
       setBusy(true);
+      const sameKind = boxes.filter((box) => box.kind === kind).length;
       const preset =
         kind === 'note'
-          ? { name: '便签', width: 260, height: 220 }
-          : { name: '日历 · 今日计划', width: 320, height: 300 };
+          ? {
+              // 第 1 个叫「便签」，之后顺延编号 —— 名字是给人看的，不该出现「便签 1」
+              name: sameKind === 0 ? '便签' : `便签 ${sameKind + 1}`,
+              width: 260,
+              height: 220,
+              // 轮着给配色，尽量让相邻两个便签颜色不同
+              accent: ACCENT_ORDER[(sameKind % (ACCENT_ORDER.length - 1)) + 1] ?? 'amber',
+            }
+          : { name: '日历 · 今日计划', width: 360, height: 430, accent: '' as GridAccent };
       void ipc
         .gridBoxUpsert({
           name: preset.name,
           kind,
+          accent: kind === 'note' ? (preset.accent as GridAccent) : null,
           posX: 40 + (boxes.length % 3) * 344,
           posY: 40 + Math.floor(boxes.length / 3) * 268,
           width: preset.width,
@@ -191,8 +208,12 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
         })
         .then(async () => {
           await refresh();
-          toast.success(kind === 'note' ? '已新建便签挂件' : '已新建日历挂件', {
-            description: overlayVisible ? undefined : '格子层当前是收起的，点「显示格子」即可看到',
+          toast.success(kind === 'note' ? `已新建${preset.name}` : '已新建日历挂件', {
+            description: overlayVisible
+              ? kind === 'note'
+                ? '支持 Markdown 边写边渲染；多个便签可用标题栏调色盘换色区分'
+                : undefined
+              : '格子层当前是收起的，点「显示格子」即可看到',
           });
         })
         .catch((err: unknown) => {
@@ -200,7 +221,7 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
         })
         .finally(() => setBusy(false));
     },
-    [refresh, boxes.length, overlayVisible],
+    [refresh, boxes, overlayVisible],
   );
 
   /**
@@ -452,7 +473,7 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
             <p className="text-foreground">
               桌面挂件：便签支持 Markdown 边写边渲染（自动保存）、日历挂件带农历 · 节气 ·
               节假日与每日计划（与工作台共用同一份待办数据，桌面勾完工作台同步）。
-              便签与日历各只能有一个。
+              便签可添加多个（各自名字与配色可在桌面上直接改），日历挂件保留一个。
             </p>
             {fault && (
               <p className="rounded bg-red-500/10 px-2 py-1 text-[11px] text-red-600 dark:text-red-400">
@@ -544,7 +565,7 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
               <p className="mx-auto mt-1 max-w-md text-xs leading-relaxed text-muted-foreground">
                 点「一键收纳桌面」把桌面上的文件和文件夹按类型移动进 桌面/Handy整理/
                 并各建一个格子（只有快捷方式留在原位）；也可以点「新建格子」自己摆，
-                或加一个便签 / 日历挂件（各限一个）。显示格子后把文件拖进格子即收纳。
+                或加便签 / 日历挂件（便签可以加多个）。显示格子后把文件拖进格子即收纳。
               </p>
               <div className="mt-4 flex justify-center gap-2">
                 <Button size="sm" onClick={autoArrange} disabled={arranging}>

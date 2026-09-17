@@ -15,6 +15,13 @@ import { useAppStore } from '@/stores/useAppStore';
 import { dayInfo, ganZhi, type DayInfo } from '@/lib/lunar';
 import { HOLIDAY_LATEST_YEAR, holidayOf, upcomingHolidays } from '@/lib/holidays';
 import type { Anniversary } from '@/core/types';
+import {
+  ANNIVERSARY_KINDS,
+  anniversariesOf,
+  newAnniversaryId,
+  toDateKey,
+  yearsSince,
+} from '@/lib/anniversaries';
 import { buildMonthGrid, dayLabel, isSameDay, startOfDay } from './planUtils';
 
 /**
@@ -50,58 +57,6 @@ export interface CalendarPanelProps {
 
 /** 星期表头（周一开始，与 startOfWeek 一致） */
 const WEEKDAY_HEADERS: readonly string[] = ['一', '二', '三', '四', '五', '六', '日'];
-
-/** 纪念日类型 → 展示信息 */
-const ANNIVERSARY_KINDS: ReadonlyArray<{ id: Anniversary['kind']; name: string }> = [
-  { id: 'birthday', name: '生日' },
-  { id: 'anniversary', name: '纪念日' },
-  { id: 'other', name: '其他' },
-];
-
-/** 两位补零 */
-function pad(value: number): string {
-  return String(value).padStart(2, '0');
-}
-
-/** 本地日期 → `YYYY-MM-DD` */
-function toKey(year: number, month: number, day: number): string {
-  return `${year}-${pad(month)}-${pad(day)}`;
-}
-
-/** 新纪念日 id（时间戳 + 随机后缀，足够避免碰撞） */
-function newAnniversaryId(): string {
-  return `an-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
-}
-
-/** 某天命中的纪念日（`dayMs` 为本地零点毫秒） */
-function anniversariesOf(list: readonly Anniversary[], dayMs: number): Anniversary[] {
-  const d = new Date(dayMs);
-  const month = d.getMonth() + 1;
-  const day = d.getDate();
-  const full = toKey(d.getFullYear(), month, day);
-  return list.filter((item) => {
-    if (item.yearly) {
-      // 按「月-日」匹配；2/29 在平年落到 3/1 也算命中，避免四年才提醒一次
-      const parts = item.date.split('-');
-      const im = Number(parts[1]);
-      const id = Number(parts[2]);
-      if (im === month && id === day) {
-        return true;
-      }
-      return im === 2 && id === 29 && month === 3 && day === 1;
-    }
-    return item.date === full;
-  });
-}
-
-/** 纪念日已经过了几年（用于「第 N 年」提示） */
-function yearsSince(item: Anniversary, year: number): number {
-  const startYear = Number(item.date.split('-')[0]);
-  if (!Number.isFinite(startYear)) {
-    return 0;
-  }
-  return year - startYear;
-}
 
 export function CalendarPanel({ anchorMs, onSelect, pendingByDay }: CalendarPanelProps): React.JSX.Element {
   const anchorDate = useMemo(() => new Date(anchorMs), [anchorMs]);
@@ -157,7 +112,7 @@ export function CalendarPanel({ anchorMs, onSelect, pendingByDay }: CalendarPane
       return;
     }
     const fallback = new Date(anchorMs);
-    const date = draftDate !== '' ? draftDate : toKey(fallback.getFullYear(), fallback.getMonth() + 1, fallback.getDate());
+    const date = draftDate !== '' ? draftDate : toDateKey(fallback.getFullYear(), fallback.getMonth() + 1, fallback.getDate());
     const next: Anniversary = {
       id: newAnniversaryId(),
       label,

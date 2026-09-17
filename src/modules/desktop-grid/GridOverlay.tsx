@@ -6,6 +6,7 @@ import {
   FolderClosed,
   Lock,
   LockOpen,
+  Palette,
   Plus,
   StickyNote,
   Trash2,
@@ -14,8 +15,8 @@ import {
 } from 'lucide-react';
 import { ipc } from '@/lib/ipc';
 import { isTauri } from '@/platform/detect';
-import type { GridBox, GridItem, GridRegion } from '@/types/grid';
-import { CalendarWidget, NoteWidget } from './DesktopWidgets';
+import type { GridAccent, GridBox, GridItem, GridRegion } from '@/types/grid';
+import { ACCENT_ORDER, CalendarWidget, NOTE_ACCENTS, NoteWidget } from './DesktopWidgets';
 
 /**
  * 桌面网格挂件 · 透明覆盖窗（`grid-overlay`）。
@@ -44,11 +45,42 @@ const MIN_BOX_H = 120;
 const GEOMETRY_SAVE_DEBOUNCE_MS = 500;
 /** 提示条显示时长 */
 const HINT_DURATION_MS = 2600;
+/** 盒子标题栏高度（与 JSX 里的 h-8 一致）：算挂件自动高度时要把它加回去 */
+const BOX_HEADER_H = 32;
+/** 盒子边框高度（上 + 下，border-box 下高度含边框） */
+const BOX_BORDER_H = 2;
+
+/**
+ * 缩放手柄方向。
+ *
+ * V35（用户反馈「右边和下边都可以，现在只有右下角才可以拉」）：补齐**四边 + 四角**
+ * 共 8 个手柄。字母含义按罗盘：`n` 上、`s` 下、`w` 左、`e` 右。
+ */
+type ResizeEdge = 'n' | 's' | 'w' | 'e' | 'ne' | 'nw' | 'se' | 'sw';
+
+/**
+ * 8 个缩放手柄的定位与光标（类名写成字面量，Tailwind 才扫得到）。
+ *
+ * 四边只占一条 6px 命中带，且**两端各留 12px 让给角手柄**（`left-3 right-3` 等），
+ * 否则角上会同时命中「边」和「角」两个元素，拉起来方向会跳。
+ */
+const RESIZE_HANDLES: ReadonlyArray<{ edge: ResizeEdge; className: string; cursor: string }> = [
+  { edge: 'n', className: 'left-3 right-3 top-0 h-1.5', cursor: 'cursor-ns-resize' },
+  { edge: 's', className: 'bottom-0 left-3 right-3 h-1.5', cursor: 'cursor-ns-resize' },
+  { edge: 'w', className: 'bottom-3 left-0 top-3 w-1.5', cursor: 'cursor-ew-resize' },
+  { edge: 'e', className: 'bottom-3 right-0 top-3 w-1.5', cursor: 'cursor-ew-resize' },
+  { edge: 'nw', className: 'left-0 top-0 h-3 w-3', cursor: 'cursor-nwse-resize' },
+  { edge: 'ne', className: 'right-0 top-0 h-3 w-3', cursor: 'cursor-nesw-resize' },
+  { edge: 'sw', className: 'bottom-0 left-0 h-3 w-3', cursor: 'cursor-nesw-resize' },
+  { edge: 'se', className: 'bottom-0 right-0 h-3 w-3', cursor: 'cursor-nwse-resize' },
+];
 
 /** 一次布局交互（移动 / 缩放）的会话状态 */
 interface Interaction {
   kind: 'move' | 'resize';
   boxId: number;
+  /** `kind='resize'` 时表示拉的是哪条边/哪个角 */
+  edge: ResizeEdge | null;
   startX: number;
   startY: number;
   origX: number;
@@ -67,6 +99,43 @@ interface ItemDrag {
 function isDirectoryPath(path: string): boolean {
   const name = path.split(/[\\/]/).pop() ?? '';
   return !/\.[^./\\]+$/.test(name);
+}
+
+/**
+ * 卡片磨砂底色（内联渐变，跟着 `accent` 走）。
+ *
+ * 取「同色系深底 + 中等透明度」：透明度太高（V34 的 0.045 白）会让前景文字和壁纸
+ * 混在一起、看着发虚，用户反馈的「有点模糊」正是这个；太低又变成一块黑砖、失去
+ * 「融入桌面」的感觉。0.62 → 0.46 的竖向渐变兼顾两头：上半部更实（标题读得清），
+ * 下半部略透（露出壁纸走向），配合顶部 1px 高光就有了「玻璃」的厚度感。
+ */
+function cardBackground(accent: GridAccent): string {
+  /** 各配色的底色 RGB（深色，保证白色文字对比度 ≥ 7:1） */
+  const tint: Record<GridAccent, string> = {
+    '': '12,14,22',
+    amber: '26,19,9',
+    rose: '30,12,20',
+    sky: '9,18,30',
+    emerald: '8,24,18',
+    violet: '20,13,30',
+    slate: '16,18,23',
+  };
+  const rgb = tint[accent] ?? tint[''];
+  return `linear-gradient(180deg, rgba(${rgb},0.62), rgba(${rgb},0.46))`;
+}
+
+/** 编辑态描边：用配色染一下，一眼看出这格是哪个颜色 */
+function accentRing(accent: GridAccent): string {
+  const ring: Record<GridAccent, string> = {
+    '': 'ring-1 ring-sky-300/45',
+    amber: 'ring-1 ring-amber-300/60',
+    rose: 'ring-1 ring-rose-300/60',
+    sky: 'ring-1 ring-sky-300/60',
+    emerald: 'ring-1 ring-emerald-300/60',
+    violet: 'ring-1 ring-violet-300/60',
+    slate: 'ring-1 ring-slate-200/55',
+  };
+  return ring[accent] ?? ring[''];
 }
 
 // —— 系统真实图标（接管桌面的观感关键：和资源管理器一致，一眼认出「这是我的文件」） ——
@@ -173,6 +242,8 @@ export function GridOverlay(): React.JSX.Element {
   const [addPathDraft, setAddPathDraft] = useState('');
   const [dropTargetId, setDropTargetId] = useState<number | null>(null);
   const [scaleFactor, setScaleFactor] = useState(1);
+  /** 正在挑选配色的格子 id（V35：多个便签并存时用来区分） */
+  const [accentBoxId, setAccentBoxId] = useState<number | null>(null);
 
   /** 渲染无关的可变状态（事件回调内读取，避免闭包过期） */
   const boxesRef = useRef<GridBox[]>([]);
@@ -184,6 +255,18 @@ export function GridOverlay(): React.JSX.Element {
   const toolbarRef = useRef<HTMLDivElement | null>(null);
   /** 空态卡片的 DOM 引用：它也要纳入命中区域，否则「创建第一个盒子」按钮点不到 */
   const emptyRef = useRef<HTMLDivElement | null>(null);
+  /** 各挂件最近一次上报的「内容自然高度」：用户手动拉过之后据此判断内容有没有变 */
+  const lastNaturalRef = useRef<Map<number, number>>(new Map());
+  /**
+   * 「用户手动定过高度」的挂件：`boxId → 当时的内容自然高度`。
+   *
+   * 自动撑高和手动缩放会互相打架 —— 用户把日历拉矮，撑高逻辑立刻又把它顶回去。
+   * 规则：手动拉过之后**先听用户的**；等这份内容真的变了（自然高度变了），
+   * 自动撑高才重新接管。这样两边都合理。
+   */
+  const autoHeightBlockedRef = useRef<Map<number, number>>(new Map());
+  /** 挂件高度落库防抖定时器（自动撑高会连续调几次，别每次都写库） */
+  const heightSaveTimerRef = useRef<number | undefined>(undefined);
 
   // boxesRef 镜像：拖放命中测试 / mouseup 落库时读取最新布局
   useEffect(() => {
@@ -445,10 +528,34 @@ export function GridOverlay(): React.JSX.Element {
               posY: Math.max(interaction.origY + dy, 0),
             };
           }
+          // 缩放：按手柄方向决定动哪几条边。
+          // 拉左边 / 上边时，**原点要跟着走**（盒子是「往左长」而不是「往右缩」），
+          // 且先把宽高夹到下限、再反推原点，否则拖到最小尺寸后原点会持续滑动。
+          const edge = interaction.edge ?? 'se';
+          let nextX = interaction.origX;
+          let nextY = interaction.origY;
+          let nextW = interaction.origW;
+          let nextH = interaction.origH;
+          if (edge.includes('e')) {
+            nextW = Math.max(interaction.origW + dx, MIN_BOX_W);
+          }
+          if (edge.includes('s')) {
+            nextH = Math.max(interaction.origH + dy, MIN_BOX_H);
+          }
+          if (edge.includes('w')) {
+            nextW = Math.max(interaction.origW - dx, MIN_BOX_W);
+            nextX = interaction.origX + (interaction.origW - nextW);
+          }
+          if (edge.includes('n')) {
+            nextH = Math.max(interaction.origH - dy, MIN_BOX_H);
+            nextY = interaction.origY + (interaction.origH - nextH);
+          }
           return {
             ...box,
-            width: Math.max(interaction.origW + dx, MIN_BOX_W),
-            height: Math.max(interaction.origH + dy, MIN_BOX_H),
+            posX: Math.max(nextX, 0),
+            posY: Math.max(nextY, 0),
+            width: nextW,
+            height: nextH,
           };
         }),
       );
@@ -461,6 +568,16 @@ export function GridOverlay(): React.JSX.Element {
       interactionRef.current = null;
       // 交还穿透控制（光标若仍在盒子内，轮询线程会立即恢复可交互）
       void ipc.gridSetInteractive(false).catch(() => undefined);
+      // 手动缩放过挂件 → 记录「此时的内容自然高度」，自动撑高先让位（见 autoHeightBlockedRef）
+      if (interaction.kind === 'resize') {
+        const target = boxesRef.current.find((box) => box.id === interaction.boxId);
+        if (target && (target.kind === 'calendar' || target.kind === 'note')) {
+          const natural = lastNaturalRef.current.get(target.id);
+          if (natural !== undefined) {
+            autoHeightBlockedRef.current.set(target.id, natural);
+          }
+        }
+      }
       persistBoxGeometry(interaction.boxId);
     };
     window.addEventListener('mousemove', onMove);
@@ -471,12 +588,34 @@ export function GridOverlay(): React.JSX.Element {
     };
   }, [persistBoxGeometry]);
 
+  /**
+   * 把被操作的格子提到最上层。
+   *
+   * 格子是绝对定位、可以互相叠的（靠右自动流 + 手动拖动），叠起来之后**下面那个
+   * 就点不到了** —— 所以每次开始拖 / 拉之前先把它抬起来（`sort` 取全表最大值 + 1）。
+   * 只在「交互开始」时抬，不做成「点一下就抬」：后者会让每次单击都写一次数据库。
+   */
+  const raiseBox = useCallback((box: GridBox): void => {
+    const list = boxesRef.current;
+    const maxSort = list.reduce((acc, item) => Math.max(acc, item.sort), 0);
+    if (box.sort >= maxSort) {
+      return; // 已经在最上层
+    }
+    const nextSort = maxSort + 1;
+    setBoxes((prev) =>
+      prev.map((item) => (item.id === box.id ? { ...item, sort: nextSort } : item)),
+    );
+    void ipc.gridBoxUpsert({ boxId: box.id, sort: nextSort }).catch(() => undefined);
+  }, []);
+
   const startMove = useCallback(
     (event: React.MouseEvent, box: GridBox): void => {
       event.preventDefault();
+      raiseBox(box);
       interactionRef.current = {
         kind: 'move',
         boxId: box.id,
+        edge: null,
         startX: event.clientX,
         startY: event.clientY,
         origX: box.posX,
@@ -487,19 +626,21 @@ export function GridOverlay(): React.JSX.Element {
       // 拖拽期显式保持可交互（光标甩出盒子也不被切回穿透）
       void ipc.gridSetInteractive(true).catch(() => undefined);
     },
-    [],
+    [raiseBox],
   );
 
   const startResize = useCallback(
-    (event: React.MouseEvent, box: GridBox): void => {
+    (event: React.MouseEvent, box: GridBox, edge: ResizeEdge): void => {
       if (!editMode) {
         return;
       }
       event.preventDefault();
       event.stopPropagation();
+      raiseBox(box);
       interactionRef.current = {
         kind: 'resize',
         boxId: box.id,
+        edge,
         startX: event.clientX,
         startY: event.clientY,
         origX: box.posX,
@@ -509,7 +650,7 @@ export function GridOverlay(): React.JSX.Element {
       };
       void ipc.gridSetInteractive(true).catch(() => undefined);
     },
-    [editMode],
+    [editMode, raiseBox],
   );
 
   // —— 重命名（双击标题，编辑态） ——
@@ -819,44 +960,106 @@ export function GridOverlay(): React.JSX.Element {
   /**
    * 新建挂件（便签 / 日历）—— 桌面上直接可用的轻量小组件。
    *
-   * V34（用户要求「日历挂件只有一个，不要点一次就能无限加一堆个」「便签也一个吧」）：
-   * 改为**同类型只允许一个**。再点就把用户引到已有的那一个上，不再新建。
+   * V34 曾按用户要求把同类挂件限成一个；**V35 用户改口**：「便签应该可以添加多个」。
+   * 于是这里拆成两条规则：
+   *   - **便签可以多个**：按 便签 / 便签 2 / 便签 3… 自动起名，并给一个**不同的默认配色**
+   *     （多个便签如果长得一模一样，桌面上根本分不清）——点标题栏的调色盘可随时改；
+   *   - **日历仍然只有一个**：日历背后是同一份 `todos`，多开纯粹是重复信息。
    */
   const addWidget = useCallback(
     (kind: 'note' | 'calendar'): void => {
-      const existing = boxesRef.current.find((box) => box.kind === kind);
-      if (existing) {
-        showHint(
-          kind === 'note'
-            ? '便签已经有一个了，直接用它就好'
-            : '日历挂件已经有一个了，直接用它就好',
-        );
-        return;
+      if (kind === 'calendar') {
+        const existing = boxesRef.current.find((box) => box.kind === 'calendar');
+        if (existing) {
+          showHint('日历挂件已经有一个了，直接用它就好');
+          return;
+        }
       }
-      const count = boxesRef.current.length;
+      const sameKind = boxesRef.current.filter((box) => box.kind === kind).length;
       const preset =
         kind === 'note'
-          ? { name: '便签', width: 260, height: 220, content: '' }
-          : { name: '日历 · 今日计划', width: 320, height: 300, content: '' };
+          ? {
+              // 第 1 个叫「便签」，之后顺延编号 —— 名字是给人看的，不该出现「便签 1」
+              name: sameKind === 0 ? '便签' : `便签 ${sameKind + 1}`,
+              width: 260,
+              height: 220,
+              // 轮着给配色，保证相邻两个便签颜色不同
+              accent: ACCENT_ORDER[(sameKind % (ACCENT_ORDER.length - 1)) + 1] ?? 'amber',
+            }
+          : { name: '日历 · 今日计划', width: 360, height: 430, accent: '' as GridAccent };
       void ipc
         .gridBoxUpsert({
           name: preset.name,
           kind,
-          content: preset.content,
-          posX: 120 + (count % 5) * 36,
-          posY: 120 + (count % 7) * 30,
+          accent: kind === 'note' ? (preset.accent as GridAccent) : null,
           width: preset.width,
           height: preset.height,
         })
         .then((created) => {
           setBoxes((prev) => [...prev, created]);
           setItems((prev) => ({ ...prev, [created.id]: [] }));
-          showHint(kind === 'note' ? '已新建便签挂件' : '已新建日历挂件（含今日计划）');
+          showHint(
+            kind === 'note'
+              ? `已新建${created.name}（支持 Markdown，边写边渲染）`
+              : '已新建日历挂件（含今日计划，与工作台共用数据）',
+          );
         })
         .catch((error: Error) => showHint(error.message));
     },
     [showHint],
   );
+
+  /** 改格子配色（便签尤其需要：多个便签并存时要一眼分清） */
+  const setAccent = useCallback(
+    (boxId: number, accent: GridAccent): void => {
+      setAccentBoxId(null);
+      setBoxes((prev) => prev.map((box) => (box.id === boxId ? { ...box, accent } : box)));
+      void ipc.gridBoxUpsert({ boxId, accent }).catch((error: Error) => showHint(error.message));
+    },
+    [showHint],
+  );
+
+  /**
+   * 挂件上报「内容自然高度」→ 把盒子高度调到刚好装下（V35 用户要求：
+   * 「日历下面的计划部分可以根据计划条数多少动态扩展高度」）。
+   *
+   * 三条护栏，缺一不可：
+   *   ① 正在拖 / 拉这个格子 → 让位给人；
+   *   ② 用户手动定过高度、且内容没变 → 让位给人（见 `autoHeightBlockedRef`）；
+   *   ③ 变化小于 8px → 不动（防亚像素抖动来回写库）。
+   * 上限取屏幕高度的 70%，免得计划特别多时把格子撑到屏幕外。
+   */
+  const applyWidgetHeight = useCallback((boxId: number, natural: number): void => {
+    lastNaturalRef.current.set(boxId, natural);
+    if (interactionRef.current?.boxId === boxId) {
+      return;
+    }
+    const blocked = autoHeightBlockedRef.current.get(boxId);
+    if (blocked !== undefined && Math.abs(blocked - natural) < 8) {
+      return;
+    }
+    const box = boxesRef.current.find((item) => item.id === boxId);
+    if (!box) {
+      return;
+    }
+    const maxH = Math.max(Math.round(window.innerHeight * 0.7), MIN_BOX_H);
+    const target = Math.min(
+      Math.max(Math.round(natural + BOX_HEADER_H + BOX_BORDER_H), MIN_BOX_H),
+      maxH,
+    );
+    if (Math.abs(target - box.height) < 8) {
+      return;
+    }
+    autoHeightBlockedRef.current.delete(boxId);
+    setBoxes((prev) => prev.map((item) => (item.id === boxId ? { ...item, height: target } : item)));
+    if (heightSaveTimerRef.current !== undefined) {
+      window.clearTimeout(heightSaveTimerRef.current);
+    }
+    heightSaveTimerRef.current = window.setTimeout(() => {
+      heightSaveTimerRef.current = undefined;
+      void ipc.gridBoxUpsert({ boxId, height: target }).catch(() => undefined);
+    }, 400);
+  }, []);
 
   /** 保存挂件数据（便签正文 / 日历配置），失败不弹提示以免打断输入 */
   const saveBoxContent = useCallback((boxId: number, content: string): void => {
@@ -900,10 +1103,9 @@ export function GridOverlay(): React.JSX.Element {
   // —— 渲染 ——
 
   /**
-   * 挂件唯一性（用户要求「日历挂件只有一个」「便签也一个吧」）：
-   * 已经有一个就把对应按钮置灰，而不是点了才弹提示。
+   * 日历挂件仍然唯一（日历背后是同一份 `todos`，多开只是重复信息）；
+   * 便签 V35 起可以多个，所以不再置灰。
    */
-  const hasNote = boxes.some((box) => box.kind === 'note');
   const hasCalendar = boxes.some((box) => box.kind === 'calendar');
 
   return (
@@ -922,23 +1124,22 @@ export function GridOverlay(): React.JSX.Element {
               width: box.width,
               height: box.height,
               pointerEvents: 'auto',
+              // 非编辑态：给卡片铺一层**深色磨砂底**。为什么用内联 style 而不是
+              // Tailwind 类：底色要跟着 `accent` 走（7 种组合），内联渐变最直白，
+              // 也不必担心 JIT 扫不到动态拼出来的类名。
+              background: editMode ? undefined : cardBackground(box.accent),
             }}
             /* 观感目标（用户原话）：「桌面就是一个大容器，格子就是大容器里面的小容器，
                自然嵌入在桌面上」「像在壁纸上画了一张图」。
-               手法 = 极低透明度的磨砂 + 淡淡的描边 + 大圆角 + 柔和外阴影，
-               而不是实心深色卡片；只有解锁（编辑态）时描边才变明显，
-               好让你找得到可拖拽的边界。 */
+               V35 用户又说「背景透明后有点模糊，增加对比度」—— 于是这一版把
+               「几乎看不见的浅雾」换成**深色磨砂**：底色确有厚度（前景文字对比度够高），
+               但仍透出壁纸；**没有硬边框**，靠「顶部一道极淡的高光 + 大范围柔和外阴影」
+               把边缘融进桌面 —— 像贴在壁纸上的一张毛玻璃卡，而不是浮起来的白面板。 */
             className={`absolute flex flex-col overflow-hidden rounded-2xl text-neutral-100 ${
               editMode
-                ? 'border border-dashed bg-white/[0.07] backdrop-blur-md'
-                : 'border bg-white/[0.045] shadow-[0_2px_18px_rgba(0,0,0,0.16)] backdrop-blur-[3px]'
-            } ${
-              isDropTarget
-                ? 'border-sky-300/80 bg-sky-400/10'
-                : editMode
-                  ? 'border-sky-300/40'
-                  : 'border-white/10'
-            }`}
+                ? 'border border-dashed bg-neutral-900/55 backdrop-blur-md'
+                : 'shadow-[0_10px_30px_rgba(0,0,0,0.34),inset_0_1px_0_rgba(255,255,255,0.09)] backdrop-blur-lg backdrop-saturate-150'
+            } ${isDropTarget ? 'ring-2 ring-sky-300/85' : editMode ? accentRing(box.accent) : ''}`}
             onDragOver={(event) => {
               // 内部条目拖拽：允许作为放点（系统文件拖放走 webview 级事件，不经过这里）
               if (itemDragRef.current !== null) {
@@ -955,13 +1156,28 @@ export function GridOverlay(): React.JSX.Element {
                 endItemDrag();
               }
             }}
+            onMouseDown={(event) => {
+              // 编辑态：**从格子任意空白处都能拖动**（不只是 32px 高的标题栏）。
+              // 条目元素带 data-grid-item，交给它们自己的拖拽/双击逻辑。
+              if (!editMode) {
+                return;
+              }
+              const target = event.target as HTMLElement | null;
+              if (target?.closest('[data-grid-item="1"]')) {
+                return;
+              }
+              if (target?.closest('button,input,[contenteditable="true"]')) {
+                return;
+              }
+              startMove(event, box);
+            }}
           >
             {/* 标题栏：拖拽移动（随时可用）+ 双击重命名 */}
             <header
               onMouseDown={(event) => startMove(event, box)}
               onDoubleClick={() => beginRename(box)}
               className="flex h-8 shrink-0 cursor-move items-center gap-1 px-2 active:cursor-grabbing"
-              title="拖拽移动 · 双击重命名"
+              title="拖拽移动 · 双击重命名标题"
             >
               {renamingId === box.id ? (
                 <input
@@ -980,20 +1196,32 @@ export function GridOverlay(): React.JSX.Element {
                 />
               ) : (
                 <span
-                  className={`min-w-0 flex-1 truncate text-xs font-medium ${
-                    editMode ? 'opacity-80' : 'opacity-40 [text-shadow:0_1px_2px_rgba(0,0,0,0.6)]'
+                  className={`min-w-0 flex-1 truncate text-xs font-semibold [text-shadow:0_1px_2px_rgba(0,0,0,0.75)] ${
+                    editMode ? 'opacity-95' : 'opacity-85'
                   }`}
                 >
                   {box.name}
                 </span>
               )}
+              {/* 配色（便签最爱用：多个便签靠颜色区分） */}
+              {editMode ? (
+                <button
+                  type="button"
+                  title="换个配色"
+                  onMouseDown={(event) => event.stopPropagation()}
+                  onClick={() => setAccentBoxId((prev) => (prev === box.id ? null : box.id))}
+                  className="shrink-0 rounded p-0.5 opacity-80 transition hover:bg-white/20 hover:opacity-100"
+                >
+                  <Palette className="h-3 w-3" />
+                </button>
+              ) : null}
               {editMode && !isWidget ? (
                 <button
                   type="button"
                   title="填路径收纳（也会把文件移动进格子目录）"
                   onMouseDown={(event) => event.stopPropagation()}
                   onClick={() => beginAddPath(box.id)}
-                  className="shrink-0 rounded p-0.5 opacity-70 transition hover:bg-white/15 hover:opacity-100"
+                  className="shrink-0 rounded p-0.5 opacity-80 transition hover:bg-white/20 hover:opacity-100"
                 >
                   <Plus className="h-3 w-3" />
                 </button>
@@ -1004,30 +1232,66 @@ export function GridOverlay(): React.JSX.Element {
                   title="删除格子（格子里的文件会留在收纳目录里，不会被删）"
                   onMouseDown={(event) => event.stopPropagation()}
                   onClick={() => deleteBox(box.id)}
-                  className="shrink-0 rounded p-0.5 opacity-70 transition hover:bg-red-500/80 hover:opacity-100"
+                  className="shrink-0 rounded p-0.5 opacity-80 transition hover:bg-red-500/80 hover:opacity-100"
                 >
                   <Trash2 className="h-3 w-3" />
                 </button>
               ) : null}
               {isWidget ? (
                 box.kind === 'note' ? (
-                  <StickyNote className="h-3 w-3 shrink-0 opacity-50" />
+                  <StickyNote
+                    className="h-3.5 w-3.5 shrink-0"
+                    style={{ color: NOTE_ACCENTS[box.accent]?.hex ?? NOTE_ACCENTS[''].hex }}
+                  />
                 ) : (
-                  <CalendarDays className="h-3 w-3 shrink-0 opacity-50" />
+                  <CalendarDays className="h-3.5 w-3.5 shrink-0 opacity-60" />
                 )
               ) : (
-                <span className="shrink-0 text-[10px] opacity-40">{boxItems.length}</span>
+                <span className="shrink-0 text-[10px] opacity-55">{boxItems.length}</span>
               )}
             </header>
 
+            {/* 配色选择器（编辑态点调色盘展开） */}
+            {editMode && accentBoxId === box.id ? (
+              <div
+                className="flex shrink-0 items-center gap-1 border-b border-white/15 px-2 py-1"
+                onMouseDown={(event) => event.stopPropagation()}
+              >
+                {ACCENT_ORDER.map((key) => (
+                  <button
+                    key={key || 'default'}
+                    type="button"
+                    title={NOTE_ACCENTS[key].label}
+                    onClick={() => setAccent(box.id, key)}
+                    style={{ background: NOTE_ACCENTS[key].hex }}
+                    className={`h-4 w-4 rounded-full transition hover:scale-110 ${
+                      box.accent === key
+                        ? 'ring-2 ring-sky-300'
+                        : 'ring-1 ring-white/30'
+                    }`}
+                  />
+                ))}
+                <span className="ml-1 text-[10px] opacity-75">{NOTE_ACCENTS[box.accent].label}</span>
+              </div>
+            ) : null}
+
             {/* 挂件（便签 / 日历）：内容自管，不参与收纳对账 */}
             {box.kind === 'note' ? (
-              <div className="min-h-0 flex-1">
-                <NoteWidget boxId={box.id} content={box.content} onSave={saveBoxContent} />
+              <div className="min-h-0 flex-1" data-grid-item="1">
+                <NoteWidget
+                  boxId={box.id}
+                  content={box.content}
+                  accent={box.accent}
+                  onSave={saveBoxContent}
+                />
               </div>
             ) : box.kind === 'calendar' ? (
-              <div className="min-h-0 flex-1">
-                <CalendarWidget />
+              <div className="min-h-0 flex-1" data-grid-item="1">
+                {/* 日历上报内容自然高度 → 盒子跟着撑开/收拢（用户要求：计划条数多少
+                    动态扩展高度，不再把计划压成一个要滚的小窗口）。 */}
+                <CalendarWidget
+                  onContentHeight={(natural) => applyWidgetHeight(box.id, natural)}
+                />
               </div>
             ) : (
               /* 收纳格条目网格：双击打开原文件；悬停把文件移出格子（回桌面）。
@@ -1060,29 +1324,30 @@ export function GridOverlay(): React.JSX.Element {
               {boxItems.map((item) => (
                 <div
                   key={item.id}
+                  data-grid-item="1"
                   title={`${item.displayName}\n${item.filePath}\n双击打开 · 拖到其他格子移动 · 右上角 × 移回桌面`}
                   draggable
                   onDragStart={(event) => startItemDrag(item, event)}
                   onDragEnd={endItemDrag}
                   onDoubleClick={() => openItem(item)}
-                  className="group relative flex cursor-pointer flex-col items-center gap-1 rounded-lg p-1.5 transition hover:bg-white/10"
+                  className="group relative flex cursor-pointer flex-col items-center gap-1 rounded-lg p-1.5 transition hover:bg-white/15"
                 >
                   <button
                     type="button"
                     title="移出格子：文件回到桌面（不是删除）"
                     onClick={() => removeItem(item)}
-                    className="absolute right-0.5 top-0.5 hidden rounded bg-black/50 p-0.5 text-neutral-200 hover:bg-red-500/80 group-hover:block"
+                    className="absolute right-0.5 top-0.5 hidden rounded bg-black/60 p-0.5 text-neutral-100 hover:bg-red-500/85 group-hover:block"
                   >
                     <X className="h-3 w-3" />
                   </button>
                   <FileIcon path={item.filePath} />
-                  <span className="w-full truncate text-center text-[11px] leading-tight text-white opacity-90 [text-shadow:0_1px_2px_rgba(0,0,0,0.85)]">
+                  <span className="w-full truncate text-center text-[11px] font-medium leading-tight text-white [text-shadow:0_1px_3px_rgba(0,0,0,0.95)]">
                     {item.displayName}
                   </span>
                 </div>
               ))}
               {boxItems.length === 0 && (
-                <p className="col-span-full py-3 text-center text-[11px] leading-relaxed opacity-40">
+                <p className="col-span-full py-3 text-center text-[11px] leading-relaxed opacity-55">
                   把文件拖到这里收纳
                   <br />
                   文件会移动进 桌面/Handy整理/{box.name}
@@ -1091,23 +1356,29 @@ export function GridOverlay(): React.JSX.Element {
               </div>
             )}
 
-            {/* 缩放手柄（仅编辑态） */}
-            {editMode && (
-              <div
-                onMouseDown={(event) => startResize(event, box)}
-                title="拖拽调整大小"
-                className="absolute bottom-0 right-0 h-4 w-4 cursor-nwse-resize"
-              >
-                <svg viewBox="0 0 16 16" className="h-full w-full text-white/50">
-                  <path
-                    d="M14 14L7 14M14 14L14 7"
-                    stroke="currentColor"
-                    strokeWidth="1.5"
-                    fill="none"
+            {/* 缩放手柄（仅编辑态）：**四边 + 四角**，不再只有右下角一个。
+                V35 用户原话：「格子拉升缩放大小，右边和下边都可以，现在只有右下角才可以拉」。
+                四边的命中带避开四个角（角上各有自己的手柄），免得互相抢。 */}
+            {editMode
+              ? RESIZE_HANDLES.map(({ edge, className, cursor }) => (
+                  <div
+                    key={edge}
+                    onMouseDown={(event) => startResize(event, box, edge)}
+                    title="拖拽调整大小"
+                    className={`absolute z-10 ${className} ${cursor}`}
                   />
-                </svg>
-              </div>
-            )}
+                ))
+              : null}
+            {/* 角上手柄画一个小折角，给个「这里能拉」的视觉提示 */}
+            {editMode ? (
+              <svg
+                viewBox="0 0 16 16"
+                aria-hidden
+                className="pointer-events-none absolute bottom-0 right-0 z-10 h-4 w-4 text-white/60"
+              >
+                <path d="M14 14L7 14M14 14L14 7" stroke="currentColor" strokeWidth="1.5" fill="none" />
+              </svg>
+            ) : null}
           </section>
         );
       })}
@@ -1201,9 +1472,8 @@ export function GridOverlay(): React.JSX.Element {
         <button
           type="button"
           onClick={() => addWidget('note')}
-          disabled={hasNote}
-          title={hasNote ? '便签已经有一个了' : '添加便签挂件（Markdown 边写边渲染，自动保存）'}
-          className="rounded-full p-1.5 text-neutral-200 transition hover:bg-white/10 disabled:opacity-30 disabled:hover:bg-transparent"
+          title="添加便签（Markdown 边写边渲染，自动保存；可以加多个，各选一种颜色）"
+          className="rounded-full p-1.5 text-neutral-200 transition hover:bg-white/10"
         >
           <StickyNote className="h-4 w-4" />
         </button>

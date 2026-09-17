@@ -27,13 +27,12 @@
 | 自检三件套 | `scripts/audit/tool-audit.mjs`（静态）/ `layout-audit.mjs`（几何）/ `sample-smoke.mjs`（真点示例） |
 | 回归 | `scripts/regression/run.mjs` + `test-*.mjs`；`scripts/new-tool.mjs` 脚手架 |
 
-## 3. 状态快照（2026-09-17 00:20 · V34 已交付、已提交、已打包装机）
+## 3. 状态快照（2026-09-17 11:45 · V35 已交付、已提交、已打包装机）
 
-- Phase 1（MVP）功能全部交付；**最近一次打包是 V34**（nsis 4,302,332 B / msi 5,537,792 B /
-  handy.exe 11,121,664 B，09-17 00:15 产出），**已静默安装到用户机**
-  （`%LOCALAPPDATA%\Handy\handy.exe`，NSIS currentUser，`/S`）。
+- Phase 1（MVP）功能全部交付；**最近一次打包是 V35**（见 PROJECT_STATUS §1.21.9），
+  **已静默安装到用户机**（`%LOCALAPPDATA%\Handy\handy.exe`，NSIS currentUser，`/S`）。
   一键脚本 `bash scripts/build-release.sh`（tsc → 回归 → 清 dist → vite → tauri → 取证 → `/S` 装机 → 启动核验）。
-  本轮用 `--no-deploy --skip-tsc --skip-regression`（tsc/回归刚单独跑绿）+ **手工装机取证，且刻意不代为启动**。
+  V34/V35 都用 `--no-deploy --skip-tsc --skip-regression`（tsc/回归刚单独跑绿）+ **手工装机取证，且刻意不代为启动**。
   **唯一阻塞项 = 用户装机验收 GUI**（窗口/托盘/透明/桌面挂载/拖放/真实文件移动，沙箱验不了）。
 - ⚠️ **2026-09-16 起 agent 会话已启动不了本应用**：新旧版本一律挂死在启动早期（内存恒 26–39 MB、CPU 冻结、
   库一个字节不写）。已用「09-14 的旧产物做对照」证明**不是代码回归**（PROJECT_STATUS §1.19.2 / CONVENTIONS §13.5）。
@@ -47,11 +46,12 @@
   旧的「只登记引用」模型（V25–V32）**已作废**，别再按它理解。
 - **独立窗口 6 个**：main / note / settings / organizer / grid-overlay / workstation-bar（桌面顶部常驻贴条）。
 - **DB 迁移链**：v1 → v2 去剪贴板表 → v3 vault → v4 grid → v5 `todos.detail` → **v6 grid 挂件**
-  （`grid_boxes.kind/content` + 把「系统」格子标 `system`）→ **v7 删掉「系统」格子及其登记行**（V34）。
-  **v6/v7 尚未在真实库生效**（应用没跑到 `db::init`），由用户首次启动时顺次自动应用；
+  （`grid_boxes.kind/content` + 把「系统」格子标 `system`）→ **v7 删掉「系统」格子及其登记行**（V34）→
+  **v8 `grid_boxes.accent`**（V35，便签配色）。
+  **v6–v8 尚未在真实库生效**（应用没跑到 `db::init`），由用户首次启动时顺次自动应用；
   已由 `cargo test --lib db::migrations` 3 条断言守住。
 - 批次明细与提交号 → PROJECT_STATUS §1（最近提交 `git log --oneline -6`）。
-  **V34 `d366340`**；V33 `eeed5f9`；V28 `bc05a8c`；V27 `f7e825f`+`4268257`；V26 `2969256`+`43a8a06`；V25 `5f8fe8a`+`3001510`。
+  **V35 `PENDING`**；V34 `d366340`；V33 `eeed5f9`；V28 `bc05a8c`；V27 `f7e825f`+`4268257`；V26 `2969256`+`43a8a06`；V25 `5f8fe8a`+`3001510`。
 
 ### 3.1 V25–V27 事实源（细节见 PROJECT_STATUS §1.11–§1.13 与日志）
 
@@ -65,7 +65,7 @@
   `jsonLocate` 与 V8 差分 0 分歧、误导报错改准确；回归 **17 套 / 1778 条**、冒烟 28 用例 / 25 工具、
   工具自检 325 PASS。
 
-### 3.2 V30–V34 事实源（桌面格子这条线的关键转折，别再按旧结论推理）
+### 3.2 V30–V35 事实源（桌面格子这条线的关键转折，别再按旧结论推理）
 
 - **V30**：格子层开始「接管桌面」（自动隐藏系统图标 + 每 5s `grid_desktop_sync` **自动收录**桌面文件）。
 - **V31**：`grid_item_move` + HTML5 跨格拖拽；`grid_meta/overlay_visible` + `restore_overlay_if_visible`
@@ -84,8 +84,23 @@
   ⑤ 日历挂件复用 `lib/lunar|holidays|planUtils` **与工作台逐项一致** + 点某天加计划 + 悬停 tooltip；
   ⑥ **取消系统格**（`ensure_system_box` 删除 + 迁移 v7）治「两个我的电脑」；
   ⑦ 图标改 `SHGetImageList(SHIL_EXTRALARGE)` 48×48 + `.lnk` 叠层（48 而非 32 才对得上桌面「中等图标」）；
-  ⑧ 文件夹纳入收纳（原 `if item.is_dir { continue }` 整类跳过）；⑨ 空格子不占桌面 + 挂件各限一个 + 柔光无边框。
+  ⑧ 文件夹纳入收纳（原 `if item.is_dir { continue }` 整类跳过）；⑨ 空格子不占桌面 + 柔光无边框。
+  ⚠️ ⑨ 的「**挂件各限一个**」**已被 V35 推翻**（便签改成可以多个，只有日历仍唯一）。
   方法论沉淀 **CONVENTIONS.md §14**。
+- **V34 的 `REASSERT_TICKS` 40 在 V35 变了含义**：V35 把 `POLL_INTERVAL_MS` 60→25ms，
+  于是 40 周期 = **约 1.0s**（V34 时是 2.4s）。数字没动、实际间隔变了 —— 改轮询周期要连带看它。
+- **V35**（用户 5 条反馈，2 张截图）：① ★ **Win+D 丢格子** —— 挂件层是**普通顶层窗**，
+  Win+D「给所有顶层窗发最小化」照样命中；**没走 `SetParent`**（坐标体系变相对父窗 + WorkerW 重建连带），
+  改为轮询判 `IsIconic` → `SW_SHOWNOACTIVATE` → 重贴回桌面层；
+  ② ★ **拖拽识别不到** —— 挂件窗平时 `ignore_cursor_events(true)`，命中全靠 Rust 按全局光标判定，
+  60ms 采样追不上连续移动 ⇒ **25ms + HIT_PADDING 4px 命中区外扩**；缩放由只有 `se` 补齐 **8 向**
+  （边手柄两端各留 12px 给角；`n`/`w` 边缩放要**同时移原点**）；补 `raiseBox`（交互开始抬到最上层）；
+  ③ **便签改回可以多个**（用户改口，见上）+ 自动命名/配色 + 标题栏调色盘落库 `accent`（迁移 **v8**）+ 双击重命名；
+  ④ 日历默认 **360×430**、日期格 3 行（公历/农历·节气·节日/标记行：计划点 + 生日🎂）、休班角标、
+  **随条数自动撑高**（`scrollHeight` + `autoHeightBlockedRef` 让位守卫，上限 `innerHeight×0.7`）；
+  ⑤ 挂件卡片改**深色磨砂**（渐变 + 顶部高光 + 大柔影，**不加硬边框**）治「透明发糊」；
+  ⑥ 日期/纪念日逻辑抽到 `src/lib/dateUtils.ts`、`src/lib/anniversaries.ts` 并 **re-export**（调用方零改动）。
+  方法论沉淀 **CONVENTIONS.md §15**。
 
 ## 4. 协作与操作约定
 

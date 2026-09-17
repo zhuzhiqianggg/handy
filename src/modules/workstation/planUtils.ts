@@ -1,14 +1,43 @@
 import type { Todo } from '@/core/data/todosService';
+import {
+  DAY_MS,
+  addDays,
+  buildMonthGrid,
+  dayLabel,
+  daysInMonth,
+  defaultMomentOfDay,
+  isSameDay,
+  startOfDay,
+  startOfMonth,
+  startOfNextMonth,
+  startOfWeek,
+} from '@/lib/dateUtils';
 
 /**
  * 工作台「日历 + 计划」纯函数工具集。
  *
  * 全部以**本地时间**计算（工作台是本地效率工具，不引入时区切换概念），
  * 日期加减一律走 `Date.setDate` 而非 `±86400000`，避免夏令时导致「零点漂移」。
+ *
+ * V35：与「计划」无关的**日期数学**已抽到 `@/lib/dateUtils`（纯逻辑归 `src/lib/`，
+ * 见 MEMORY §2）—— 桌面日历挂件要用同一套口径，不该反向依赖 `modules/workstation`。
+ * 这里把原名字**原样再导出**，既有调用方一行都不用改；本文件只保留计划语义部分。
  */
 
-/** 一天毫秒数（仅用于差值估算，不用于日期加减） */
-export const DAY_MS = 86_400_000;
+// 原样再导出：既有调用方（工作台各处）无需改动 import 路径
+export {
+  DAY_MS,
+  startOfDay,
+  addDays,
+  startOfWeek,
+  startOfMonth,
+  startOfNextMonth,
+  daysInMonth,
+  buildMonthGrid,
+  isSameDay,
+  dayLabel,
+  defaultMomentOfDay,
+};
 
 /** 计划范围 */
 export type PlanScope = 'day' | 'week' | 'month' | 'undated' | 'all';
@@ -21,54 +50,6 @@ export const SCOPE_LABELS: Record<PlanScope, string> = {
   undated: '无日期',
   all: '全部',
 };
-
-/** 本地当天零点 */
-export function startOfDay(ms: number): number {
-  const d = new Date(ms);
-  d.setHours(0, 0, 0, 0);
-  return d.getTime();
-}
-
-/** 按「日」加减（自动跨月跨年，规避夏令时） */
-export function addDays(ms: number, days: number): number {
-  const d = new Date(ms);
-  d.setDate(d.getDate() + days);
-  d.setHours(0, 0, 0, 0);
-  return d.getTime();
-}
-
-/** 所在周的周一零点（周一开始，符合国内习惯） */
-export function startOfWeek(ms: number): number {
-  const day = startOfDay(ms);
-  const offset = (new Date(day).getDay() + 6) % 7; // 周一 = 0
-  return addDays(day, -offset);
-}
-
-/** 所在月的一号零点 */
-export function startOfMonth(ms: number): number {
-  const d = new Date(ms);
-  return new Date(d.getFullYear(), d.getMonth(), 1).getTime();
-}
-
-/** 下月一号零点 */
-export function startOfNextMonth(ms: number): number {
-  const d = new Date(ms);
-  return new Date(d.getFullYear(), d.getMonth() + 1, 1).getTime();
-}
-
-/** 该月天数 */
-export function daysInMonth(year: number, monthIndex: number): number {
-  return new Date(year, monthIndex + 1, 0).getDate();
-}
-
-/**
- * 月历网格（6 行 × 7 列 = 42 天），首格为包含该月 1 号的**那周的周一**。
- * 固定 42 格可保证月份切换时行高不跳动。
- */
-export function buildMonthGrid(year: number, monthIndex: number): number[] {
-  const gridStart = startOfWeek(new Date(year, monthIndex, 1).getTime());
-  return Array.from({ length: 42 }, (_, index) => addDays(gridStart, index));
-}
 
 /** 范围 → [from, to) 毫秒区间；`undated` / `all` 返回 null（不做时间过滤） */
 export function scopeRange(scope: PlanScope, anchorMs: number): { from: number; to: number } | null {
@@ -124,18 +105,6 @@ export function pendingCountByDay(todos: readonly Todo[]): Map<number, number> {
   return map;
 }
 
-/** 同一天？ */
-export function isSameDay(a: number, b: number): boolean {
-  return startOfDay(a) === startOfDay(b);
-}
-
-/** 日期短标签（如 `9月16日 周三`） */
-export function dayLabel(ms: number): string {
-  const d = new Date(ms);
-  const weekday = '日一二三四五六'[d.getDay()] ?? '';
-  return `${d.getMonth() + 1}月${d.getDate()}日 周${weekday}`;
-}
-
 /** 相对今天的口语化标签（今天 / 明天 / 昨天 / 9月16日 周三） */
 export function relativeDayLabel(ms: number): string {
   const today = startOfDay(Date.now());
@@ -174,11 +143,4 @@ export function dueLabel(dueAt: number): string {
 /** 是否已逾期（未完成且到期时间早于此刻） */
 export function isOverdue(todo: Todo): boolean {
   return !todo.done && todo.dueAt !== null && todo.dueAt < Date.now();
-}
-
-/** 把某天 09:00 作为新建事件的默认时刻（比 00:00 更贴近真实使用） */
-export function defaultMomentOfDay(dayMs: number): number {
-  const d = new Date(dayMs);
-  d.setHours(9, 0, 0, 0);
-  return d.getTime();
 }

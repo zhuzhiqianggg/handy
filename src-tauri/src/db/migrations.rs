@@ -138,6 +138,15 @@ DELETE FROM grid_items WHERE box_id IN (SELECT id FROM grid_boxes WHERE kind = '
 DELETE FROM grid_boxes WHERE kind = 'system';
 ";
 
+/// v8：格子配色（`accent`）。
+///
+/// 用户 V35 反馈「便签应该可以添加多个」—— 多个便签如果长得一模一样，桌面上分不清
+/// 哪个是哪个。给每个格子一个可选的配色键（`''` = 用默认色），便签尤其需要。
+/// 顺便预留给收纳格用（分类着色）。
+pub const V8_GRID_ACCENT: &str = "
+ALTER TABLE grid_boxes ADD COLUMN accent TEXT NOT NULL DEFAULT '';
+";
+
 /// 全部迁移：(版本号, SQL)。新增结构在**末尾追加**；移除历史结构可追加 DROP 迁移。
 pub const MIGRATIONS: &[(i64, &str)] = &[
     (1, V1_SCHEMA),
@@ -147,6 +156,7 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
     (5, V5_TODO_DETAIL),
     (6, V6_GRID_WIDGETS),
     (7, V7_DROP_SYSTEM_BOX),
+    (8, V8_GRID_ACCENT),
 ];
 
 /// 当前毫秒时间戳（用于 `applied_at`）。
@@ -280,6 +290,22 @@ mod tests {
             cols.iter().any(|c| c == "content"),
             "v6 未加 grid_boxes.content"
         );
+        assert!(
+            cols.iter().any(|c| c == "accent"),
+            "v8 未加 grid_boxes.accent"
+        );
+        // 真正要守的是**行为**：老代码 INSERT 时不会带 accent，读回来必须是空串而不是
+        // NULL（NULL 会让 Rust 侧 `row.get::<String>` 直接报错，表现成「格子打不开」）。
+        conn.execute(
+            "INSERT INTO grid_boxes (name, pos_x, pos_y, width, height, sort, created_at, updated_at) \
+             VALUES ('默认色测试', 0, 0, 320, 220, 0, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("插入不带 accent 的格子失败");
+        let accent: String = conn
+            .query_row("SELECT accent FROM grid_boxes LIMIT 1", [], |row| row.get(0))
+            .expect("accent 读回失败（很可能是 NULL）");
+        assert_eq!(accent, "", "accent 缺省值必须是空串");
 
         drop(conn);
         let _ = std::fs::remove_file(path);
@@ -287,7 +313,7 @@ mod tests {
 
     /// 老库升级（线上真实形态）：停在 v5，桌面上已有「文件夹」格与「系统」格。
     ///
-    /// 走完整 `run()`，断言 v6 + v7 串起来的最终形态：
+    /// 走完整 `run()`，断言 v6 + v7 + v8 串起来的最终形态：
     ///   ① 普通格子回落 `folder`、`content` 为空串（前端按 kind 分支渲染，
     ///      空串是便签的安全初值）；
     ///   ② 「系统」格**整行消失** —— v6 先把它标成 `system`（否则按新模型的目录
@@ -347,10 +373,16 @@ mod tests {
             .expect("统计条目失败");
         assert_eq!(orphans, 0, "系统格的虚拟条目必须随格子一起清掉，不留孤儿行");
 
+        // v8：老库升上来后「文件夹」格的 accent 必须能读成空串（不是 NULL）
+        let accent: String = conn
+            .query_row("SELECT accent FROM grid_boxes LIMIT 1", [], |row| row.get(0))
+            .expect("v8 升级后 accent 读回失败");
+        assert_eq!(accent, "", "老库升级后 accent 应为空串");
+
         assert_eq!(
             versions(&conn),
             MIGRATIONS.iter().map(|(v, _)| *v).collect::<Vec<_>>(),
-            "全部迁移（含 v7）都应被记录"
+            "全部迁移（含 v7 / v8）都应被记录"
         );
 
         drop(conn);

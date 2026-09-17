@@ -182,6 +182,7 @@ export const ipc = {
       name: input.name ?? null,
       kind: input.kind ?? null,
       content: input.content ?? null,
+      accent: input.accent ?? null,
       posX: input.posX ?? null,
       posY: input.posY ?? null,
       width: input.width ?? null,

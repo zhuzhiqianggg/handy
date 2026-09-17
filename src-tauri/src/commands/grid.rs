@@ -72,8 +72,23 @@ const GRID_URL: &str = "index.html?window=grid-overlay";
 /// `grid_meta` 中挂件窗几何的键名。
 const META_KEY_GEOMETRY: &str = "overlay_geometry";
 
-/// 光标轮询间隔（毫秒）。足够快以赶上拖放落点，又远低于 CPU 可感知开销。
-const POLL_INTERVAL_MS: u64 = 60;
+/// 光标轮询间隔（毫秒）。
+///
+/// V35：60ms → **25ms**。原因是一条实测反馈：「鼠标移上去有时候识别不到，光标没变成拖动」。
+/// 根因是**先有鸡还是先有蛋** —— 挂件窗默认 `ignore_cursor_events(true)`（整窗穿透），
+/// 要收到任何鼠标事件，必须先由本线程用全局光标位置判定「进区域了」再把穿透关掉。
+/// 这个判定越慢，用户就越常遇到「鼠标已经在格子上、但按钮/光标样式还是桌面那套」；
+/// 压着鼠标快速扫过去时甚至可能在按下的一瞬间还没切过来，于是**拖拽压根不启动**。
+/// 25ms ≈ 40 次/秒，仍只是一次 `GetCursorPos` + 一次 `outer_position`，开销可忽略。
+const POLL_INTERVAL_MS: u64 = 25;
+
+/// 命中区域外扩（物理像素）。
+///
+/// V35：与上面的提速配套。鼠标是**连续移动**的，而判定是**离散采样**的：真实进入
+/// 盒子的那一刻与前一次采样之间总会差一小段。外扩一圈（4px）让窗口提前一点变成
+/// 可交互，把「扫过去来不及」的时间窗补掉。4px 小于桌面图标间距，不会明显影响
+/// 贴着格子边缘点击桌面文件。
+const HIT_PADDING: f64 = 4.0;
 
 /// 每隔多少个轮询周期检查一次 Z 序（错位才重排，见 [`reassert_attach`]）。
 ///
@@ -136,6 +151,8 @@ pub struct GridBox {
     pub name: String,
     pub kind: String,
     pub content: String,
+    /// 配色键（`''` = 默认色）。V35 引入：多个便签并存时需要一眼分清谁是谁。
+    pub accent: String,
     pub pos_x: i64,
     pub pos_y: i64,
     pub width: i64,
@@ -186,7 +203,7 @@ fn now_iso() -> String {
 }
 
 /// 盒子列前缀（别名 `b`）。
-const BOX_COLUMNS: &str = "b.id, b.name, b.kind, b.content, b.pos_x, b.pos_y, b.width, \
+const BOX_COLUMNS: &str = "b.id, b.name, b.kind, b.content, b.accent, b.pos_x, b.pos_y, b.width, \
                            b.height, b.sort, b.created_at, b.updated_at";
 
 /// 行 → 盒子实体（SQL 必须附带 `item_count` 计数列）。
@@ -196,6 +213,7 @@ fn row_to_box_with_count(row: &Row) -> rusqlite::Result<GridBox> {
         name: row.get("name")?,
         kind: row.get("kind")?,
         content: row.get("content")?,
+        accent: row.get("accent")?,
         pos_x: row.get("pos_x")?,
         pos_y: row.get("pos_y")?,
         width: row.get("width")?,
@@ -476,8 +494,21 @@ fn clean_kind(kind: Option<String>) -> String {
     match kind.as_deref() {
         Some("note") => "note".to_string(),
         Some("calendar") => "calendar".to_string(),
-        Some("system") => "system".to_string(),
+        // V34 起「系统格」已取消（用户要求：原生快捷方式不动态整理）；v7 迁移把历史
+        // 系统格删掉了。这里不再接受 system，免得哪天有调用方又把它造回来。
         _ => "folder".to_string(),
+    }
+}
+
+/// 配色键清洗：只认**一眼分辨率高、色相区分大**的固定几个键，其余一律回落默认。
+///
+/// 白名单而不是「随便存字符串」的原因：颜色最终要映射到 Tailwind 类名/内联色值，
+/// 让任意字符串流进样式是没必要的风险面；而用户也确实只需要「这几个能分清」。
+fn clean_accent(accent: Option<String>) -> String {
+    match accent.as_deref() {
+        Some("amber") | Some("rose") | Some("sky") | Some("emerald") | Some("violet")
+        | Some("slate") => accent.unwrap_or_default(),
+        _ => String::new(),
     }
 }
 
@@ -530,6 +561,7 @@ pub async fn grid_box_upsert(
     name: Option<String>,
     kind: Option<String>,
     content: Option<String>,
+    accent: Option<String>,
     pos_x: Option<i64>,
     pos_y: Option<i64>,
     width: Option<i64>,
@@ -561,12 +593,13 @@ pub async fn grid_box_upsert(
             let (auto_x, auto_y) = arrange_position(layout_work_width(&app), cascade);
             conn.execute(
                 "INSERT INTO grid_boxes \
-                 (name, kind, content, pos_x, pos_y, width, height, sort, created_at, updated_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                 (name, kind, content, accent, pos_x, pos_y, width, height, sort, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     clean_name(name),
                     clean_kind(kind),
                     content.unwrap_or_default(),
+                    clean_accent(accent),
                     pos_x.unwrap_or(auto_x),
                     pos_y.unwrap_or(auto_y),
                     final_width,
@@ -612,6 +645,10 @@ pub async fn grid_box_upsert(
             if let Some(v) = content {
                 sets.push("content = ?");
                 values.push(Box::new(v));
+            }
+            if let Some(v) = accent {
+                sets.push("accent = ?");
+                values.push(Box::new(clean_accent(Some(v))));
             }
             if let Some(v) = pos_x {
                 sets.push("pos_x = ?");
@@ -1342,6 +1379,57 @@ fn reassert_attach(win: &WebviewWindow) {
     }
 }
 
+/// 「显示桌面」（Win+D）/ 最小化之后把挂件层捞回来。
+///
+/// # 为什么需要这个
+///
+/// 用户原话：「wind+d 显示桌面后桌面的格子又全都丢失了……按理这个是桌面的一部分，
+/// 就算显示桌面它也是显示的」。
+///
+/// Win+D 的实现就是**给所有顶层窗口发一条最小化** —— 我们的挂件窗虽然被
+/// [`place_above_desktop`] 插在桌面窗口的正上方，但它**并不是桌面的子窗口**，
+/// 所以在 Win+D 的世界里它就是一个普通顶层窗，一样被最小化掉。
+///
+/// 真要让 Win+D 碰不到它，得 `SetParent` 成桌面的子窗口 —— 那会让坐标体系变成
+/// 相对父窗、且 Explorer 重建 WorkerW 时会连带我们，得不偿失。
+/// 所以选**「被最小化就立刻捞回来」**：轮询里判 [`IsIconic`]，命中就用
+/// `SW_SHOWNOACTIVATE` 还原（不抢焦点），再重新贴回桌面层。
+/// 25ms 的轮询周期意味着用户基本看不到这一下。
+///
+/// 返回 `true` = 本次真的做了还原（供调用方决定是否继续走后续判定）。
+fn restore_if_minimized(win: &WebviewWindow) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            IsIconic, ShowWindow, SW_SHOWNOACTIVATE,
+        };
+        let Ok(hwnd) = overlay_hwnd(win) else {
+            return false;
+        };
+        // SAFETY: hwnd 为本进程窗口的有效句柄；两个 API 都只作用于该窗口。
+        let minimized = unsafe { IsIconic(hwnd).as_bool() };
+        if !minimized {
+            return false;
+        }
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        }
+        // 还原会把窗口抛回顶层 → 贴桌模式下必须立刻按基准层插回去；
+        // 普通窗口模式（用户手动切过）不做 Z 序调整，免得凭空改变他的预期。
+        if AttachMode::current() == AttachMode::Desktop {
+            let _ = place_above_desktop(hwnd);
+        }
+        mark_overlay_shown();
+        grid_log("挂件层被最小化（多半是 Win+D / 显示桌面），已还原并重新贴回桌面层");
+        true
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = win;
+        false
+    }
+}
+
 /// 读基准层（无记录 = 默认「贴到桌面」）。
 fn read_attach_mode(app: &AppHandle) -> AttachMode {
     let Ok(conn) = connect(app) else {
@@ -1499,9 +1587,13 @@ fn cursor_hit_windows(win: &WebviewWindow, regions: &[GridRegion]) -> bool {
     }
     let rel_x = f64::from(point.x - origin.x);
     let rel_y = f64::from(point.y - origin.y);
-    regions
-        .iter()
-        .any(|r| rel_x >= r.x && rel_y >= r.y && rel_x <= r.x + r.width && rel_y <= r.y + r.height)
+    // 外扩一圈：见 HIT_PADDING 的说明（补掉「离散采样 vs 连续移动」的时间窗）
+    regions.iter().any(|r| {
+        rel_x >= r.x - HIT_PADDING
+            && rel_y >= r.y - HIT_PADDING
+            && rel_x <= r.x + r.width + HIT_PADDING
+            && rel_y <= r.y + r.height + HIT_PADDING
+    })
 }
 
 /// 命中测试入口（非 Windows 平台暂返回 `false`，即保持默认穿透）。
@@ -1581,6 +1673,14 @@ fn ensure_poller(app: AppHandle) {
                     continue;
                 };
                 missing_ticks = 0;
+                // V35：Win+D /「显示桌面」会给所有顶层窗发最小化 —— 挂件窗虽然贴在桌面
+                // 正上方，但并不是桌面的子窗口，一样会被最小化掉。这里每轮检查一次，
+                // 被最小化就立刻还原（用户看到的是「格子一直都在」）。
+                if restore_if_minimized(&win) {
+                    // 刚还原：这一轮先不判穿透/心跳，下一轮（25ms 后）再照常走
+                    last_ignore = None;
+                    continue;
+                }
                 if !win.is_visible().unwrap_or(false) {
                     if last_ignore != Some(true) {
                         let _ = win.set_ignore_cursor_events(true);
