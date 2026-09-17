@@ -1,7 +1,7 @@
 # Handy · 顺手 — 项目现状与续接指引
 
 > **从 `handy` 目录打开项目，先读这一份。** 它回答三个问题：**做到哪了 → 还剩什么 → 怎么继续**。
-> 最近更新：2026-09-17（**V40 批次**） · 长期约定见 [`.workbuddy/memory/MEMORY.md`](memory/MEMORY.md) · 逐日进展见 [`memory/`](memory/) · 规划文档见 [`../docs/README.md`](../docs/README.md)
+> 最近更新：2026-09-17（**V41 批次**） · 长期约定见 [`.workbuddy/memory/MEMORY.md`](memory/MEMORY.md) · 逐日进展见 [`memory/`](memory/) · 规划文档见 [`../docs/README.md`](../docs/README.md)
 
 ---
 
@@ -129,6 +129,7 @@ WorkerW 时连带我们），改为**轮询判 `IsIconic` → `SW_SHOWNOACTIVATE
 | **V38** | 见 §1.24 —— 用户三张截图：**新加的格子默认被锁定 · 格子动不动就不见了 · 点整理后格子乱建且桌面出现两份内容**。① 新建格子不再默认锁定（「我新加的就是要操作的」）· ② 空格子也常驻 + 驻留自愈（`grid-overlay-status` 唯一事实源）· ③ `layout_all_boxes` 全量重排 + **接管桌面呈现**（隐藏原生图标，否则桌面 = 格子 + 原图标两份） | ✅ `tsc` + `cargo check` + 回归 17/17 + 工具自检 325 PASS + 已打包装机 |
 | **V39** | 见 §1.25 —— 用户截图四条：**源图标还在 · 格子该按内容量自动大小 · 流布局要整齐 · 日历固定右上角**。① **接管自愈**（还图标是单向的 ⇒ 补对称的另一半：3 秒自检 + 保险丝 + 归还路径落盘）· ② **排不下不再保持原位**（首次适配 + 空洞复用 + 缩到最小重试 + `place_loose` 兜底）· ③ **`auto_box_size` 内容驱动尺寸**（与前端条目网格度量同源）· ④ **挂件锚点表** `widget_corner`（日历右上 / 便签左下 / 未登记兜底左下） | ✅ `tsc` + **Rust 单测 26→37** + 回归 17/17 + 工具自检 325 PASS + 冒烟 29 PASS + **已重新打包并静默安装**（§1.25.6） |
 | **V40**（本轮） | 见 §1.26 —— 用户截图四条：**原图标还在 · 宽度要对齐 · 高度按图标多少撑开 · 桌面那么多文件没整理好**。① **「点整理不接管」真根因** = `grid_auto_arrange` 里 `if report.items_added > 0 { takeover_icons(true) }`，而桌面早已全部登记过（每次都是「登记 0 项」）⇒ 改为**整理一律按接管偏好执行** + 安全闸「仅当挂件层确实在显示」· ② 轮询「一不可见立刻归还」→ **30 秒宽限**（`OVERLAY_AWAY_GRACE_SECS`）· ③ **统一列宽 + 左起首次适配流布局 + 高度随内容**，`system` 格改判为内容格 · ④ **扫两个桌面根**（用户桌面 + `%PUBLIC%\Desktop`，那 15 个快捷方式以前从没进过格子）+ 取消 `Handy整理*` 跳过 ⇒ `skipped` 恒 0 · ⑤ 单测补 **2 条端到端预演**（灌真实库形状跑完整排布，含幂等断言） | ✅ `tsc` + **Rust 单测 37→43** + 回归 17/17 + 工具自检 325 PASS/0 WARN + **布局审计 0/84** + 冒烟 29 PASS + **已重新打包并静默安装**（§1.26.6，提交 `9be657e`） |
+| **V41**（本轮） | 见 §1.27 —— 用户双截图五条：**挂件右上 · 右键被格子吃了 · 快捷方式/系统不整理 · 去 × · 移出没回桌面**。① `layout_all_boxes` **三段排布**（左上固定列 = 系统+快捷方式 · 中段流布 = 其余分类格 · 挂件一律右上角）· ② 新增**「不整理」区**（左下角）：没登记的桌面条目由挂件层画在这里，移出格子 / 解散格子 / 对账后都看得到、可拖回（`grid_loose_list`，仅接管模式渲染）· ③ 右键各归其位：格子菜单只挂**标题栏**、条目右键（打开 / 打开文件位置 `grid_reveal_path` / 移出格子）、落单条目右键 · ④ **去 hover ×**，拖出格子即移入「不整理」区 · ⑤ 挂件竖排放不下时**先牺牲底部边距再重叠**（V41 测试抓到的真缺陷：日历+便签互叠 10px） | ✅ `tsc` + **Rust 单测 43→44 全绿** + 回归/自检随打包（见 §1.27.3） |
 
 ### 1.3 功能清单（当前实际能力）
 
@@ -1868,6 +1869,70 @@ Rust 侧 `row.get::<String>` 直接报错，表现成「桌面格子整个打不
 4. **公共桌面的那批快捷方式（微信 / QQ / Chrome / PyCharm / ToDesk …）现在应当也进了格子**
    （整理提示里的「扫描 N 项」会比以前明显变大）。桌面上若仍有 `Handy整理*` 之类的历史目录，
    它们现在按普通文件夹进「文件夹」格；要收回/清理请走「诊断与修复」卡片（先干跑预览，**只移动不删除**）。
+
+### 1.26.1 V40.1 批次（用户真机启动日志抓到两个流水线没拦住的真缺陷）
+
+V40 静默装机、用户自启后，日志暴露两条流水线四层门全没拦住的缺陷，已修并重新装机：
+
+1. **`plugin:dialog|confirm` 权限缺口 + async 语义错配（数据安全隐患，优先修）**：
+   `@tauri-apps/plugin-dialog` 把 `window.confirm` 重写成 async 的 `plugin:dialog|confirm`，
+   `dialog:default` 权限集**不含 `allow-confirm`** ⇒ 调用必 reject；且 `if (!window.confirm(...))`
+   拿到的是 Promise（恒真）⇒ 删除格子 / 删备份 / 还原布局**静默执行、用户没被问**。
+   修法：新增 `src/lib/confirmAction.ts`（`await` + 异常保守返回 `false`），7 处调用点全改
+   `await confirmAction(...)` 并转为 `async`，`capabilities/default.json` 补 `dialog:allow-confirm`。
+   验证：`tsc` 0 错、`cargo test --lib` 43 绿、回归 17/17、`build-release.sh --no-deploy` 全绿、
+   PowerShell `/S` 静默装机、`cmp -l` 仍只差 3 字节。复用教训见 CONVENTIONS §21。
+2. **Z 序自检在本机熔断（诊断安全网，非崩溃）**：`reassert_attach` 的 `place_above_desktop`
+   原被 `let _ =` 吞错，且单步 `SetWindowPos(hwnd, host)` 在某些本机贴不进去 ⇒ 自检永远判 `TooHigh`、
+   保险丝连熔断。修法：`place_above_desktop` 改两步（先 `HWND_BOTTOM` 沉底再贴 host）、
+   贴失败**落日志**让下次真机日志能定位。根因未 100% 坐实，等用户重装后的日志确认。复用教训见 CONVENTIONS §21.1。
+
+> 明细与真机日志线索见 [`memory/2026-09-17.md`](memory/2026-09-17.md) 的 V40.1 段。
+
+### 1.27 V41 批次（用户双截图反馈：**挂件右上 · 右键被格子吃了 · 快捷方式/系统不整理 · 去 × · 移出没回桌面**）
+
+用户五条原话（概括）：① 挂件默认右上、系统+快捷方式靠左、其余分类居中；② 右键菜单整个格子都能弹，
+「桌面上的图标右键功能怎么办，文件目录我自带右键功能怎么办」；③ 快捷方式和系统暂时不整理，
+按类型顺序从左上排开就行；④ 图标 hover 的 × 太丑（「感觉 x 了关闭了什么东西一样」），
+拖出格子即移到「不整理」区；⑤ **图标和文件移除格子后并没有回到桌面上**。
+
+#### 1.27.1 五条根因与修复
+
+1. **布局分区（①③）**：`layout_all_boxes` 改**三段排布** —— 左上固定列（第 0 列）= 「系统」+「快捷方式」
+   （`GridBoxRect::is_left_pinned` 按 kind/name/category 认，`FlowPlacer::place_in_column` 钉死）；
+   中段（第 1 列起）= 其余分类格 `next_from(LEFT_PIN_COLUMNS)` 流布；挂件锚点 `widget_corner` **一律右上**
+   （V39 的「便签左下」作废，左下让给「不整理」区）。
+2. **移出没回桌面（⑤）**：根因 = 移出后条目处于「没登记、原生图标又被接管隐藏」的真空态。修法 =
+   新增**「不整理」区**（左下角，`loose_area_rect` + `grid_loose_list`）：没被任何格子登记的桌面条目
+   都由挂件层画在这里（看得见 / 双击可开 / 可拖回格子）；`grid_item_delete` / `grid_box_delete` /
+   对账轮询后前端都会刷新它。**只在接管模式下渲染**（接管关着时桌面上本来就看得见，再画就是两份）。
+3. **右键归属（②）**：格子右键菜单从整个 `<section>` 收回到**标题栏**；条目右键弹自己的菜单
+   （打开 / 打开文件位置 / 移出格子），新增 `grid_reveal_path`（`explorer /select`）；「不整理」区条目右键
+   （打开 / 打开文件位置）。桌面空白处的原生右键 V38 起本来就是穿透还给系统的（`gridOverlayUpdateRegions`）。
+4. **去 ×（④）**：删除 hover × 按钮与 `X` 图标导入；条目**拖出所有格子 = 移出**（根画布拖拽期
+   `pointerEvents:auto` 接住 drop，落点不在任何格子上即调 `grid_item_delete`）。「不整理」区条目可拖进
+   任意格子再收纳。
+5. **挂件竖排挤压（测试抓到的真缺陷）**：日历 638 + 便签 220 在 912 高工作区竖排连边距算还差 2px，
+   原「宁可重叠也不出屏」钳制让两挂件互叠 10px。改 **先牺牲底部边距、再考虑重叠**
+   （`clamp_y` 放宽到 `work_h - h`）—— 挂件压挂件比贴住屏幕下沿难看得多。
+
+#### 1.27.2 改动清单
+
+- `src-tauri/src/commands/grid.rs`：`FlowPlacer::next_from/place_in_column/place_loose_at`、
+  `GridBoxRect{name,category,is_left_pinned}`、`LEFT_PIN_SHORTCUT/LEFT_PIN_COLUMNS/left_pin_rank`、
+  `widget_corner` 一律 TopRight、`loose_area_rect/loose_desktop_items/loose_rank/LooseEntry/LooseArea`、
+  `place_content_box`、`layout_all_boxes` 拆 `layout_all_boxes_with(loose_count)`（测试注入落单数，
+  脱钩真实桌面）、新命令 `grid_loose_list` / `grid_reveal_path`。
+- `src/modules/desktop-grid/GridOverlay.tsx`：去 ×、header-only 格子菜单、条目/落单菜单、
+  「不整理」区面板（含命中区上报 `looseRef`）、根画布 drop-外移出、`refreshLoose` 轮询/动作后刷新。
+- `src/lib/ipc.ts` + `src/types/grid.ts`：`gridLooseList` / `gridRevealPath` / `LooseEntry` / `LooseArea`。
+- `src-tauri/src/lib.rs`：注册两个新命令。
+
+#### 1.27.3 验证
+
+`tsc` 0 错 · **Rust 单测 43→44 全绿**（端到端预演断言按三段排布 + 挂件右上重写；
+`layout_all_boxes_with` 注入落单数 0，端到端测试不再依赖跑测试那台机器的桌面）。
+其余流水线随打包执行（见批次索引）。
 
 ---
 
