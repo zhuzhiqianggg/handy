@@ -18,6 +18,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { toast } from '@/components/ui/toast';
 import { reportOperation } from '@/lib/errorSink';
+import { confirmAction } from '@/lib/confirmAction';
 import { ipc } from '@/lib/ipc';
 import { cn } from '@/lib/utils';
 import { ACCENT_ORDER } from './DesktopWidgets';
@@ -236,8 +237,8 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
    * 「把桌面上的东西搬进某个目录」（V33–V36 就是这么被否掉的）。
    * 只有快捷方式（.lnk）不参与（用户明确要求「原生快捷方式不需要动态整理」）。
    */
-  const autoArrange = useCallback((): void => {
-    const ok = window.confirm(
+  const autoArrange = useCallback(async (): Promise<void> => {
+    const ok = await confirmAction(
       '一键归类桌面？\n\n' +
         '会把桌面上的文件和文件夹按类型登记进对应格子（每个类别一个格子）。\n\n' +
         '· 文件不会被移动，一个都不会 —— 格子只是把它们归拢显示；\n' +
@@ -320,8 +321,8 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
   }, [refreshSnapshots]);
 
   const restoreLayout = useCallback(
-    (snapshot: LayoutSnapshotMeta): void => {
-      const ok = window.confirm(
+    async (snapshot: LayoutSnapshotMeta): Promise<void> => {
+      const ok = await confirmAction(
         `还原布局「${snapshot.name}」？\n\n` +
           `当前布局会先自动备份为「还原前自动备份」，因此随时可以再换回来。\n` +
           `文件本体不会被移动或删除。`,
@@ -350,8 +351,8 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
   );
 
   const deleteSnapshot = useCallback(
-    (snapshot: LayoutSnapshotMeta): void => {
-      if (!window.confirm(`删除备份「${snapshot.name}」？此操作不可撤销。`)) {
+    async (snapshot: LayoutSnapshotMeta): Promise<void> => {
+      if (!(await confirmAction(`删除备份「${snapshot.name}」？此操作不可撤销。`))) {
         return;
       }
       void ipc
@@ -367,9 +368,9 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
   );
 
   const deleteBox = useCallback(
-    (box: GridBox): void => {
+    async (box: GridBox): Promise<void> => {
       const message = `删除格子「${box.name}」？\n\n将同时移除其中 ${box.itemCount} 个图标引用（不影响任何文件本体）。`;
-      if (!window.confirm(message)) {
+      if (!(await confirmAction(message))) {
         return;
       }
       setBusy(true);

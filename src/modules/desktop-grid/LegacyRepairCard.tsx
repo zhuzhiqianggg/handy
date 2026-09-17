@@ -30,6 +30,7 @@ import { toast } from '@/components/ui/toast';
 import { ipc } from '@/lib/ipc';
 import { cn } from '@/lib/utils';
 import { reportOperation } from '@/lib/errorSink';
+import { confirmAction } from '@/lib/confirmAction';
 import type { LegacyRootInfo, LogInfo } from '@/types/grid';
 
 /** 字节数 → 人能读的大小（仅本卡片展示用） */
@@ -103,7 +104,7 @@ export function LegacyRepairCard(): React.JSX.Element {
         });
         return;
       }
-      const ok = window.confirm(
+      const ok = await confirmAction(
         `把 ${preview.moved} 个条目撤回桌面？\n\n` +
           `· 只是移动，不删除任何文件；\n` +
           `· 桌面已有同名的 ${preview.skipped} 个会自动跳过（同一份文件不搬两遍）；\n` +
@@ -139,7 +140,7 @@ export function LegacyRepairCard(): React.JSX.Element {
         });
         return;
       }
-      const ok = window.confirm(
+      const ok = await confirmAction(
         `删除 ${preview.removed} 个 Handy整理 残留目录，释放约 ${humanBytes(preview.freedBytes)}？\n\n` +
           `· 这些目录放的都是「已经撤回桌面」的文件（或是自己套自己的重复副本）；\n` +
           `· 里面只要还有「桌面上找不到同名」的条目，就会自动跳过不删；\n` +
@@ -292,10 +293,10 @@ export function LegacyRepairCard(): React.JSX.Element {
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => {
-                  if (!window.confirm('清空日志？已写下的排查线索会一起没了。')) {
-                    return;
-                  }
+              onClick={async () => {
+                if (!(await confirmAction('清空日志？已写下的排查线索会一起没了。'))) {
+                  return;
+                }
                   void ipc
                     .logClear()
                     .then(() => refreshLog())

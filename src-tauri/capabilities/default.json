@@ -32,6 +32,7 @@
     "clipboard-manager:allow-read-text",
     "clipboard-manager:allow-write-text",
     "dialog:default",
+    "dialog:allow-confirm",
     "notification:default",
     "notification:allow-notify",
     "notification:allow-is-permission-granted",

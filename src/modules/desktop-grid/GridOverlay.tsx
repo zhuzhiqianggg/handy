@@ -4,9 +4,11 @@ import {
   EyeOff,
   File,
   FolderClosed,
+  FolderOpen,
   HardDrive,
   Lock,
   LockOpen,
+  LogOut,
   Monitor,
   MonitorOff,
   Palette,
@@ -15,12 +17,19 @@ import {
   StickyNote,
   Trash2,
   Wand2,
-  X,
 } from 'lucide-react';
 import { ipc } from '@/lib/ipc';
 import { reportOperation } from '@/lib/errorSink';
 import { isTauri } from '@/platform/detect';
-import type { GridAccent, GridBox, GridItem, GridRegion, TakeoverState } from '@/types/grid';
+import type {
+  GridAccent,
+  GridBox,
+  GridItem,
+  GridRegion,
+  LooseArea,
+  LooseEntry,
+  TakeoverState,
+} from '@/types/grid';
 import { ACCENT_ORDER, CalendarWidget, NOTE_ACCENTS, NoteWidget } from './DesktopWidgets';
 
 /**
@@ -42,7 +51,9 @@ import { ACCENT_ORDER, CalendarWidget, NOTE_ACCENTS, NoteWidget } from './Deskto
  *   - **浮动工具栏**（常驻，右下角）：锁定/解锁布局、添加收纳格 / 便签 / 日历、
  *     **整理桌面**（一键归类 + 重排 + 接管原生图标）、原生图标显示切换、隐藏挂件。
  *
- * 交互约定：锁定态 = 只能双击打开条目 / 悬停「×」把条目从格子移出；编辑态 = 布局操作全开放。
+ * 交互约定（V41）：格子右键菜单**只挂在标题栏上**（图标 / 条目上的右键还给条目自己的
+ * 菜单：打开 / 打开文件位置 / 移出格子）；条目**拖出格子**即移入左下角「不整理」区
+ * （不再用悬停 × —— 用户原话「感觉 x 了关闭了什么东西一样」）。
  *
  * # V38 两条硬规矩（都是用户实测反馈推出来的）
  *
@@ -91,6 +102,10 @@ const RESIZE_HANDLES: ReadonlyArray<{ edge: ResizeEdge; className: string; curso
   { edge: 'se', className: 'bottom-0 right-0 h-3 w-3', cursor: 'cursor-nwse-resize' },
 ];
 
+/** 右键菜单行（V41：格子 / 条目 / 不整理区菜单共用同一条样式） */
+const menuItemRowClass =
+  'flex w-full items-center gap-2 px-2.5 py-1.5 text-left transition hover:bg-white/10';
+
 /** 一次布局交互（移动 / 缩放）的会话状态 */
 interface Interaction {
   kind: 'move' | 'resize';
@@ -107,6 +122,7 @@ interface Interaction {
 
 /** 一次「条目跨格子拖拽」的会话状态（HTML5 drag，仅挂件内部） */
 interface ItemDrag {
+  item: GridItem;
   itemId: number;
   fromBoxId: number;
 }
@@ -317,6 +333,22 @@ export function GridOverlay(): React.JSX.Element {
    */
   const [menuBox, setMenuBox] = useState<{ id: number; x: number; y: number } | null>(null);
   /**
+   * 条目右键菜单（V41）：右键落在**条目**上时弹它自己的操作，而不是格子菜单。
+   *
+   * 用户原话：「你把工具右键改到格子里面，那么我桌面上的图标右键功能怎么办，
+   * 还有文件目录我自带右键功能怎么办」。原生 shell 菜单在接管模式下给不了，
+   * 这里先补最高频的三件事：打开 / 打开文件位置 / 移出格子。
+   */
+  const [menuItem, setMenuItem] = useState<{ item: GridItem; x: number; y: number } | null>(null);
+  /** 「不整理」区条目的右键菜单（V41）：打开 / 打开文件位置（还没有「移出格子」可言） */
+  const [menuLoose, setMenuLoose] = useState<{ entry: LooseEntry; x: number; y: number } | null>(
+    null,
+  );
+  /** 「不整理」区状态（V41）：矩形 + 落单条目；width=0 / 接管关闭时不渲染 */
+  const [loose, setLoose] = useState<LooseArea | null>(null);
+  /** 是否正处于「条目被拖着走」的状态（拖出格子 = 移出，落在根画布上要接住 drop） */
+  const [itemDragging, setItemDragging] = useState(false);
+  /**
    * 刚新建的格子 id —— 一段**高亮**期（2.4 秒）。
    *
    * V38 用户原话：「新加的格子默认直接不显示操作，很不方便……我新加的就是要操作的」。
@@ -350,6 +382,12 @@ export function GridOverlay(): React.JSX.Element {
   const hintTimerRef = useRef<number | undefined>(undefined);
   const toolbarRef = useRef<HTMLDivElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const itemMenuRef = useRef<HTMLDivElement | null>(null);
+  const looseMenuRef = useRef<HTMLDivElement | null>(null);
+  /** 「不整理」区面板的 DOM 引用：它也要纳入命中区域（V41） */
+  const looseRef = useRef<HTMLDivElement | null>(null);
+  /** 正在拖拽的「不整理」区条目（拖进格子 = 登记进去） */
+  const looseDragRef = useRef<LooseEntry | null>(null);
   /** 空态卡片的 DOM 引用：它也要纳入命中区域，否则「创建第一个盒子」按钮点不到 */
   const emptyRef = useRef<HTMLDivElement | null>(null);
   /** 各挂件最近一次上报的「内容自然高度」：用户手动拉过之后据此判断内容有没有变 */
@@ -381,6 +419,17 @@ export function GridOverlay(): React.JSX.Element {
 
   // —— 首次装配 ——
 
+  /** 拉「不整理」区状态（V41）：对账轮询、条目增删 / 移出之后都要刷新 */
+  const refreshLoose = useCallback((): void => {
+    if (!isTauri()) {
+      return;
+    }
+    void ipc
+      .gridLooseList()
+      .then((area) => setLoose(area.width > 0 ? area : null))
+      .catch(() => undefined);
+  }, []);
+
   /** 拉取盒子与条目（挂件窗独立 JS 环境，不与主窗口共享 store） */
   const refresh = useCallback(async (): Promise<void> => {
     const list = await ipc.gridBoxList();
@@ -393,7 +442,8 @@ export function GridOverlay(): React.JSX.Element {
 
   useEffect(() => {
     void refresh().catch((error: Error) => showHint(error.message));
-  }, [refresh, showHint]);
+    refreshLoose();
+  }, [refresh, refreshLoose, showHint]);
 
   // —— 登记对账（V37：只校验存在性） ——
   //
@@ -408,7 +458,9 @@ export function GridOverlay(): React.JSX.Element {
     if (report.itemsAdded > 0 || report.pruned > 0) {
       await refresh();
     }
-  }, [refresh]);
+    // 「不整理」区跟着桌面根目录走：桌面多了 / 少了文件都要重算（很便宜，一次扫描）
+    refreshLoose();
+  }, [refresh, refreshLoose]);
 
   useEffect(() => {
     if (!isTauri()) {
@@ -570,10 +622,12 @@ export function GridOverlay(): React.JSX.Element {
    */
   const visibleBoxes = boxes;
 
-  /** 区域键（几何或缩放变化才重新上报，避免 mousemove 高频 invoke） */
+  /** 区域键（几何或缩放变化才重新上报，避免 mousemove 高频 invoke）；「不整理」区出现 / 消失也算 */
   const regionsKey = `${visibleBoxes
     .map((b) => `${b.id}:${b.posX},${b.posY},${b.width},${b.height}`)
-    .join('|')}|sf=${scaleFactor}`;
+    .join('|')}|sf=${scaleFactor}|loose=${
+    loose ? `${loose.x},${loose.y},${loose.width},${loose.height}` : ''
+  }`;
 
   useEffect(() => {
     if (!isTauri()) {
@@ -585,8 +639,9 @@ export function GridOverlay(): React.JSX.Element {
       width: box.width * scaleFactor,
       height: box.height * scaleFactor,
     }));
-    // 工具栏与空态卡片常驻可交互（锁定态也要能点「隐藏挂件 / 解锁」，空态要能直接建盒子）
-    for (const node of [toolbarRef.current, emptyRef.current]) {
+    // 工具栏与空态卡片常驻可交互（锁定态也要能点「隐藏挂件 / 解锁」，空态要能直接建盒子）；
+    // 「不整理」区面板（V41）渲染出来时同样要可交互
+    for (const node of [toolbarRef.current, emptyRef.current, looseRef.current]) {
       if (!node) {
         continue;
       }
@@ -805,7 +860,21 @@ export function GridOverlay(): React.JSX.Element {
     [showHint],
   );
 
-  /** 把条目移出格子：文件**移回桌面根目录**（不是删除），桌面图标随之回来 */
+  /** 在资源管理器中定位条目（V41 条目右键「打开文件位置」——原生右键里最高频的一项） */
+  const revealItem = useCallback(
+    (path: string): void => {
+      void ipc.gridRevealPath(path).catch((error: Error) => showHint(error.message));
+    },
+    [showHint],
+  );
+
+  /**
+   * 把条目移出格子：**只删登记**（文件不动），它随即出现在左下角「不整理」区。
+   *
+   * V41 用户原话：「图标和文件等移除格子后并没有回到桌面上呢？」—— 根因是移出后
+   * 条目处于「没登记、原生图标又被接管隐藏」的真空态。现在移出 = 掉进「不整理」区，
+   * 看得见、点得开，再想要格子还可以拖回去。
+   */
   const removeItem = useCallback(
     (item: GridItem): void => {
       void ipc
@@ -815,11 +884,12 @@ export function GridOverlay(): React.JSX.Element {
             ...prev,
             [item.boxId]: (prev[item.boxId] ?? []).filter((i) => i.id !== item.id),
           }));
-          showHint(`已移出格子：${item.displayName}（回到桌面）`);
+          refreshLoose();
+          showHint(`已移出格子：${item.displayName}（进入左下角「不整理」区）`);
         })
         .catch((error: Error) => showHint(error.message));
     },
-    [showHint],
+    [refreshLoose, showHint],
   );
 
   const addItem = useCallback(
@@ -828,11 +898,12 @@ export function GridOverlay(): React.JSX.Element {
         .gridItemAdd(boxId, filePath)
         .then((item) => {
           setItems((prev) => ({ ...prev, [boxId]: [...(prev[boxId] ?? []), item] }));
+          refreshLoose();
           showHint(`已加入格子：${item.displayName}（文件仍在桌面原位）`);
         })
         .catch((error: Error) => showHint(error.message));
     },
-    [showHint],
+    [refreshLoose, showHint],
   );
 
   /**
@@ -885,7 +956,8 @@ export function GridOverlay(): React.JSX.Element {
   );
 
   const startItemDrag = useCallback((item: GridItem, event: React.DragEvent): void => {
-    itemDragRef.current = { itemId: item.id, fromBoxId: item.boxId };
+    itemDragRef.current = { item, itemId: item.id, fromBoxId: item.boxId };
+    setItemDragging(true);
     event.dataTransfer.effectAllowed = 'move';
     // 同窗口 HTML5 拖拽也会走 WebView2 的系统拖放事件，标记一下供其忽略
     event.dataTransfer.setData('application/x-handy-item', String(item.id));
@@ -893,11 +965,21 @@ export function GridOverlay(): React.JSX.Element {
     void ipc.gridSetInteractive(true).catch(() => undefined);
   }, []);
 
+  /** 「不整理」区条目开始拖拽（V41）：拖进哪个格子就登记进哪个格子 */
+  const startLooseDrag = useCallback((entry: LooseEntry, event: React.DragEvent): void => {
+    looseDragRef.current = entry;
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('application/x-handy-loose', entry.path);
+    void ipc.gridSetInteractive(true).catch(() => undefined);
+  }, []);
+
   const endItemDrag = useCallback((): void => {
-    if (itemDragRef.current === null) {
+    if (itemDragRef.current === null && looseDragRef.current === null) {
       return;
     }
     itemDragRef.current = null;
+    looseDragRef.current = null;
+    setItemDragging(false);
     setDropTargetId(null);
     // 交还命中轮询控制（光标若仍在盒子内会立即恢复可交互）
     void ipc.gridSetInteractive(false).catch(() => undefined);
@@ -1096,6 +1178,8 @@ export function GridOverlay(): React.JSX.Element {
       .gridAutoArrange()
       .then((report) => refresh().then(() => report))
       .then((report) => {
+        // 整理会改登记（快捷方式 / 系统进固定列、其余进分类格）→「不整理」区跟着变
+        refreshLoose();
         setTakeover({ enabled: true, iconsVisible: !report.iconsHidden });
         const parts = [
           `扫描 ${report.scanned} 项`,
@@ -1129,7 +1213,7 @@ export function GridOverlay(): React.JSX.Element {
         reportOperation('整理桌面', error);
         showHint(error.message);
       });
-  }, [refresh, showHint]);
+  }, [refresh, refreshLoose, showHint]);
 
   /**
    * 切换「由格子接管桌面呈现」（V38）：开 = 隐藏原生图标，关 = 图标与格子共存。
@@ -1312,28 +1396,31 @@ export function GridOverlay(): React.JSX.Element {
             delete next[boxId];
             return next;
           });
+          // 该格子的登记全没了 → 条目集体进「不整理」区
+          refreshLoose();
         })
         .catch((error: Error) => showHint(error.message));
     },
-    [showHint],
+    [refreshLoose, showHint],
   );
 
   const hideOverlay = useCallback((): void => {
     void ipc.gridOverlayHide().catch(() => undefined);
   }, []);
 
-  /** 手动对账一次（清掉文件已不存在的失效登记） */
+  /** 手动对账一次（清掉文件已不存在的失效登记，顺带刷新「不整理」区） */
   const syncNow = useCallback((): void => {
     void ipc
       .gridDesktopSync()
       .then(async (report) => {
         await refresh();
+        refreshLoose();
         showHint(
           `已对账 ${report.boxes} 个格子：新增 ${report.itemsAdded} · 清理失效 ${report.pruned}`,
         );
       })
       .catch((error: Error) => showHint(error.message));
-  }, [refresh, showHint]);
+  }, [refresh, refreshLoose, showHint]);
 
   // —— 渲染 ——
 
@@ -1365,25 +1452,33 @@ export function GridOverlay(): React.JSX.Element {
   );
 
   /**
-   * 右键菜单的关闭时机。
+   * 右键菜单的关闭时机（V41：格子菜单 / 条目菜单 / 不整理区菜单共用一套规则）。
    *
    * 注意**不能**只靠「在菜单上 stopPropagation 就完事」：菜单是 React 节点，
    * 而这里挂的是 window 上的原生监听，原生事件照样会冒泡到 window。
    * 所以用 ref 判一下点击是不是落在菜单内部。
    */
   useEffect(() => {
-    if (menuBox === null) {
+    if (menuBox === null && menuItem === null && menuLoose === null) {
       return undefined;
     }
-    const onDown = (event: MouseEvent): void => {
-      if (menuRef.current?.contains(event.target as Node) === true) {
-        return;
-      }
+    const closeAll = (): void => {
       setMenuBox(null);
+      setMenuItem(null);
+      setMenuLoose(null);
+    };
+    const onDown = (event: MouseEvent): void => {
+      const target = event.target as Node;
+      for (const ref of [menuRef, itemMenuRef, looseMenuRef]) {
+        if (ref.current?.contains(target) === true) {
+          return;
+        }
+      }
+      closeAll();
     };
     const onKey = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') {
-        setMenuBox(null);
+        closeAll();
       }
     };
     window.addEventListener('mousedown', onDown);
@@ -1392,10 +1487,34 @@ export function GridOverlay(): React.JSX.Element {
       window.removeEventListener('mousedown', onDown);
       window.removeEventListener('keydown', onKey);
     };
-  }, [menuBox]);
+  }, [menuBox, menuItem, menuLoose]);
 
   return (
-    <div className="fixed inset-0 select-none overflow-hidden" style={{ pointerEvents: 'none' }}>
+    <div
+      className="fixed inset-0 select-none overflow-hidden"
+      style={{ pointerEvents: itemDragging ? 'auto' : 'none' }}
+      onDragOver={(event) => {
+        if (itemDragRef.current === null) {
+          return;
+        }
+        // 拖出所有格子 = 移出（V41）：根画布必须能接住 dragover/drop，否则浏览器
+        // 会取消这次拖拽，用户「拖出去扔了」的意图就落空
+        event.preventDefault();
+        event.dataTransfer.dropEffect = 'move';
+      }}
+      onDrop={(event) => {
+        const drag = itemDragRef.current;
+        if (drag === null) {
+          // 落在格子里的事件已由格子自己处理（处理完 endItemDrag 会清掉 ref）
+          return;
+        }
+        event.preventDefault();
+        // 落点不在任何格子上 = 移出格子 → 自动进「不整理」区
+        // （用户 V41 原话：「用户直接从格子里面移除自动规划到不整理的部分即可」）
+        removeItem(drag.item);
+        endItemDrag();
+      }}
+    >
       {/* 盒子画布：每个盒子自身恢复指针事件（外层穿透不继承） */}
       {visibleBoxes.map((box) => {
         const boxItems = items[box.id] ?? [];
@@ -1436,20 +1555,24 @@ export function GridOverlay(): React.JSX.Element {
                     : ''
             }`}
             onDragOver={(event) => {
-              // 内部条目拖拽：允许作为放点（系统文件拖放走 webview 级事件，不经过这里）
-              if (itemDragRef.current !== null) {
+              // 内部条目拖拽（含「不整理」区拖回来）：允许作为放点（系统文件拖放走
+              // webview 级事件，不经过这里）
+              if (itemDragRef.current !== null || looseDragRef.current !== null) {
                 event.preventDefault();
                 event.dataTransfer.dropEffect = 'move';
                 setDropTargetId(box.id);
               }
             }}
             onDrop={(event) => {
-              const drag = itemDragRef.current;
-              if (drag !== null) {
-                event.preventDefault();
-                moveItem(drag, box.id);
-                endItemDrag();
+              event.preventDefault();
+              if (itemDragRef.current !== null) {
+                moveItem(itemDragRef.current, box.id);
+              } else if (looseDragRef.current !== null) {
+                addItem(box.id, looseDragRef.current.path);
+              } else {
+                return;
               }
+              endItemDrag();
             }}
             onMouseDown={(event) => {
               // 编辑态：**从格子任意空白处都能拖动**（不只是 32px 高的标题栏）。
@@ -1466,18 +1589,24 @@ export function GridOverlay(): React.JSX.Element {
               }
               startMove(event, box);
             }}
-            onContextMenu={(event) => {
-              // 借鉴腾讯桌面整理：右键格子直接出操作面板，不必先解锁布局再找小按钮。
-              // 用 clientX/clientY —— 根容器是 fixed inset-0，和视口是同一套坐标。
-              event.preventDefault();
-              setAccentBoxId(null);
-              setMenuBox({ id: box.id, x: event.clientX, y: event.clientY });
-            }}
+            /* V41：右键菜单从「整个格子」收回到**标题栏** —— 用户原话：「右键功能可以在
+               header 部分右键是格子的菜单或者在 header 部分添加操作按钮」。条目与
+               格子空白处的右键还给条目自己的菜单（见条目上的 onContextMenu）。 */
           >
-            {/* 标题栏：拖拽移动（随时可用）+ 双击重命名 */}
+            {/* 标题栏：拖拽移动（随时可用）+ 双击重命名 + 右键格子菜单（V41 只挂这里） */}
             <header
               onMouseDown={(event) => startMove(event, box)}
               onDoubleClick={() => beginRename(box)}
+              onContextMenu={(event) => {
+                // 格子操作面板的唯一入口（用户 V41：header 右键 = 格子的菜单）。
+                // 用 clientX/clientY —— 根容器是 fixed inset-0，和视口是同一套坐标。
+                event.preventDefault();
+                event.stopPropagation();
+                setMenuItem(null);
+                setMenuLoose(null);
+                setAccentBoxId(null);
+                setMenuBox({ id: box.id, x: event.clientX, y: event.clientY });
+              }}
               className="flex h-8 shrink-0 cursor-move items-center gap-1 px-2 active:cursor-grabbing"
               title="拖拽移动 · 双击重命名标题"
             >
@@ -1629,21 +1758,22 @@ export function GridOverlay(): React.JSX.Element {
                 <div
                   key={item.id}
                   data-grid-item="1"
-                  title={`${item.displayName}\n${item.filePath}\n双击打开 · 拖到其他格子 · 右上角 × 从格子移出（文件不动）`}
+                  title={`${item.displayName}\n${item.filePath}\n双击打开 · 拖到其他格子 · 拖出格子移入「不整理」区 · 右键更多操作`}
                   draggable
                   onDragStart={(event) => startItemDrag(item, event)}
                   onDragEnd={endItemDrag}
                   onDoubleClick={() => openItem(item)}
+                  onContextMenu={(event) => {
+                    // V41：条目的右键还给条目自己（打开 / 打开文件位置 / 移出格子），
+                    // 不再弹格子菜单 —— 用户原话：「文件目录我自带右键功能怎么办」。
+                    event.preventDefault();
+                    event.stopPropagation();
+                    setMenuBox(null);
+                    setMenuLoose(null);
+                    setMenuItem({ item, x: event.clientX, y: event.clientY });
+                  }}
                   className="group relative flex cursor-pointer flex-col items-center gap-1 rounded-lg p-1.5 transition hover:bg-white/15"
                 >
-                  <button
-                    type="button"
-                    title="从格子移出（文件留在桌面，不会删除）"
-                    onClick={() => removeItem(item)}
-                    className="absolute right-0.5 top-0.5 hidden rounded bg-black/60 p-0.5 text-neutral-100 hover:bg-red-500/85 group-hover:block"
-                  >
-                    <X className="h-3 w-3" />
-                  </button>
                   <FileIcon path={item.filePath} size={iconSize} />
                   <span className="w-full truncate text-center text-[11px] font-medium leading-tight text-white [text-shadow:0_1px_3px_rgba(0,0,0,0.95)]">
                     {item.displayName}
@@ -1687,6 +1817,83 @@ export function GridOverlay(): React.JSX.Element {
         );
       })}
 
+      {/* 「不整理」区（V41）：没有被任何格子登记的条目都落在这里 —— 用户从格子里移出、
+          解散格子、或整理后新出现的落单文件都在这，看得见、点得开、可以再拖回格子。
+          只在接管模式下渲染：接管关着时桌面本来就看得见这些图标，再画一份就是两份。 */}
+      {takeover?.enabled === true && loose !== null && (
+        <div
+          ref={looseRef}
+          style={{
+            left: loose.x,
+            top: loose.y,
+            width: loose.width,
+            height: loose.height,
+            pointerEvents: 'auto',
+            background: cardBackground(''),
+          }}
+          onDragOver={(event) => {
+            // 条目拖到「不整理」区 = 移出格子（与拖到空白处同义）
+            if (itemDragRef.current !== null) {
+              event.preventDefault();
+              event.dataTransfer.dropEffect = 'move';
+            }
+          }}
+          onDrop={(event) => {
+            const drag = itemDragRef.current;
+            if (drag !== null) {
+              event.preventDefault();
+              removeItem(drag.item);
+              endItemDrag();
+            }
+          }}
+          className="absolute flex flex-col overflow-hidden rounded-2xl text-neutral-100 shadow-[0_10px_30px_rgba(0,0,0,0.34),inset_0_1px_0_rgba(255,255,255,0.09)] backdrop-blur-lg backdrop-saturate-150"
+        >
+          <header
+            className="flex h-8 shrink-0 items-center gap-1 px-2"
+            title="没有被任何格子收纳的条目都落在这里；拖回任意格子即可再收纳"
+          >
+            <FolderOpen className="h-3.5 w-3.5 shrink-0 opacity-70" />
+            <span className="min-w-0 flex-1 truncate text-xs font-semibold opacity-85 [text-shadow:0_1px_2px_rgba(0,0,0,0.75)]">
+              不整理
+            </span>
+            <span className="shrink-0 text-[10px] opacity-55">{loose.items.length}</span>
+          </header>
+          <div
+            className="grid min-h-0 flex-1 content-start gap-1 overflow-y-auto p-2"
+            style={{
+              gridTemplateColumns: `repeat(auto-fill, minmax(${loose.iconSize + 36}px, 1fr))`,
+            }}
+          >
+            {loose.items.map((entry) => (
+              <div
+                key={entry.path}
+                data-grid-item="1"
+                title={`${entry.name}\n${entry.path}\n双击打开 · 拖进格子收纳 · 右键更多操作`}
+                draggable
+                onDragStart={(event) => startLooseDrag(entry, event)}
+                onDragEnd={endItemDrag}
+                onDoubleClick={() =>
+                  void ipc.gridOpenPath(entry.path).catch((error: Error) => showHint(error.message))
+                }
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  setMenuBox(null);
+                  setMenuItem(null);
+                  setMenuLoose({ entry, x: event.clientX, y: event.clientY });
+                }}
+                className="flex cursor-pointer flex-col items-center gap-1 rounded-lg p-1.5 transition hover:bg-white/15"
+              >
+                <FileIcon path={entry.path} size={loose.iconSize} />
+                <span className="w-full truncate text-center text-[11px] font-medium leading-tight text-white [text-shadow:0_1px_3px_rgba(0,0,0,0.95)]">
+                  {entry.name}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* 一个格子都没有时给引导（卡片自身可交互，已纳入命中区域） */}
       {boxes.length === 0 && (
         <div
@@ -1698,7 +1905,8 @@ export function GridOverlay(): React.JSX.Element {
           <p className="max-w-sm text-xs leading-relaxed text-neutral-300">
             收纳格是桌面上的分区：把文件拖进去，它就
             <span className="text-neutral-100">归拢显示在格子里，文件本身留在桌面原位，不会被移动或删除</span>；
-            双击图标用默认程序打开；右上角 × 只是把它从格子里移出（不是删除文件）。
+            双击图标用默认程序打开；把图标拖出格子（或右键选「移出格子」）它就进左下角
+            「不整理」区——不是删除文件。
             <br />
             也可以直接加一个便签或日历挂件，桌面随手记、随手看计划。
           </p>
@@ -1820,6 +2028,96 @@ export function GridOverlay(): React.JSX.Element {
           );
         })()}
 
+      {/* 条目右键菜单（V41）：接管模式下给不了原生 shell 菜单，先补最高频的三件事 */}
+      {menuItem !== null && (
+        <div
+          key="grid-item-menu"
+          ref={itemMenuRef}
+          style={{ left: menuItem.x, top: menuItem.y, pointerEvents: 'auto' }}
+          className="absolute z-50 w-44 overflow-hidden rounded-lg bg-neutral-900/95 py-1 text-xs text-neutral-100 shadow-2xl ring-1 ring-white/15 backdrop-blur"
+        >
+          <div className="truncate px-2.5 pb-1 pt-0.5 text-[10px] text-neutral-400">
+            {menuItem.item.displayName}
+          </div>
+          <button
+            type="button"
+            className={menuItemRowClass}
+            onClick={() => {
+              const target = menuItem.item;
+              setMenuItem(null);
+              openItem(target);
+            }}
+          >
+            打开
+          </button>
+          <button
+            type="button"
+            className={menuItemRowClass}
+            onClick={() => {
+              const path = menuItem.item.filePath;
+              setMenuItem(null);
+              revealItem(path);
+            }}
+          >
+            打开文件位置
+          </button>
+          <div className="my-1 h-px bg-white/10" />
+          <button
+            type="button"
+            className={`${menuItemRowClass} text-amber-200`}
+            onClick={() => {
+              const target = menuItem.item;
+              setMenuItem(null);
+              removeItem(target);
+            }}
+          >
+            移出格子
+          </button>
+          <p className="px-2.5 pb-1 pt-0.5 text-[10px] leading-relaxed text-neutral-500">
+            只删登记不删文件；它会在左下角「不整理」区
+          </p>
+        </div>
+      )}
+
+      {/* 「不整理」区条目右键菜单（V41） */}
+      {menuLoose !== null && (
+        <div
+          key="grid-loose-menu"
+          ref={looseMenuRef}
+          style={{ left: menuLoose.x, top: menuLoose.y, pointerEvents: 'auto' }}
+          className="absolute z-50 w-44 overflow-hidden rounded-lg bg-neutral-900/95 py-1 text-xs text-neutral-100 shadow-2xl ring-1 ring-white/15 backdrop-blur"
+        >
+          <div className="truncate px-2.5 pb-1 pt-0.5 text-[10px] text-neutral-400">
+            {menuLoose.entry.name}
+          </div>
+          <button
+            type="button"
+            className={menuItemRowClass}
+            onClick={() => {
+              const path = menuLoose.entry.path;
+              setMenuLoose(null);
+              void ipc.gridOpenPath(path).catch((error: Error) => showHint(error.message));
+            }}
+          >
+            打开
+          </button>
+          <button
+            type="button"
+            className={menuItemRowClass}
+            onClick={() => {
+              const path = menuLoose.entry.path;
+              setMenuLoose(null);
+              revealItem(path);
+            }}
+          >
+            打开文件位置
+          </button>
+          <p className="px-2.5 pb-1 pt-0.5 text-[10px] leading-relaxed text-neutral-500">
+            拖进任意格子即可收纳
+          </p>
+        </div>
+      )}
+
       {/* 提示条（非交互文本） */}
       {hint && (        <div className="absolute left-1/2 top-4 -translate-x-1/2 rounded-md bg-neutral-900/80 px-3 py-1.5 text-xs text-neutral-100 shadow-lg backdrop-blur">
           {hint}
@@ -1874,7 +2172,7 @@ export function GridOverlay(): React.JSX.Element {
         <button
           type="button"
           onClick={arrangeDesktop}
-          title="整理桌面：按类型登记进格子 + 左起流布局重排（列宽统一）+ 接管原生图标（不移动任何文件）"
+          title="整理桌面：系统 / 快捷方式钉在左上，其余按类型登记进格子流布局重排，挂件归位右上角（不移动任何文件）"
           className="rounded-full p-1.5 text-neutral-200 transition hover:bg-white/10"
         >
           <Sparkles className="h-4 w-4" />

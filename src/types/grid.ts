@@ -63,6 +63,24 @@ export interface GridItem {
   createdAt: string;
 }
 
+/** 「不整理」区里的一个落单条目（V41）：没被任何格子登记，身份就是磁盘路径 */
+export interface LooseEntry {
+  path: string;
+  name: string;
+  isDir: boolean;
+  isLnk: boolean;
+}
+
+/** 「不整理」区的完整状态：矩形（逻辑像素，相对挂件窗）+ 条目；width=0 表示没有落单条目 */
+export interface LooseArea {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  iconSize: number;
+  items: LooseEntry[];
+}
+
 /** 格子创建 / 更新入参（缺省字段由 Rust 侧补默认值；更新仅写传入字段） */
 export interface GridBoxInput {
   /** 缺省 = 创建新格子 */

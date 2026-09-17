@@ -18,6 +18,7 @@ import type {
   GridBoxInput,
   GridGeometry,
   GridItem,
+  LooseArea,
   GridLayout,
   GridRegion,
   LayoutImportReport,
@@ -283,6 +284,10 @@ export const ipc = {
   gridOverlayStatus: (): Promise<OverlayStatus> => call<OverlayStatus>('grid_overlay_status'),
   /** 打开条目原文件（Rust 侧 shell 插件 open；本地路径不受前端 open 作用域限制） */
   gridOpenPath: (path: string): Promise<void> => call<void>('grid_open_path', { path }),
+  /** 在资源管理器中定位该文件（V41 条目右键「打开文件位置」，explorer /select） */
+  gridRevealPath: (path: string): Promise<void> => call<void>('grid_reveal_path', { path }),
+  /** 「不整理」区当前状态（V41）：矩形 + 落单条目；width=0 表示没有落单条目 */
+  gridLooseList: (): Promise<LooseArea> => call<LooseArea>('grid_loose_list'),
   /** 提取文件/文件夹的系统真实图标（RGBA base64）；失败或不支持返回 null */
   gridFileIcon: (path: string): Promise<FileIconData | null> =>
     call<FileIconData | null>('grid_file_icon', { path }),
