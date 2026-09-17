@@ -6,6 +6,7 @@ import {
   FolderOpen,
   ExternalLink,
   History,
+  LayoutGrid,
   Loader2,
   Square,
   Tags,
@@ -14,6 +15,7 @@ import {
   CheckSquare,
   FolderInput,
 } from 'lucide-react';
+import type { AutoArrangeReport } from '@/types/grid';
 import type { OrganizerApplyReport, OrganizerPlan, OrganizerRules } from '@/types/organizer';
 import {
   PLAN_STATUS_LABELS,
@@ -25,6 +27,7 @@ import {
   undoPlan,
   updatePlanItems,
 } from '@/core/data/organizerService';
+import { reportOperation } from '@/lib/errorSink';
 import { ipc } from '@/lib/ipc';
 import { cn } from '@/lib/utils';
 import { toast } from '@/components/ui/toast';
@@ -32,9 +35,24 @@ import { toast } from '@/components/ui/toast';
 /**
  * 桌面归类整理视图（V12；V25 成为模块首屏）。
  *
- * 流程：规则选择（by-type / by-date）→「生成预览」（只算不搬）→ 分组预览清单
- * （可勾选排除，回写计划）→「应用」（**二次确认弹层**，列明将移动 N 项及目标目录）
- * → 结果摘要（成功/失败）→「一键撤销」→ 历史计划列表（可撤销 applied 且未撤销的计划）。
+ * # V37：两种「处理方式」，默认那一种一个文件都不动
+ *
+ * 用户装机实测后否掉了「把桌面东西搬进一个目录」这件事——原话是「是桌面整理，
+ * 不是让你把桌面上的东西都给我移动到一个目录下面去，这个完全是错误的」。
+ * 于是本视图顶上多了一行**处理方式**开关：
+ *
+ *   | 处理方式 | 做什么 | 动文件吗 |
+ *   | --- | --- | --- |
+ *   | **归拢到桌面格子**（默认） | 按类型/日期分组，把条目**登记**进桌面格子 | **不动**，文件留在桌面原位 |
+ *   | 移动到整理目录 | 真 `fs::rename` 进 `桌面/Handy整理/<组名>/`，可一键撤销 | 动 |
+ *
+ * 默认走「归拢」，是因为它才是「桌面整理」的常识含义（腾讯桌面整理就是这个行为）；
+ * 「移动到整理目录」保留下来，给确实想归档的用户，但它现在**必须被显式选中**，
+ * 而且按钮文案会直说「移动」，不会再有「点了整理结果文件被搬走」的意外。
+ *
+ * 移动模式流程（选中后才出现）：规则选择（by-type / by-date）→「生成预览」（只算不搬）
+ * → 分组预览清单（可勾选排除，回写计划）→「应用」（**二次确认弹层**，列明将移动 N 项
+ * 及目标目录）→ 结果摘要（成功/失败）→「一键撤销」→ 历史计划列表。
  *
  * # V25：这是「真·操作系统桌面整理」
  *
@@ -51,7 +69,9 @@ import { toast } from '@/components/ui/toast';
  * 安全边界：
  *   - 预览/应用/撤销全部经 Rust（安全策略与冲突处理在 Rust 侧）；
  *   - apply 前置二次确认由本视图保证；单条失败不中断，失败明细在摘要中展示；
- *   - 本视图只操作桌面整理本身，绝不自动触发任何移动（全部由用户点击驱动）。
+ *   - 本视图只操作桌面整理本身，绝不自动触发任何移动（全部由用户点击驱动）；
+ *   - 「归拢」模式走的是 Rust `grid_auto_arrange`（V37 起只登记、不移动），
+ *     与桌面格子管理页的「一键归类桌面」是同一个实现，不存在两套语义。
  */
 
 /** 字节数展示 */
@@ -93,6 +113,14 @@ export interface OrganizerViewProps {
 
 /** 桌面整理视图（主面板模块内页 / 命令视图复用）。 */
 export default function OrganizerView(_props: OrganizerViewProps = {}): React.JSX.Element {
+  /**
+   * 处理方式（V37）：
+   *  - `group`：归拢到桌面格子（默认）—— 只登记引用，**文件一个字节都不动**；
+   *  - `move`：移动到整理目录 —— 真搬文件，可一键撤销。
+   */
+  const [processMode, setProcessMode] = useState<'group' | 'move'>('group');
+  /** 归拢模式的结果摘要 */
+  const [groupReport, setGroupReport] = useState<AutoArrangeReport | null>(null);
   const [mode, setMode] = useState<OrganizerRules['mode']>('by-type');
   const [includeFolders, setIncludeFolders] = useState(false);
   const [plan, setPlan] = useState<OrganizerPlan | null>(null);
@@ -168,6 +196,44 @@ export default function OrganizerView(_props: OrganizerViewProps = {}): React.JS
     return `${rootDir.replace(/[\\/]+$/, '')}${sep}Handy整理`;
   }, [plan, rootDir]);
 
+  /**
+   * 归拢到桌面格子：按类型把桌面条目登记进格子，**不动任何文件**（V37 默认路径）。
+   *
+   * 与「桌面格子」管理页的「一键归类桌面」共用同一个 Rust 命令，所以两处行为天然一致；
+   * 分类名（文件夹 / 图片 / 文档 / 压缩包 / 安装包 / 其他）也来自同一套映射。
+   */
+  const handleGroup = async (): Promise<void> => {
+    setBusy('preview');
+    setError(null);
+    setGroupReport(null);
+    try {
+      const rep = await ipc.gridAutoArrange();
+      setGroupReport(rep);
+      await refreshPlans();
+      if (rep.scanned === 0) {
+        toast.warning('桌面已经很干净了', { description: '没有扫描到可归拢的条目' });
+      } else if (rep.itemsAdded === 0) {
+        toast.info('没有需要归拢的条目', {
+          description: `扫描到 ${rep.scanned} 项，其中快捷方式 ${rep.skipped} 项按设计不动`,
+        });
+      } else {
+        toast.success(`已归拢 ${rep.itemsAdded} 个条目到桌面格子`, {
+          description: '文件全部留在桌面原位，没有移动',
+        });
+      }
+      if (rep.failures.length > 0) {
+        toast.warning(`${rep.failures.length} 个条目没能归拢`, {
+          description: rep.failures.slice(0, 3).join('；'),
+        });
+      }
+    } catch (err: unknown) {
+      reportOperation('归拢到桌面格子', err);
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   /** 生成预览（只算不搬；计划已落库 applied=0） */
   const handlePreview = async (): Promise<void> => {
     setBusy('preview');
@@ -180,6 +246,7 @@ export default function OrganizerView(_props: OrganizerViewProps = {}): React.JS
       setExcluded(new Set());
       await refreshPlans();
     } catch (err: unknown) {
+      reportOperation('生成归类预览', err);
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(null);
@@ -244,6 +311,7 @@ export default function OrganizerView(_props: OrganizerViewProps = {}): React.JS
         toast.error(`已移动 ${rep.moved} 项，${rep.failed.length} 项失败（详见摘要）`);
       }
     } catch (err: unknown) {
+      reportOperation('应用归类计划', err);
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(null);
@@ -300,11 +368,11 @@ export default function OrganizerView(_props: OrganizerViewProps = {}): React.JS
             打开桌面
           </button>
         ) : null}
-        {targetDir !== null ? (
+        {targetDir !== null && processMode === 'move' ? (
           <button
             type="button"
             onClick={() => openDir(targetDir)}
-            title="整理后会移动到这里（不存在时由程序创建）"
+            title="移动模式下会移到这里（不存在时由程序创建）"
             className="inline-flex shrink-0 items-center gap-1 rounded-md border border-border px-2 py-0.5 text-[11px] text-muted-foreground transition hover:bg-accent hover:text-foreground"
           >
             <ExternalLink className="h-3 w-3" />
@@ -313,46 +381,120 @@ export default function OrganizerView(_props: OrganizerViewProps = {}): React.JS
         ) : null}
       </div>
 
-      {/* 工具栏：规则选择 + 生成预览 */}
+      {/* 工具栏：处理方式（V37） + 规则选择 + 生成预览 */}
       <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-3">
-        <div className="flex items-center gap-1">
-          {(['by-type', 'by-date'] as const).map((m) => (
-            <button
-              key={m}
-              type="button"
-              onClick={() => setMode(m)}
-              className={cn(
-                'inline-flex h-8 items-center gap-1 rounded-md px-3 text-xs transition',
-                mode === m
-                  ? 'bg-brand text-white'
-                  : 'border text-muted-foreground hover:bg-accent hover:text-foreground',
-              )}
-            >
-              {m === 'by-type' ? <Tags className="h-3.5 w-3.5" /> : <CalendarDays className="h-3.5 w-3.5" />}
-              {MODE_LABELS[m]}
-            </button>
-          ))}
+        {/* 处理方式：默认「归拢」不动文件；「移动」必须被显式选中 */}
+        <div className="flex items-center gap-1" role="group" aria-label="处理方式">
+          <button
+            type="button"
+            onClick={() => setProcessMode('group')}
+            title="把桌面条目归拢进桌面格子，文件留在原位不动"
+            className={cn(
+              'inline-flex h-8 items-center gap-1 rounded-md px-3 text-xs transition',
+              processMode === 'group'
+                ? 'bg-brand text-white'
+                : 'border text-muted-foreground hover:bg-accent hover:text-foreground',
+            )}
+          >
+            <LayoutGrid className="h-3.5 w-3.5" />
+            归拢到桌面格子
+          </button>
+          <button
+            type="button"
+            onClick={() => setProcessMode('move')}
+            title="真的把文件移动到 桌面/Handy整理/ 下，可一键撤销"
+            className={cn(
+              'inline-flex h-8 items-center gap-1 rounded-md px-3 text-xs transition',
+              processMode === 'move'
+                ? 'bg-brand text-white'
+                : 'border text-muted-foreground hover:bg-accent hover:text-foreground',
+            )}
+          >
+            <FolderInput className="h-3.5 w-3.5" />
+            移动到整理目录
+          </button>
         </div>
-        {mode === 'by-date' && (
-          <label className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
-            <input
-              type="checkbox"
-              checked={includeFolders}
-              onChange={(event) => setIncludeFolders(event.target.checked)}
-              className="h-3.5 w-3.5 accent-brand"
-            />
-            整理文件夹
-          </label>
-        )}
+
+        {processMode === 'move' ? (
+          <>
+            <span className="mx-1 h-5 w-px shrink-0 bg-border" />
+            <div className="flex items-center gap-1">
+              {(['by-type', 'by-date'] as const).map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  onClick={() => setMode(m)}
+                  className={cn(
+                    'inline-flex h-8 items-center gap-1 rounded-md px-3 text-xs transition',
+                    mode === m
+                      ? 'bg-brand text-white'
+                      : 'border text-muted-foreground hover:bg-accent hover:text-foreground',
+                  )}
+                >
+                  {m === 'by-type' ? <Tags className="h-3.5 w-3.5" /> : <CalendarDays className="h-3.5 w-3.5" />}
+                  {MODE_LABELS[m]}
+                </button>
+              ))}
+            </div>
+            {mode === 'by-date' && (
+              <label className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
+                <input
+                  type="checkbox"
+                  checked={includeFolders}
+                  onChange={(event) => setIncludeFolders(event.target.checked)}
+                  className="h-3.5 w-3.5 accent-brand"
+                />
+                整理文件夹
+              </label>
+            )}
+          </>
+        ) : null}
+
         <button
           type="button"
-          onClick={() => void handlePreview()}
+          onClick={() => void (processMode === 'group' ? handleGroup() : handlePreview())}
           disabled={busy !== null}
           className="ml-auto inline-flex h-8 shrink-0 items-center gap-1 rounded-md bg-brand px-3 text-xs font-medium text-white transition hover:bg-brand/90 disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {busy === 'preview' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FolderInput className="h-3.5 w-3.5" />}
-          生成预览
+          {busy === 'preview' ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : processMode === 'group' ? (
+            <LayoutGrid className="h-3.5 w-3.5" />
+          ) : (
+            <FolderInput className="h-3.5 w-3.5" />
+          )}
+          {processMode === 'group' ? '归拢到桌面格子' : '生成预览'}
         </button>
+      </div>
+
+      {/* 处理方式说明（V37）：把「会不会动我的文件」说在明面上 */}
+      <div
+        className={cn(
+          'flex items-start gap-2 border-b border-border px-4 py-2 text-[11px]',
+          processMode === 'group' ? 'bg-muted/20 text-muted-foreground' : 'bg-destructive/5 text-destructive',
+        )}
+      >
+        {processMode === 'group' ? (
+          <>
+            <LayoutGrid className="mt-0.5 h-3.5 w-3.5 shrink-0 text-brand" />
+            <span>
+              按类型把桌面条目
+              <span className="font-medium text-foreground">登记</span>
+              进桌面格子（文件夹 / 图片 / 文档 / 压缩包 / 安装包 / 其他），
+              文件本体一个字节都不动。快捷方式（.lnk）按设计留在桌面不动。
+            </span>
+          </>
+        ) : (
+          <>
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span>
+              这一种会
+              <span className="font-medium">真的移动文件</span>
+              到 <code className="font-mono">桌面/Handy整理/&lt;组名&gt;/</code>
+              ，桌面上的原位置会空出来。移动后可以在下方历史计划里一键撤销恢复。
+            </span>
+          </>
+        )}
       </div>
 
       {/* 错误态 */}
@@ -363,8 +505,37 @@ export default function OrganizerView(_props: OrganizerViewProps = {}): React.JS
       )}
 
       <div className="min-h-0 flex-1 scrollbar-thin overflow-auto px-4 pb-4">
-        {/* 应用结果摘要 */}
-        {report && (
+        {/* 归拢结果摘要（V37 默认路径；一个文件都没动） */}
+        {groupReport && processMode === 'group' && (
+          <div className="mt-3 mb-3 rounded-lg border border-border bg-muted/30 p-3">
+            <div className="flex items-center gap-2">
+              <LayoutGrid className="h-4 w-4 text-brand" />
+              <p className="flex-1 text-sm font-medium text-foreground">
+                已归拢 {groupReport.itemsAdded} 个条目到桌面格子
+                <span className="ml-1 font-normal text-muted-foreground">
+                  （扫描 {groupReport.scanned} 项，文件全部原地未动）
+                </span>
+              </p>
+            </div>
+            <p className="mt-1.5 text-[11px] text-muted-foreground">
+              新建格子 {groupReport.boxesCreated} 个 · 复用 {groupReport.boxesReused} 个 ·
+              含文件夹 {groupReport.foldersMoved} 个 · 快捷方式按设计跳过 {groupReport.skipped} 个
+            </p>
+            {groupReport.failures.length > 0 && (
+              <div className="mt-2 flex flex-col gap-1">
+                {groupReport.failures.map((f) => (
+                  <p key={f} className="flex items-start gap-1.5 text-[11px] text-destructive">
+                    <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+                    <span>{f}</span>
+                  </p>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* 应用结果摘要（移动模式） */}
+        {report && processMode === 'move' && (
           <div className="mb-3 rounded-lg border border-border bg-muted/30 p-3">
             <div className="flex items-center gap-2">
               <FolderOpen className="h-4 w-4 text-brand" />
@@ -403,8 +574,20 @@ export default function OrganizerView(_props: OrganizerViewProps = {}): React.JS
           </div>
         )}
 
-        {/* 预览清单（分组 + 勾选排除） */}
-        {plan && (
+        {/* 归拢模式空态：说清点一下会发生什么，别让用户不敢点 */}
+        {processMode === 'group' && groupReport === null && (
+          <div className="mt-3 rounded-lg border border-dashed border-border px-4 py-6 text-center">
+            <LayoutGrid className="mx-auto h-6 w-6 text-muted-foreground/60" />
+            <p className="mt-2 text-sm text-foreground">点右上角「归拢到桌面格子」</p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              桌面上的文件会按类型分到几个格子里显示，
+              <span className="font-medium text-foreground">文件本身留在桌面原位，一个都不会被移动或删除</span>。
+            </p>
+          </div>
+        )}
+
+        {/* 预览清单（分组 + 勾选排除；移动模式专属） */}
+        {plan && processMode === 'move' && (
           <div className="mb-3 rounded-lg border border-border">
             <div className="flex items-center gap-2 border-b border-border px-3 py-2">
               <p className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
@@ -464,8 +647,8 @@ export default function OrganizerView(_props: OrganizerViewProps = {}): React.JS
           </div>
         )}
 
-        {/* 历史计划 */}
-        <div>
+        {/* 历史计划（移动模式专属——归拢模式不产生计划，留着只会让人以为动过文件） */}
+        <div className={cn(processMode !== 'move' && 'hidden')}>
           <p className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
             <History className="h-3.5 w-3.5" />
             历史计划

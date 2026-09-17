@@ -17,34 +17,38 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { toast } from '@/components/ui/toast';
+import { reportOperation } from '@/lib/errorSink';
 import { ipc } from '@/lib/ipc';
 import { cn } from '@/lib/utils';
 import { ACCENT_ORDER } from './DesktopWidgets';
+import { LegacyRepairCard } from './LegacyRepairCard';
 import type { GridAccent, GridBox, LayoutSnapshotMeta } from '@/types/grid';
 
 /**
  * 桌面格子（原「桌面整理」内页）。
  *
- * # 它到底是什么（V33 改的真收纳，别再按旧模型理解）
+ * # 它到底是什么（V37 定案：只呈现，不动文件）
  *
- * 历史包袱：V25–V32 的格子是**文件引用型** —— 格子里只登记桌面原文件的路径，
- * 文件本身不动。用户看到的是「桌面有一份、格子里还有一份」，观感就是
- * 「并不是整理收纳，而是复制了一份而已」。V33 把模型推倒重来：
+ * 走过一段弯路，把三个模型都记下来，免得又绕回去：
  *
- *   - 每个「收纳格」= 磁盘上一个**真实目录** `桌面/Handy整理/<格名>/`；
- *   - 拖文件进格子 = 真 `fs::rename` **移动**（同名冲突自动改名，绝不覆盖）；
- *   - 格子右上角 × = 把文件**移回桌面根**（不是删除）；
- *   - **默认不自动收纳**：只在用户主动点「一键收纳桌面」时才动文件，
- *     且只动**普通文件**，`.lnk` 快捷方式与文件夹原地不动（用户明确要求）。
+ *   ① V25–V32「引用型」：格子里只登记桌面文件的路径，文件不动。用户看到桌面一份、
+ *      格子里一份，观感像「复制了一份而已」。
+ *   ② V33–V36「真实收纳型」：把文件 `fs::rename` 进 `桌面/Handy整理/<格名>/`。
+ *      桌面确实不重复了，但用户装机实测后否掉 ——「是桌面整理，不是让你把桌面上的
+ *      东西都给我移动到一个目录下面去」。而且它埋了一次事故：收纳容器被自己的规则
+ *      误扫，递归复制炸出 704 层嵌套、5 份共约 195 GB 的副本。
+ *   ③ **V37 起「呈现层」**（当前）：格子 = 桌面图标的归拢显示。条目只是引用，
+ *      拖进 / 移出 / 换格子一律**只改登记**，文件永远待在桌面原处。腾讯桌面整理
+ *      就是这个行为。
  *
- * 所以「桌面看到的东西」和「格子里看到的东西」是同一份文件的两个位置，
- * 不会再出现复制观感。磁盘目录是唯一事实源，`grid_items` 表只作登记缓存，
- * 每次列出都会 `reconcile` 对齐。
+ * 代价是「桌面原生图标 + 格子」会重复显示，所以接管桌面图标（隐藏原生
+ * `SysListView32`）是这个模型的一部分，而不是可选项。
  *
  * # 本视图保留的能力
  *
- *   - **一键收纳桌面**：扫描 → 按类型分组 → 真移动到对应格目录（普通文件）；
+ *   - **一键归类桌面**：扫描 → 按类型分组 → 只登记引用，不动文件；
  *   - **格子 / 挂件**：收纳格、便签、日历计划三种，日历复用 `todos` 表；
+ *   - **诊断与修复**：撤回 / 清理 V33–V36 留下的 `Handy整理` 残留、查看日志；
  *   - **备份 / 还原布局**：把当前摆法存成本机快照，随时切回来；
  *   - **格子重命名 / 删除**、**显示 / 隐藏格子层**（浮在桌面之上、普通窗口之下）。
  */
@@ -225,23 +229,21 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
   );
 
   /**
-   * 一键收纳：扫描桌面 → 文件与文件夹按类型**移动**进 `桌面/Handy整理/<类别>/`。
+   * 一键归类：扫描桌面 → 按类型把文件与文件夹**登记**进对应格子。
    *
-   * 这是**真的移动文件**（V33 起），所以必须先二次确认。
-   * V34 修正：文件夹也纳入收纳 —— 用户实测「文件夹的整理根本都不生效」，
-   * 根因就是这里把 `is_dir` 整个跳过了，「文件夹」格于是永远是空的。
-   * 现在只有快捷方式（.lnk）保持不动（用户明确要求「原生快捷方式不需要动态整理」）。
+   * **一个文件都不会被移动**（V37 引用模型）：登记只让格子知道该把谁画进去，
+   * 文件本体留在桌面原处。所以确认框里要把这件事说死，免得再被误会成
+   * 「把桌面上的东西搬进某个目录」（V33–V36 就是这么被否掉的）。
+   * 只有快捷方式（.lnk）不参与（用户明确要求「原生快捷方式不需要动态整理」）。
    */
   const autoArrange = useCallback((): void => {
     const ok = window.confirm(
-      '一键收纳桌面？\n\n' +
-        '会把桌面上的文件和文件夹按类型移动到「桌面/Handy整理/<类别>/」，' +
-        '每个类别对应一个收纳格。\n\n' +
-        '· 只有快捷方式（.lnk）保持不动，留在桌面原位；\n' +
-        '· 文件夹会整体移进「文件夹」格（内容一起搬走，不会丢）；\n' +
-        '· 同名绝不覆盖（自动改名为 name (2).ext）；\n' +
-        '· 收纳后桌面图标不再重复显示这些文件；\n' +
-        '· 想还原：在格子里点条目右上角的 × 即可把文件移回桌面。\n\n' +
+      '一键归类桌面？\n\n' +
+        '会把桌面上的文件和文件夹按类型登记进对应格子（每个类别一个格子）。\n\n' +
+        '· 文件不会被移动，一个都不会 —— 格子只是把它们归拢显示；\n' +
+        '· 快捷方式（.lnk）留在原位，不参与归类；\n' +
+        '· 文件夹整体登记进「文件夹」格；\n' +
+        '· 从格子里移出过的条目不会再被塞回来。\n\n' +
         '确定继续？',
     );
     if (!ok) {
@@ -258,25 +260,26 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
           return;
         }
         if (report.itemsAdded === 0) {
-          toast.info('没有需要收纳的文件', {
+          toast.info('没有需要归类的条目', {
             description: `扫描到 ${report.scanned} 项，其中快捷方式 ${report.skipped} 项按设计不动`,
           });
           return;
         }
-        const created = report.boxesCreated > 0 ? `新建 ${report.boxesCreated} 个收纳格、` : '';
+        const created = report.boxesCreated > 0 ? `新建 ${report.boxesCreated} 个格子、` : '';
         const folders = report.foldersMoved > 0 ? `（含 ${report.foldersMoved} 个文件夹）` : '';
-        toast.success(`已收纳 ${report.itemsAdded} 个条目${folders}`, {
-          description: `${created}移动进 桌面/Handy整理/ 下；快捷方式保持原位`,
+        toast.success(`已归类 ${report.itemsAdded} 个条目${folders}`, {
+          description: `${created}文件全部留在桌面原位，没有移动`,
         });
         if (report.failures.length > 0) {
-          toast.warning(`${report.failures.length} 个文件没能收纳`, {
+          toast.warning(`${report.failures.length} 个文件没能归类`, {
             description: report.failures.slice(0, 3).join('；'),
           });
         }
       })
       .catch((err: unknown) => {
-        toast.error('一键收纳失败', {
-          description: err instanceof Error ? err.message : String(err),
+        reportOperation('一键归类桌面', err);
+        toast.error('一键归类失败', {
+          description: `${err instanceof Error ? err.message : String(err)}（详情见日志）`,
         });
       })
       .finally(() => setArranging(false));
@@ -412,7 +415,7 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
         ) : (
           <Sparkles className="h-3.5 w-3.5" />
         )}
-        一键收纳桌面
+        一键归类桌面
       </Button>
       <Button variant="secondary" size="sm" onClick={toggleOverlay} disabled={busy}>
         {overlayVisible ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
@@ -426,9 +429,9 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
       {embedded ? (
         <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border px-4 py-2">
           <span className="text-[11px] leading-relaxed text-muted-foreground">
-            格子是
-            <span className="font-medium text-foreground">真实收纳格</span>
-            ：拖进去 = 文件真的移到 桌面/Handy整理/格子名/；桌面图标与快捷方式不动
+            格子是桌面的
+            <span className="font-medium text-foreground">呈现层</span>
+            ：拖进去只登记归属，文件原地不动；双击打开的还是原文件
           </span>
           <div className="ml-auto flex items-center gap-2">{toolbarActions}</div>
         </div>
@@ -440,7 +443,7 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
           <div className="min-w-0 flex-1">
             <h1 className="text-base font-semibold text-foreground">桌面格子</h1>
             <p className="truncate text-xs text-muted-foreground">
-              真实收纳 · 拖进去文件真的移进 Handy整理/格子名 · 桌面不再重复显示
+              桌面图标归拢显示 · 文件一律原地不动 · 快捷方式留在原位
             </p>
           </div>
           {toolbarActions}
@@ -453,21 +456,20 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
           <Info className="mt-0.5 h-4 w-4 shrink-0 text-brand" />
           <div className="space-y-1 text-xs leading-relaxed text-muted-foreground">
             <p>
-              <span className="font-medium text-foreground">真实收纳</span>
-              ：每个格子对应一个真实目录（桌面/Handy整理/格子名/）。把文件拖进格子 =
-              文件<span className="font-medium text-foreground">真的移动</span>
-              进该目录，桌面图标随之消失 —— 所以桌面不会出现「格子与原图标各一份」的重复。
-              同名文件绝不覆盖（自动改名）。
+              <span className="font-medium text-foreground">格子只做呈现，不动你的文件</span>
+              ：拖进格子、拖去别的格子、点 × 移出 —— 都只是改格子的登记，文件一直待在
+              桌面原处（V37 起重定；腾讯桌面整理就是这个行为）。双击打开的还是原文件，
+              所以不存在「文件被搬进某个目录」这回事。
             </p>
             <p>
-              <span className="font-medium text-foreground">默认不动你的桌面</span>
-              ：不自动收录、不隐藏图标，快捷方式一律留在原位。只有你点「一键收纳桌面」
-              或主动把文件拖进格子，文件才会被移动。
+              <span className="font-medium text-foreground">一键归类</span>
+              ：扫一遍桌面，把文件和文件夹按类型登记进对应的格子。快捷方式（.lnk）
+              按你的要求留在原位，一个文件都不会被移动。从格子里移出过的东西不会再被
+              自动归类塞回来。
             </p>
             <p>
-              格子条目：双击打开、拖到其他格子即移动、右上角 × 把文件
-              <span className="font-medium text-foreground">移回桌面</span>
-              （不是删除）。标题栏随时可拖动移位、双击重命名。
+              格子条目：双击打开、拖到其他格子、右上角 × 从格子移出（文件不动）。
+              标题栏随时可拖动移位、双击重命名。
               「备份布局」记下当前摆法，随时能「还原」回来。
             </p>
             <p className="text-foreground">
@@ -482,6 +484,9 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
             )}
           </div>
         </div>
+
+        {/* 诊断与修复（V37）：历史收纳残留撤回/清理 + 日志入口 */}
+        <LegacyRepairCard />
 
         {/* 布局备份区 */}
         <div className="mb-5 rounded-xl border border-border">
@@ -563,14 +568,14 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
           <div className="py-14 text-center">
             <p className="text-sm font-medium text-foreground">还没有格子</p>
               <p className="mx-auto mt-1 max-w-md text-xs leading-relaxed text-muted-foreground">
-                点「一键收纳桌面」把桌面上的文件和文件夹按类型移动进 桌面/Handy整理/
-                并各建一个格子（只有快捷方式留在原位）；也可以点「新建格子」自己摆，
-                或加便签 / 日历挂件（便签可以加多个）。显示格子后把文件拖进格子即收纳。
+                点「一键归类桌面」扫一遍桌面，按类型登记进各自的格子（快捷方式留在原位，
+                文件一个都不会被移动）；也可以点「新建格子」自己摆，或加便签 / 日历挂件
+                （便签可以加多个）。显示格子后把文件拖进格子即可。
               </p>
               <div className="mt-4 flex justify-center gap-2">
                 <Button size="sm" onClick={autoArrange} disabled={arranging}>
                   <Sparkles className="h-3.5 w-3.5" />
-                  一键收纳桌面
+                  一键归类桌面
                 </Button>
               <Button variant="outline" size="sm" onClick={addBox} disabled={busy}>
                 <Plus className="h-3.5 w-3.5" />

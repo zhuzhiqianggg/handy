@@ -352,7 +352,9 @@ function BackupSection(): React.JSX.Element {
     <div className="flex flex-col py-3">
       <div className="mb-2 rounded-md border border-border bg-muted/30 px-3 py-2 text-[11px] leading-5 text-muted-foreground">
         备份内容：数据库（便签 / 待办 / 整理计划）与应用配置。导出位置与导入来源
-        均由你在弹出的目录选择框中指定；导入会**覆盖现有数据**，并在重启应用后生效。
+        均由你在弹出的目录选择框中指定；导入会
+        <span className="font-medium text-foreground">覆盖现有数据</span>
+        ，并在重启应用后生效。
       </div>
       <div className="flex items-center gap-2">
         <Button

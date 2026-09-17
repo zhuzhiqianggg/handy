@@ -167,6 +167,9 @@ pub struct GridBox {
     pub content: String,
     /// 配色键（`''` = 默认色）。V35 引入：多个便签并存时需要一眼分清谁是谁。
     pub accent: String,
+    /// 归类类别（`''` = 纯手动，不参与自动归类）。V37 引入：自动归类要认出
+    /// 「哪个格子收文档、哪个收图片」，靠格子名匹配的话用户一改名就失联。
+    pub category: String,
     pub pos_x: i64,
     pub pos_y: i64,
     pub width: i64,
@@ -217,8 +220,8 @@ fn now_iso() -> String {
 }
 
 /// 盒子列前缀（别名 `b`）。
-const BOX_COLUMNS: &str = "b.id, b.name, b.kind, b.content, b.accent, b.pos_x, b.pos_y, b.width, \
-                           b.height, b.sort, b.created_at, b.updated_at";
+const BOX_COLUMNS: &str = "b.id, b.name, b.kind, b.content, b.accent, b.category, b.pos_x, b.pos_y, \
+                           b.width, b.height, b.sort, b.created_at, b.updated_at";
 
 /// 行 → 盒子实体（SQL 必须附带 `item_count` 计数列）。
 fn row_to_box_with_count(row: &Row) -> rusqlite::Result<GridBox> {
@@ -228,6 +231,7 @@ fn row_to_box_with_count(row: &Row) -> rusqlite::Result<GridBox> {
         kind: row.get("kind")?,
         content: row.get("content")?,
         accent: row.get("accent")?,
+        category: row.get("category")?,
         pos_x: row.get("pos_x")?,
         pos_y: row.get("pos_y")?,
         width: row.get("width")?,
@@ -367,7 +371,27 @@ fn list_dir_items(dir: &Path) -> Vec<(String, String)> {
 }
 
 /// 冲突安全移动：目标同名时自动追加 ` (2)`、` (3)` …，**绝不覆盖**。
+///
+/// ⚠️ 函数体开头有一道「目标不在源之内」的闸 —— 见 [`is_storage_entry`] 里记的那次
+/// 事故：漏掉这道闸，一次误操作就能在磁盘上炸出几百层嵌套、上百 GB 的副本。
 fn move_with_conflict_rename(src: &Path, dest_dir: &Path) -> Result<PathBuf, String> {
+    // —— 血案防线（V37 立）——
+    // 把目录移进它自己的子目录时，`fs::rename` 必然失败，随后会走到「递归复制 + 删源」
+    // 的兜底路径：`copy_dir_recursive` 先 `create_dir_all(dest)` 再遍历源，而 dest 就在源
+    // 内部 ⇒ 遍历会看见刚建出的目标并继续递归，一次调用就无限自我复制（磁盘取证：
+    // `桌面\Handy整理\新格子 1\Handy整理\新格子 1\…` 重复约 1000 次、路径 7082 字符、
+    // 5 份副本共 296 GB）。必须在**任何**磁盘操作之前拦下。
+    if src.is_dir() {
+        let src_norm = normalize_path(src);
+        let dest_norm = normalize_path(dest_dir);
+        if dest_norm == src_norm || dest_norm.starts_with(&src_norm) {
+            return Err(format!(
+                "拒绝把目录移动到它自己里面（{} → {}）",
+                src.display(),
+                dest_dir.display()
+            ));
+        }
+    }
     let file_name = src
         .file_name()
         .ok_or_else(|| format!("无法从路径取文件名：{}", src.display()))?
@@ -453,54 +477,79 @@ fn list_registry_items(conn: &Connection, box_id: i64) -> Result<Vec<GridItem>, 
     Ok(items)
 }
 
-/// 按磁盘目录对账某个收纳格：补齐新出现的文件、清掉已消失的登记，返回对账结果。
+/// 某格子的条目列表（引用模型：**登记是真相，磁盘只做存在性校验**）。
 ///
-/// 真相在磁盘目录，`grid_items` 只是给前端提供稳定 id 的登记缓存。
-/// 非 `folder` 类型的格子（便签 / 日历 / 系统）不绑目录，直接返回登记行。
-fn reconcile_box(
+/// V37 起不再「按磁盘目录对账」—— 格子不再拥有目录，条目就是桌面上某个文件的引用。
+/// 文件被用户在资源管理器里删掉 / 改名后登记会失效，这里直接过滤并清行，
+/// 免得格子里留一个点不动的幽灵图标。
+fn list_live_items(conn: &Connection, box_id: i64) -> Result<Vec<GridItem>, String> {
+    let registered = list_registry_items(conn, box_id)?;
+    let mut live = Vec::with_capacity(registered.len());
+    let mut pruned: Vec<i64> = Vec::new();
+    for item in registered {
+        if Path::new(&item.file_path).exists() {
+            live.push(item);
+        } else {
+            pruned.push(item.id);
+        }
+    }
+    for id in pruned {
+        conn.execute("DELETE FROM grid_items WHERE id = ?1", params![id])
+            .map_err(|err| format!("清理失效条目失败：{err}"))?;
+    }
+    Ok(live)
+}
+
+/// 把某个**已存在**的路径登记进某格子（幂等）。**不移动任何文件** —— 这是 V37 引用模型
+/// 唯一的写入通道，自动归类与手动拖入都走它。
+///
+/// 返回 `Ok(true)` = 新增了一条登记；`Ok(false)` = 按规则跳过（已有 / 用户说过不要 /
+/// 已归属别的格子）。跳过不是错误，所以不进 `failures`。
+fn register_item(
     conn: &Connection,
     box_id: i64,
-    box_name: &str,
-    kind: &str,
-    root: &Path,
-) -> Result<Vec<GridItem>, String> {
-    if kind != "folder" {
-        return list_registry_items(conn, box_id);
-    }
-    let dir = box_dir(root, box_name);
-    ensure_dir(&dir)?;
-    let on_disk = list_dir_items(&dir);
-    let disk_paths: std::collections::HashSet<String> =
-        on_disk.iter().map(|(path, _)| path.clone()).collect();
-
-    let registered = list_registry_items(conn, box_id)?;
-    // 清理：登记还在、磁盘上没了 → 删登记
-    for item in &registered {
-        if !disk_paths.contains(&item.file_path) {
-            conn.execute("DELETE FROM grid_items WHERE id = ?1", params![item.id])
-                .map_err(|err| format!("清理失效条目失败：{err}"))?;
-        }
-    }
-    // 补齐：磁盘上有、登记里没有 → 补登记（例如用户在资源管理器里手工拖进去的）
-    let known: std::collections::HashSet<String> = registered
-        .iter()
-        .filter(|item| disk_paths.contains(&item.file_path))
-        .map(|item| item.file_path.clone())
-        .collect();
-    let mut sort = registered.iter().map(|item| item.sort).max().unwrap_or(0);
-    for (path, name) in &on_disk {
-        if known.contains(path) {
-            continue;
-        }
-        sort += 1;
-        conn.execute(
-            "INSERT OR IGNORE INTO grid_items (box_id, file_path, display_name, sort, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![box_id, path, name, sort, now_iso()],
+    path: &Path,
+    display: &str,
+) -> Result<bool, String> {
+    let stored = path.to_string_lossy().to_string();
+    let exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM grid_items WHERE box_id = ?1 AND file_path = ?2",
+            params![box_id, stored],
+            |row| row.get(0),
         )
-        .map_err(|err| format!("登记收纳条目失败：{err}"))?;
+        .map_err(|err| format!("检查登记失败：{err}"))?;
+    if exists > 0 {
+        return Ok(false);
     }
-    list_registry_items(conn, box_id)
+    // 用户明确说过「不要它」→ 尊重用户，自动归类不再加回来
+    // （他重新拖进格子时会走 `clear_dismissed` 解禁）
+    if read_dismissed(conn)?.contains(&stored) {
+        return Ok(false);
+    }
+    // 归属唯一：已经在别的格子里的，不重复登记（用户想换位置应该拖动它）
+    let elsewhere: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM grid_items WHERE file_path = ?1",
+            params![stored],
+            |row| row.get(0),
+        )
+        .map_err(|err| format!("检查归属失败：{err}"))?;
+    if elsewhere > 0 {
+        return Ok(false);
+    }
+    let sort = next_sort(
+        conn,
+        "SELECT COALESCE(MAX(sort) + 1, 0) FROM grid_items WHERE box_id = ?1",
+        Some(box_id),
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO grid_items (box_id, file_path, display_name, sort, created_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![box_id, stored, display, sort, now_iso()],
+    )
+    .map_err(|err| format!("登记条目失败：{err}"))?;
+    Ok(true)
 }
 
 /// 格子类型白名单：未知值一律回落成收纳格（`folder`），不制造半残数据。
@@ -627,24 +676,9 @@ pub async fn grid_box_upsert(
             load_box(&app, conn.last_insert_rowid())
         }
         Some(id) => {
-            // 重命名收纳格时**目录要跟着改名**，否则格子会指向一个凭空新建的空目录
-            // （用户会看到「改个名字文件全没了」）。目标目录已存在则不动磁盘，只改名。
-            if let Some(raw_name) = name.clone() {
-                let next_name = clean_name(Some(raw_name));
-                if let Ok(previous) = load_box(&app, id) {
-                    if previous.kind == "folder" && previous.name != next_name {
-                        if let Ok(root) = storage_root() {
-                            let from = box_dir(&root, &previous.name);
-                            let to = box_dir(&root, &next_name);
-                            if from.is_dir() && !to.exists() {
-                                std::fs::rename(&from, &to).map_err(|err| {
-                                    format!("重命名收纳目录失败（{} → {}）：{err}", from.display(), to.display())
-                                })?;
-                            }
-                        }
-                    }
-                }
-            }
+            // V37：格子不再绑定磁盘目录，改名就只是改个名字 —— 早期这里会连带
+            // `fs::rename` 收纳目录，那属于「动用户文件」的一部分，随收纳模型一并移除。
+            //
             // 动态 SET：只更新显式传入的字段
             let mut sets: Vec<&'static str> = Vec::new();
             let mut values: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -752,13 +786,19 @@ pub async fn grid_box_set_content(
     Ok(())
 }
 
-// —— 条目 CRUD（真实收纳：文件真的会在收纳目录里进出） ——
+// —— 条目 CRUD（V37 呈现层：只是「哪个文件显示在哪个格子里」的登记，
+//    三个写入口都不会对磁盘做任何增删改） ——
 
-/// 把文件放进某个收纳格 = **真的把文件移进**该格子的收纳目录。
+/// 把文件登记进某个收纳格 —— **只登记，文件一个字节都不动**（V37 起）。
 ///
-/// - 目标同名**绝不覆盖**，冲突自动改名（`名称 (2).扩展名`）；
-/// - 文件已在收纳目录内 → 明确报错，不做无意义搬运；
-/// - 跨卷移动自动退化成「复制 + 删除源」，失败时中文错误说明是哪一步失败。
+/// V33–V36 走的是「真实收纳」：把文件 `fs::rename` 进 `桌面/Handy整理/<格子名>/`。
+/// 用户装机实测后明确否掉了这个模型 ——「是桌面整理，不是让你把桌面上的东西都给我移动
+/// 到一个目录下面去」。于是回到真正桌面工具的语义：**文件永远留在原处，格子只是桌面上
+/// 这批图标的呈现层**（腾讯桌面整理就是这个行为）。
+///
+/// - 同一文件已在别的格子 → 视作「把它挪到这儿」，只改归属，不新增登记；
+/// - `Handy整理*` 目录本身永远不许进格子（V36 事故的入口之一）；
+/// - 登记前清掉该路径在「不要它」名单里的记录（用户重新拖进来就是改主意了）。
 #[tauri::command]
 pub async fn grid_item_add(
     app: AppHandle,
@@ -774,39 +814,65 @@ pub async fn grid_item_add(
     if !source.exists() {
         return Err(format!("文件不存在：{raw}"));
     }
+    if let Some(name) = source.file_name().and_then(|value| value.to_str()) {
+        if is_storage_entry(name) {
+            return Err("这是 Handy 自己的收纳目录，不能放进格子".to_string());
+        }
+    }
     let entity = load_box(&app, box_id)?;
     if entity.kind != "folder" {
         return Err("该格子不是收纳格，不能放文件".to_string());
     }
-    let root = storage_root()?;
-    let dir = box_dir(&root, &entity.name);
-    ensure_dir(&dir)?;
-    if source.parent().map(|parent| parent == dir.as_path()).unwrap_or(false) {
-        return Err("该文件已经在格子里了".to_string());
-    }
-
-    let moved = move_with_conflict_rename(&source, &dir)?;
-    let moved_path = moved.to_string_lossy().to_string();
+    let stored = source.to_string_lossy().to_string();
+    let conn = connect(&app)?;
     let display = match display_name {
         Some(value) if !value.trim().is_empty() => value.trim().to_string(),
-        _ => moved
+        _ => source
             .file_name()
             .map(|name| name.to_string_lossy().to_string())
-            .unwrap_or_else(|| moved_path.clone()),
+            .unwrap_or_else(|| stored.clone()),
     };
+    clear_dismissed(&conn, &stored)?;
 
-    let conn = connect(&app)?;
-    // 并发/重复拖放的兜底：登记已存在则直接返回既有行
-    let existing = conn
+    // 已在某个格子里（含本格）→ 只改归属，不新增登记
+    if let Some((item_id, current_box)) = conn
         .query_row(
-            "SELECT id, box_id, file_path, display_name, sort, created_at \
-             FROM grid_items WHERE box_id = ?1 AND file_path = ?2",
-            params![box_id, moved_path],
-            row_to_item,
+            "SELECT id, box_id FROM grid_items WHERE file_path = ?1",
+            params![stored],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
         )
-        .ok();
-    if let Some(item) = existing {
-        return Ok(item);
+        .ok()
+    {
+        if current_box != box_id {
+            // 目标格若已有同路径的陈旧登记，先清掉，避免同一文件在目标格出现两行
+            conn.execute(
+                "DELETE FROM grid_items WHERE box_id = ?1 AND file_path = ?2",
+                params![box_id, stored],
+            )
+            .map_err(|err| format!("更新条目归属失败：{err}"))?;
+            let sort = next_sort(
+                &conn,
+                "SELECT COALESCE(MAX(sort) + 1, 0) FROM grid_items WHERE box_id = ?1",
+                Some(box_id),
+            )?;
+            conn.execute(
+                "UPDATE grid_items SET box_id = ?1, sort = ?2, display_name = ?3 WHERE id = ?4",
+                params![box_id, sort, display, item_id],
+            )
+            .map_err(|err| format!("更新条目归属失败：{err}"))?;
+            grid_log(&format!(
+                "条目「{display}」改归属到格子「{}」（文件未移动）",
+                entity.name
+            ));
+        }
+        return conn
+            .query_row(
+                "SELECT id, box_id, file_path, display_name, sort, created_at \
+                 FROM grid_items WHERE id = ?1",
+                params![item_id],
+                row_to_item,
+            )
+            .map_err(|err| format!("读取条目失败：{err}"));
     }
 
     let sort = next_sort(
@@ -818,24 +884,30 @@ pub async fn grid_item_add(
     conn.execute(
         "INSERT INTO grid_items (box_id, file_path, display_name, sort, created_at) \
          VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![box_id, moved_path, display, sort, created],
+        params![box_id, stored, display, sort, created],
     )
     .map_err(|err| format!("登记收纳条目失败：{err}"))?;
+    grid_log(&format!(
+        "登记「{display}」到格子「{}」（文件留在 {stored}，未移动）",
+        entity.name
+    ));
 
     Ok(GridItem {
         id: conn.last_insert_rowid(),
         box_id,
-        file_path: moved_path,
+        file_path: stored,
         display_name: display,
         sort,
         created_at: created,
     })
 }
 
-/// 把条目移出格子：**文件移回桌面根目录**（不是删除），随后清掉登记。
+/// 把条目移出格子 —— **只删登记，文件原位不动、更不删除**（V37 起）。
 ///
-/// `dismiss` 是旧版前端参数（曾经表示「不再自动收录」），V33 起自动收录已取消，
-/// 该参数不再使用 —— 保留形参以免旧调用报「参数不匹配」。
+/// 同时把路径记入「不要它」名单：否则下一次自动归类又会把它塞回同一个格子，
+/// 用户看到的是「点了 × 却怎么都去不掉」。
+///
+/// `dismiss` 是旧版前端参数（曾经表示「不再自动收录」），保留形参以免旧调用报错。
 #[tauri::command]
 pub async fn grid_item_delete(
     app: AppHandle,
@@ -851,22 +923,11 @@ pub async fn grid_item_delete(
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(|_| "挂件条目不存在或已被删除".to_string())?;
-
     let entity = load_box(&app, box_id)?;
-    if entity.kind == "folder" {
-        // 收纳格：把文件搬回桌面根目录（不是删除）
-        let source = PathBuf::from(&path);
-        if source.exists() {
-            let desktop = desktop_root()?;
-            move_with_conflict_rename(&source, &desktop)?;
-        }
-    } else {
-        // 虚拟条目（系统格子里的此电脑 / 回收站等）：记入「用户不要它」名单，
-        // 否则每次对账都会被 ensure_system_box 重新塞回来
-        let mut set = read_dismissed(&conn)?;
-        set.insert(path.clone());
-        let _ = write_dismissed(&conn, &set);
-    }
+
+    let mut set = read_dismissed(&conn)?;
+    set.insert(path.clone());
+    let _ = write_dismissed(&conn, &set);
 
     let affected = conn
         .execute("DELETE FROM grid_items WHERE id = ?1", params![item_id])
@@ -874,10 +935,18 @@ pub async fn grid_item_delete(
     if affected == 0 {
         return Err("挂件条目不存在或已被删除".to_string());
     }
+    let short = Path::new(&path)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.clone());
+    grid_log(&format!(
+        "从格子「{}」移出「{short}」（文件未删除，仍在 {path}）",
+        entity.name
+    ));
     Ok(())
 }
 
-/// 移动条目到另一个格子 = **真的把文件移到目标格子的收纳目录**。
+/// 把一个条目挪到另一个格子 —— **只改归属，文件原位不动**（V37 起）。
 #[tauri::command]
 pub async fn grid_item_move(
     app: AppHandle,
@@ -896,39 +965,39 @@ pub async fn grid_item_move(
     if target.kind != "folder" {
         return Err("目标不是收纳格，不能放文件".to_string());
     }
-    let root = storage_root()?;
-    let dir = box_dir(&root, &target.name);
-    ensure_dir(&dir)?;
-
-    let source = PathBuf::from(&path);
-    if !source.exists() {
-        return Err("源文件已不存在（可能已被移动或删除）".to_string());
-    }
-    if source.parent().map(|parent| parent == dir.as_path()).unwrap_or(false) {
-        return Ok(()); // 已在目标目录里，无需搬运
-    }
-    let moved = move_with_conflict_rename(&source, &dir)?;
-    let moved_path = moved.to_string_lossy().to_string();
-    let display = moved
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .unwrap_or_else(|| moved_path.clone());
-
+    // 目标格若已有同路径的陈旧登记 → 先删掉，避免同一文件在目标格出现两行
     conn.execute(
-        "UPDATE grid_items SET box_id = ?1, file_path = ?2, display_name = ?3 WHERE id = ?4",
-        params![target_box_id, moved_path, display, item_id],
+        "DELETE FROM grid_items WHERE box_id = ?1 AND file_path = ?2 AND id <> ?3",
+        params![target_box_id, path, item_id],
+    )
+    .map_err(|err| format!("整理目标格子失败：{err}"))?;
+    let sort = next_sort(
+        &conn,
+        "SELECT COALESCE(MAX(sort) + 1, 0) FROM grid_items WHERE box_id = ?1",
+        Some(target_box_id),
+    )?;
+    conn.execute(
+        "UPDATE grid_items SET box_id = ?1, sort = ?2 WHERE id = ?3",
+        params![target_box_id, sort, item_id],
     )
     .map_err(|err| format!("更新收纳条目失败：{err}"))?;
+    let short = Path::new(&path)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.clone());
+    grid_log(&format!(
+        "条目「{short}」改归属到格子「{}」（文件未移动）",
+        target.name
+    ));
     Ok(())
 }
 
-/// 某盒子的条目列表。收纳格按磁盘目录对账后返回；其它类型直接返回登记行。
+/// 某格子的条目列表（引用模型：登记为真相，磁盘只做存在性校验）。
 #[tauri::command]
 pub async fn grid_item_list(app: AppHandle, box_id: i64) -> Result<Vec<GridItem>, String> {
     let conn = connect(&app)?;
     let entity = load_box(&app, box_id)?;
-    let root = storage_root()?;
-    reconcile_box(&conn, entity.id, &entity.name, &entity.kind, &root)
+    list_live_items(&conn, entity.id)
 }
 
 // —— 挂件窗几何 ——
@@ -1624,6 +1693,18 @@ fn write_dismissed(
     Ok(())
 }
 
+/// 把某个路径从「不要它」名单里去掉。
+///
+/// 用户把它重新拖进格子 = 改主意了；不清掉这一条，下次自动归类又会绕开它，
+/// 表现为「我明明放进去了，一刷新又没了」。
+fn clear_dismissed(conn: &Connection, path: &str) -> Result<(), String> {
+    let mut set = read_dismissed(conn)?;
+    if set.remove(path) {
+        write_dismissed(conn, &set)?;
+    }
+    Ok(())
+}
+
 /// 退出 / 启动时无条件恢复桌面系统图标（避免「图标被藏住但应用没了」的尴尬）。
 pub fn restore_desktop_icons() {
     let _ = desktop_icons_apply(false);
@@ -2106,24 +2187,45 @@ fn unix_secs() -> u64 {
 ///
 /// 现场排查只能靠文件：贴桌面层的窗口行为受第三方桌面工具影响很大，用户说
 /// 「闪一下没了」时，只有日志能区分是「Z 序反复重排」「自动重建」还是「前端白屏」。
+/// 挂件层日志 —— 统一转发到 [`crate::logging`]（`%LOCALAPPDATA%\Handy\handy.log`）。
+///
+/// V37 之前日志写 `grid-debug.log`，且**只记窗口问题、写操作一行都不留** ——
+/// V36 那次「桌面文件被复制成 5 份」因此只能靠事后翻磁盘才查清。现在统一一处，
+/// 且每个会碰磁盘的命令都必须留痕（见各 `grid_item_*` / `grid_legacy_*`）。
 fn grid_log(message: &str) {
-    use std::io::Write;
-    let Some(base) = dirs::data_local_dir() else {
-        println!("[Handy][挂件] {message}");
-        return;
-    };
-    let dir = base.join("Handy");
-    let _ = std::fs::create_dir_all(&dir);
-    let path = dir.join("grid-debug.log");
-    let line = format!("[{}] {message}\n", now_iso());
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        let _ = file.write_all(line.as_bytes());
+    crate::logging::write_line("grid", message);
+}
+
+/// 这个文件名是不是 Handy 自己的收纳容器？
+///
+/// V36 血案：`桌面/Handy整理` 被当成普通文件夹参与了一次收纳 —— `fs::rename` 想把它
+/// 移进自己的子目录，必然失败；随后退化成「递归复制 + 删除源」，在磁盘上炸出
+/// **704 层嵌套、5 份共约 195 GB** 的副本。
+///
+/// 判据用「名字前缀」而不是「路径相等」：V33 写的是 `item.path == storage_key`，
+/// 而归一化路径在 Windows 上受短名（`ADMINI~1`）、大小写、`\\?\` 前缀影响，
+/// 字符串比较太容易漏 —— 一漏就是上面那种量级的破坏。
+fn is_storage_entry(name: &str) -> bool {
+    name.starts_with(STORAGE_ROOT_NAME) || name.starts_with(LEGACY_STORAGE_ROOT_NAME)
+}
+
+/// 尽力把路径规范化成可比较的形式（绝对路径 + 解析短名 / 大小写 / 软链）。
+///
+/// 用于「目标是不是落在源目录里面」这类安全判断 —— 目标目录**可能还不存在**
+/// （正是要创建它），此时 `canonicalize` 会失败，于是退化成「规范化父目录 + 拼文件名」，
+/// 逐级向上直到某个确实存在的祖先。
+fn normalize_path(path: &Path) -> PathBuf {
+    if let Ok(done) = std::fs::canonicalize(path) {
+        return done;
     }
-    println!("[Handy][挂件] {message}");
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => {
+            let mut base = normalize_path(parent);
+            base.push(name);
+            base
+        }
+        _ => path.to_path_buf(),
+    }
 }
 
 /// 记录当前时间为中心跳基线。
@@ -2341,11 +2443,15 @@ fn arrange_group_rank(name: &str) -> i64 {
     }
 }
 
-/// 一键收纳核心（连接与桌面目录由调用方给定）。
+/// 一键归类核心（连接与桌面目录由调用方给定）。
 ///
-/// V33 起重写为**真移动**；V34 两处修正：
-///   - **文件夹纳入收纳**（只留 `.lnk` 不动）：用户实测「文件夹的整理根本都不生效」，
-///     根因就是这里把 `is_dir` 整个跳过 —— 「文件夹」格因此永远是空的；
+/// V37 起重写为**只登记、不移动**：
+///   - 用户否掉了 V33–V36 的「真实收纳」——「是桌面整理不是让你把桌面上的东西都给我
+///     移动到一个目录下面去」。现在扫到的条目只是在格子里**登记一条引用**，
+///     文件本体一个字节都不动；
+///   - **文件夹照样归类**（只跳过 `.lnk`）：用户实测「文件夹的整理根本都不生效」，
+///     根因是早期这里把 `is_dir` 整个跳过 —— 「文件夹」格因此永远是空的；
+///   - **自己的收纳容器永不参与**：见 [`is_storage_entry`]（V36 那次 195 GB 事故）；
 ///   - **靠右自动流排布**：新格子从工作区右边缘起、自右往左推进（见 [`arrange_position`]）。
 ///
 /// `work_width` 是工作区（挂件窗）的逻辑宽度，用于算右对齐落点；<= 0 时退回 1280。
@@ -2359,10 +2465,6 @@ fn auto_arrange_inner(
     let width = if work_width > 0 { work_width } else { 1280 };
     let scanned = crate::commands::organizer::scan_items(desktop)?;
     let total_scanned = scanned.len();
-    let storage = storage_root()?;
-    ensure_dir(&storage)?;
-    // 收纳根目录自己绝不能被搬进自己（`桌面/Handy整理` 也可能被 scan_items 扫到）
-    let storage_key = storage.to_string_lossy().to_string();
 
     // 已有格子：名称 → id；`occupied` 记录已占用的排布槽位，新格子往后排
     let mut existing: HashMap<String, i64> = HashMap::new();
@@ -2386,7 +2488,8 @@ fn auto_arrange_inner(
     // 按类别分组（**只跳过快捷方式**；文件夹归「文件夹」组）
     let mut grouped: Vec<(String, Vec<usize>)> = Vec::new();
     for (index, item) in scanned.iter().enumerate() {
-        if item.is_lnk || item.path == storage_key {
+        // `.lnk` 按用户要求不动；自己的收纳容器永不参与（V36 事故根源）
+        if item.is_lnk || is_storage_entry(&item.name) {
             continue;
         }
         let key = arrange_group_of(item);
@@ -2412,9 +2515,6 @@ fn auto_arrange_inner(
         if indices.is_empty() {
             continue;
         }
-        let dir = box_dir(&storage, &label);
-        ensure_dir(&dir)?;
-
         let box_id: i64 = match existing.get(&label) {
             Some(id) => {
                 report.boxes_reused += 1;
@@ -2431,9 +2531,10 @@ fn auto_arrange_inner(
                 )?;
                 conn.execute(
                     "INSERT INTO grid_boxes \
-                     (name, kind, pos_x, pos_y, width, height, sort, created_at, updated_at) \
-                     VALUES (?1, 'folder', ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                     (name, kind, category, pos_x, pos_y, width, height, sort, created_at, updated_at) \
+                     VALUES (?1, 'folder', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                     params![
+                        label,
                         label,
                         pos_x,
                         pos_y,
@@ -2457,22 +2558,29 @@ fn auto_arrange_inner(
             let Some(item) = scanned.get(index) else {
                 continue;
             };
-            let source = Path::new(&item.path);
-            match move_with_conflict_rename(source, &dir) {
-                Ok(_) => {
+            // 只登记引用 —— 文件留在桌面原处，一个字节都不动
+            match register_item(conn, box_id, Path::new(&item.path), &item.name) {
+                Ok(true) => {
                     report.items_added += 1;
                     if item.is_dir {
                         report.folders_moved += 1;
                     }
                 }
+                Ok(false) => {}
                 Err(err) => report.failures.push(format!("{}：{err}", item.name)),
             }
         }
-
-        // 移动完成后按目录对账 → 登记表与磁盘严格一致
-        reconcile_box(conn, box_id, &label, "folder", &storage)?;
     }
 
+    grid_log(&format!(
+        "一键归类：扫到 {} 项，登记 {} 项（文件全部原地未动），跳过 {} 个快捷方式，格子新建 {} / 复用 {}，失败 {}",
+        report.scanned,
+        report.items_added,
+        report.skipped,
+        report.boxes_created,
+        report.boxes_reused,
+        report.failures.len()
+    ));
     Ok(report)
 }
 
@@ -2519,19 +2627,13 @@ pub async fn grid_auto_arrange(
 /// 对账全部收纳格：按磁盘目录补齐新出现的文件、清掉已消失的登记。
 ///
 /// 返回 `(参与对账的收纳格数, 补登记数, 清理数)`。
-fn reconcile_all_boxes(conn: &Connection, root: &Path) -> Result<(usize, usize, usize), String> {
-    let boxes: Vec<(i64, String, String)> = {
+fn reconcile_all_boxes(conn: &Connection) -> Result<(usize, usize, usize), String> {
+    let boxes: Vec<i64> = {
         let mut stmt = conn
-            .prepare("SELECT id, name, kind FROM grid_boxes ORDER BY sort ASC, id ASC")
+            .prepare("SELECT id FROM grid_boxes ORDER BY sort ASC, id ASC")
             .map_err(|err| format!("读取格子失败：{err}"))?;
         let mapped = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })
+            .query_map([], |row| row.get::<_, i64>(0))
             .map_err(|err| format!("读取格子失败：{err}"))?;
         mapped
             .collect::<Result<Vec<_>, _>>()
@@ -2539,22 +2641,20 @@ fn reconcile_all_boxes(conn: &Connection, root: &Path) -> Result<(usize, usize, 
     };
 
     let mut counted = 0usize;
-    let mut added = 0usize;
     let mut pruned = 0usize;
-    for (box_id, name, kind) in boxes {
-        if kind != "folder" {
-            continue;
-        }
+    for box_id in boxes {
         counted += 1;
-        let before = list_registry_items(conn, box_id)?.len();
-        let after = reconcile_box(conn, box_id, &name, &kind, root)?.len();
-        if after >= before {
-            added += after - before;
-        } else {
-            pruned += before - after;
-        }
+        let before: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM grid_items WHERE box_id = ?1",
+                params![box_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        let live = list_live_items(conn, box_id)?.len();
+        pruned += (before.max(0) as usize).saturating_sub(live);
     }
-    Ok((counted, added, pruned))
+    Ok((counted, 0, pruned))
 }
 
 /// 桌面同步报告（V33 起 sync = **只对账，不收录**）。
@@ -2697,6 +2797,14 @@ fn shell_icon_handle(path: &str) -> Option<windows::Win32::UI::WindowsAndMessagi
         )
     };
     if info_ok != 0 {
+        // 用户把桌面图标调大过（Ctrl+滚轮）时 48 那档会被拉糊 —— 那就先取 256 那档。
+        // 只在确有必要时才要 JUMBO：256×256 RGBA 转 base64 约 350 KB，一个格子
+        // 二十个图标就是 7 MB，白白拖慢首屏（用户 V37 反馈「图标应该跟桌面一样大」）。
+        if desktop_icon_size_cached() > 64 {
+            if let Some(icon) = image_list_icon(sfi.iIcon, SHIL_JUMBO) {
+                return Some(icon);
+            }
+        }
         if let Some(icon) = image_list_icon(sfi.iIcon, SHIL_EXTRALARGE) {
             return Some(icon);
         }
@@ -2722,6 +2830,13 @@ fn shell_icon_handle(path: &str) -> Option<windows::Win32::UI::WindowsAndMessagi
 /// `SHIL_EXTRALARGE`：系统图像列表里 48×48 的那一档（`SHGetImageList` 的索引值）。
 #[cfg(target_os = "windows")]
 const SHIL_EXTRALARGE: i32 = 2;
+
+/// `SHIL_JUMBO`：系统图像列表里 256×256 的那一档（Vista 起可用）。
+///
+/// 只有当系统桌面图标尺寸被调大到 > 64px 时才值得取它 —— 否则纯属浪费带宽
+/// （见 [`shell_icon_handle`] 的说明）。
+#[cfg(target_os = "windows")]
+const SHIL_JUMBO: i32 = 4;
 
 /// 从系统图像列表取出第 `index` 个图标。
 ///
@@ -2855,9 +2970,8 @@ fn icon_to_rgba(hicon: windows::Win32::UI::WindowsAndMessaging::HICON) -> Option
 /// 想批量收纳桌面文件，走显式的「一键收纳」（`grid_auto_arrange`），它**真移动**文件。
 #[tauri::command]
 pub async fn grid_desktop_sync(app: AppHandle) -> Result<DesktopSyncReport, String> {
-    let root = storage_root()?;
     let conn = connect(&app)?;
-    let (boxes, added, pruned) = reconcile_all_boxes(&conn, &root)?;
+    let (boxes, added, pruned) = reconcile_all_boxes(&conn)?;
     Ok(DesktopSyncReport {
         boxes,
         items_added: added,
@@ -3229,6 +3343,453 @@ pub async fn grid_layout_delete(app: AppHandle, snapshot_id: String) -> Result<(
 /// 而且它的失效方式特别隐蔽：判据错了不会报错，只会「每秒重排一次」——
 /// 用户看到的是「格子一直闪、有时又出来」，代码里看不出任何异常。
 /// 所以这里把判据的**语义**钉住，改的时候必须让这些断言仍然成立。
+// —— V37：遗留收纳目录的还原与清理 ——
+//
+// V33–V36 的「真实收纳」把用户的桌面文件搬进了 `桌面/Handy整理/<容器>/`；V36 那次
+// 事故还在桌面上留下 4 个副本（合计约 195 GB、最深 704 层 / 4961 字符路径）。
+// 收纳模型既然已经改回「引用」，这些残留就必须能安全地撤回桌面 —— 而且**先给用户看清
+// 将要发生什么**（`dry_run`），再动手。
+
+/// 一个遗留收纳根目录的概况（还原前的预览用）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyRootInfo {
+    /// 目录名（`Handy整理` / `Handy整理 (2)` …）
+    pub name: String,
+    /// 绝对路径
+    pub path: String,
+    /// 将被上提回桌面的条目数（第一层容器的直接子项）
+    pub entries: usize,
+    /// 目录内条目总数（含嵌套垃圾，用于展示规模）
+    pub total_entries: usize,
+    /// 其中「自己套自己」的嵌套垃圾条目数
+    pub nested_entries: usize,
+    /// 占用字节数
+    pub bytes: u64,
+    /// 是否因条目上限被截断（真 ⇒ `total_entries` / `nested_entries` / `bytes` 都是**下界**）
+    pub truncated: bool,
+}
+
+/// 还原报告。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReclaimReport {
+    /// 上提回桌面的条目数
+    pub moved: usize,
+    /// 因桌面已有同名而跳过的条目数
+    pub skipped: usize,
+    /// 失败的条目（名称 + 原因）
+    pub failures: Vec<String>,
+    /// 处理过的遗留目录数
+    pub roots: usize,
+    /// 是否只是预演（true = 没动任何文件）
+    pub dry_run: bool,
+}
+
+/// 清理报告。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanupReport {
+    /// 已删除（或预演将删除）的遗留目录数
+    pub removed: usize,
+    /// 释放（或预计释放）的字节数
+    pub freed_bytes: u64,
+    /// 因「还有条目没撤回桌面」而放弃删除的目录
+    pub skipped: Vec<String>,
+    /// 删除失败的目录
+    pub failures: Vec<String>,
+    /// 是否只是预演
+    pub dry_run: bool,
+}
+
+/// 列出桌面上的遗留收纳目录（**只读**，不碰任何文件）。
+#[tauri::command]
+pub async fn grid_legacy_scan() -> Result<Vec<LegacyRootInfo>, String> {
+    let desktop = desktop_root()?;
+    Ok(scan_legacy_roots(&desktop))
+}
+
+/// 扫描桌面上的 `Handy整理*` / `Handy收纳*` 目录并统计。
+fn scan_legacy_roots(desktop: &Path) -> Vec<LegacyRootInfo> {
+    let Ok(entries) = std::fs::read_dir(desktop) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !is_storage_entry(&name) {
+            continue;
+        }
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let (total_entries, nested_entries, bytes, truncated) = walk_stats(&path);
+        out.push(LegacyRootInfo {
+            name,
+            path: path.to_string_lossy().to_string(),
+            entries: collect_reclaimable(&path).len(),
+            total_entries,
+            nested_entries,
+            bytes,
+            truncated,
+        });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+/// 收集某个遗留根里「该上提回桌面」的条目：`<容器>/<条目>` → 条目。
+///
+/// 容器本身是 Handy 建的（「文档」「图片」「新格子 3」…），用户的原始条目在它下面一层。
+/// 容器内若出现同名收纳容器，那是 V36 递归复制炸出来的垃圾，**不算条目**（交给清理）。
+fn collect_reclaimable(root: &Path) -> Vec<(String, PathBuf)> {
+    let mut out = Vec::new();
+    let Ok(containers) = std::fs::read_dir(root) else {
+        return out;
+    };
+    let mut sorted: Vec<std::fs::DirEntry> = containers.flatten().collect();
+    sorted.sort_by_key(|entry| entry.file_name());
+    for container in sorted {
+        let Ok(file_type) = container.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let Ok(kids) = std::fs::read_dir(container.path()) else {
+            continue;
+        };
+        for kid in kids.flatten() {
+            let name = kid.file_name().to_string_lossy().to_string();
+            if is_storage_entry(&name) {
+                continue; // 嵌套垃圾，不参与上提
+            }
+            out.push((name, kid.path()));
+        }
+    }
+    out
+}
+
+/// 单棵树最多统计多少条目 —— 事故现场实测 **129,714 条 / 296 GB**，全量走一遍要一到两分钟。
+///
+/// 而 `grid_legacy_scan` 是**打开格子管理页就自动跑**的（用户不会先点按钮再等），
+/// 一旦全量遍历，页面看起来就是「卡死」。所以必须封顶：超了就把 `truncated` 置真，
+/// 界面显示「≥ N」——用户要的结论是「确实还有巨量残留、该清理了」，不是精确到个位。
+const MAX_WALK_ENTRIES: usize = 10_000;
+
+/// 统计一棵树的 `(条目总数, 嵌套垃圾数, 字节数, 是否被上限截断)`。
+///
+/// 显式栈遍历，1001 层也不会爆栈（实测最深 1001 层 / 路径 7082 字符 —— 递归写法在这里必炸）。
+fn walk_stats(root: &Path) -> (usize, usize, u64, bool) {
+    let mut total = 0usize;
+    let mut nested = 0usize;
+    let mut bytes = 0u64;
+    let mut truncated = false;
+    let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
+    'outer: while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if total >= MAX_WALK_ENTRIES {
+                truncated = true;
+                break 'outer;
+            }
+            total += 1;
+            let name = entry.file_name().to_string_lossy().to_string();
+            if is_storage_entry(&name) {
+                nested += 1;
+            }
+            match entry.file_type() {
+                Ok(file_type) if file_type.is_dir() => stack.push(entry.path()),
+                Ok(_) => bytes += entry.metadata().map(|meta| meta.len()).unwrap_or(0),
+                Err(_) => {}
+            }
+        }
+    }
+    (total, nested, bytes, truncated)
+}
+
+/// 把遗留收纳目录里的条目**上提回桌面根**（文件只移动，**绝不删除**）。
+///
+/// 规则：`Handy整理/<容器>/<条目>` → `桌面/<条目>`。
+///
+/// - **桌面已有同名就跳过**：4 个副本的内容已验证是主目录的子集，跳过可避免把同一个
+///   文件搬回来两遍（也就不必让用户去清理一堆 `xxx (2)`）；
+/// - `dry_run = true`（默认）只统计不落盘，UI 先给用户看数字再执行；
+/// - 嵌套垃圾不参与上提，留给 [`grid_legacy_cleanup`] 整体删除。
+#[tauri::command]
+pub async fn grid_legacy_reclaim(dry_run: Option<bool>) -> Result<ReclaimReport, String> {
+    let dry = dry_run.unwrap_or(true);
+    let desktop = desktop_root()?;
+    let roots = scan_legacy_roots(&desktop);
+    let mut report = ReclaimReport {
+        moved: 0,
+        skipped: 0,
+        failures: Vec::new(),
+        roots: roots.len(),
+        dry_run: dry,
+    };
+    for info in &roots {
+        let root = PathBuf::from(&info.path);
+        for (name, path) in collect_reclaimable(&root) {
+            if desktop.join(&name).exists() {
+                report.skipped += 1;
+                continue;
+            }
+            if dry {
+                report.moved += 1;
+                continue;
+            }
+            match move_with_conflict_rename(&path, &desktop) {
+                Ok(_) => report.moved += 1,
+                Err(err) => report.failures.push(format!("{name}：{err}")),
+            }
+        }
+    }
+    if !dry {
+        grid_log(&format!(
+            "还原遗留收纳：上提 {} 项回桌面，跳过 {} 项（桌面已有同名），失败 {} 项",
+            report.moved,
+            report.skipped,
+            report.failures.len()
+        ));
+    }
+    Ok(report)
+}
+
+/// 删除遗留收纳目录（含最深 704 层的嵌套垃圾）。
+///
+/// ⚠️ 这是**真的删目录**，所以有两道闸：
+///   ① `dry_run` 默认 true，UI 必须先给用户看「删几个、释放多少」；
+///   ② 每个目录删除前检查：只要里面还有「桌面上找不到同名」的条目，就**跳过不删**并
+///      报出来 —— 宁可少删，也绝不允许把用户还没撤回的文件清掉。
+#[tauri::command]
+pub async fn grid_legacy_cleanup(dry_run: Option<bool>) -> Result<CleanupReport, String> {
+    let dry = dry_run.unwrap_or(true);
+    let desktop = desktop_root()?;
+    let roots = scan_legacy_roots(&desktop);
+    let mut report = CleanupReport {
+        removed: 0,
+        freed_bytes: 0,
+        skipped: Vec::new(),
+        failures: Vec::new(),
+        dry_run: dry,
+    };
+    for info in &roots {
+        let root = PathBuf::from(&info.path);
+        let leftovers: Vec<String> = collect_reclaimable(&root)
+            .into_iter()
+            .filter(|(name, _)| !desktop.join(name).exists())
+            .map(|(name, _)| name)
+            .collect();
+        if !leftovers.is_empty() {
+            report.skipped.push(format!(
+                "{}：还有 {} 个条目没撤回桌面（{}），已跳过",
+                info.name,
+                leftovers.len(),
+                leftovers.join("、")
+            ));
+            continue;
+        }
+        if dry {
+            report.removed += 1;
+            report.freed_bytes += info.bytes;
+            continue;
+        }
+        match remove_tree_deep(&root) {
+            Ok(()) => {
+                report.removed += 1;
+                report.freed_bytes += info.bytes;
+            }
+            Err(err) => report.failures.push(format!("{}：{err}", info.name)),
+        }
+    }
+    if !dry {
+        grid_log(&format!(
+            "清理遗留收纳目录：删除 {} 个，释放约 {} 字节，跳过 {} 个，失败 {} 个",
+            report.removed,
+            report.freed_bytes,
+            report.skipped.len(),
+            report.failures.len()
+        ));
+    }
+    Ok(report)
+}
+
+/// 删除一棵可能极深的目录树（事故造出过 **1001 层 / 7082 字符**的路径）。
+///
+/// 显式栈 + 后序删除：不递归（不会爆栈），每层都交给 `std::fs` 处理 —— Rust 在 Windows
+/// 上会为路径补 `\\?\` 前缀，因此超过 `MAX_PATH` 也能删。
+fn remove_tree_deep(root: &Path) -> Result<(), String> {
+    let mut pending: Vec<PathBuf> = vec![root.to_path_buf()];
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            // 读不动就交给后面的 remove_dir 报准确错误
+            dirs.push(dir);
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            match entry.file_type() {
+                Ok(file_type) if file_type.is_dir() => pending.push(path),
+                _ => std::fs::remove_file(&path)
+                    .map_err(|err| format!("删除文件失败（{}）：{err}", path.display()))?,
+            }
+        }
+        dirs.push(dir);
+    }
+    // 后序：`dirs` 里父在子之前，倒着删才是「先子后父」
+    for dir in dirs.into_iter().rev() {
+        std::fs::remove_dir(&dir)
+            .map_err(|err| format!("删除目录失败（{}）：{err}", dir.display()))?;
+    }
+    Ok(())
+}
+
+// —— V37：桌面图标度量（让格子内图标与系统桌面同样大小） ——
+
+/// 桌面图标的度量。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IconMetrics {
+    /// 图标边长（逻辑像素）
+    pub icon_size: i64,
+    /// 图标横向间距（逻辑像素；0 = 没读到，前端按比例推）
+    pub spacing: i64,
+    /// 值从哪来：`registry` / `control-panel` / `default`（排查用）
+    pub source: String,
+}
+
+/// 读系统桌面的图标尺寸，让格子内图标与原生桌面视觉一致。
+///
+/// 用户 V37 反馈「格子里面的图标大小应该跟正常桌面大小保持一致」。桌面图标尺寸存在
+/// `HKCU\Software\Microsoft\Windows\Shell\Bags\1\Desktop` 的 `IconSize`（用户按
+/// `Ctrl + 滚轮` 调桌面图标大小时 Windows 就改写它）。取不到再退到控制面板的
+/// `Shell Icon Size`（默认 32），仍然取不到用 48。
+///
+/// 用 `reg query` 而不是注册表 API：只读一次，不必为此新增 windows crate feature。
+#[tauri::command]
+pub async fn desktop_icon_metrics() -> Result<IconMetrics, String> {
+    use std::sync::atomic::Ordering;
+
+    // 冷启动时记一次：这个数字决定格子图标渲染多大，是「图标怎么跟我桌面不一样大」
+    // 这类反馈的**第一现场**。用户回传 handy.log 时能直接看到探测结果与来源。
+    let cold = DESKTOP_ICON_SIZE.load(Ordering::Relaxed) == 0;
+    let metrics = detect_icon_metrics();
+    if cold {
+        grid_log(&format!(
+            "桌面图标尺寸探测：{}px（间距 {}，来源 {}）—— 格子图标与提取分辨率按此对齐",
+            metrics.icon_size, metrics.spacing, metrics.source
+        ));
+    }
+    Ok(metrics)
+}
+
+/// 探测实现（与命令分开，方便日志复用与将来加单测）。
+fn detect_icon_metrics() -> IconMetrics {
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(size) = read_desktop_icon_size() {
+            let spacing = reg_query_value(
+                r"HKCU\Software\Microsoft\Windows\Shell\Bags\1\Desktop",
+                "IconSpacing",
+            )
+            .and_then(|raw| parse_reg_int(&raw))
+            .filter(|value| (16..=1024).contains(value))
+            .unwrap_or(0);
+            return IconMetrics {
+                icon_size: size,
+                spacing,
+                source: "registry".to_string(),
+            };
+        }
+    }
+    IconMetrics {
+        icon_size: 48,
+        spacing: 0,
+        source: "default".to_string(),
+    }
+}
+
+/// 读桌面图标边长（同步读注册表；可能拉起一次 `reg` 子进程，调用方自行缓存）。
+///
+/// 只看两个位置：① 桌面 Bags 的 `IconSize`（用户按 `Ctrl + 滚轮` 改的就是它）；
+/// ② 控制面板的 `Shell Icon Size`（老式通用设置）。都取不到返回 `None`。
+#[cfg(target_os = "windows")]
+fn read_desktop_icon_size() -> Option<i64> {
+    if let Some(size) = reg_query_value(
+        r"HKCU\Software\Microsoft\Windows\Shell\Bags\1\Desktop",
+        "IconSize",
+    )
+    .and_then(|raw| parse_reg_int(&raw))
+    {
+        if (16..=512).contains(&size) {
+            return Some(size);
+        }
+    }
+    let fallback = reg_query_value(
+        r"HKCU\Control Panel\Desktop\WindowMetrics",
+        "Shell Icon Size",
+    )
+    .and_then(|raw| parse_reg_int(&raw))?;
+    (16..=512).contains(&fallback).then_some(fallback)
+}
+
+/// 图标尺寸缓存（0 = 还没读过）。图标提取是逐条热路径，不能每次都拉起 `reg` 子进程。
+#[cfg(target_os = "windows")]
+static DESKTOP_ICON_SIZE: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+/// 带缓存的桌面图标尺寸（读不到按 48）。
+#[cfg(target_os = "windows")]
+fn desktop_icon_size_cached() -> i64 {
+    use std::sync::atomic::Ordering;
+    let cached = DESKTOP_ICON_SIZE.load(Ordering::Relaxed);
+    if cached != 0 {
+        return cached;
+    }
+    let size = read_desktop_icon_size().unwrap_or(48);
+    DESKTOP_ICON_SIZE.store(size, Ordering::Relaxed);
+    size
+}
+
+/// 读一个注册表值的原始文本（`reg query <key> /v <name>` 输出的最后一列）。
+#[cfg(target_os = "windows")]
+fn reg_query_value(key: &str, name: &str) -> Option<String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let output = std::process::Command::new("reg")
+        .args(["query", key, "/v", name])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with(name) {
+            continue;
+        }
+        // `    IconSize    REG_DWORD    0x30` → 取最后一段（值名本身可能含空格）
+        return trimmed.split_whitespace().last().map(str::to_string);
+    }
+    None
+}
+
+/// `0x30` / `48` 都能解析。
+#[cfg(target_os = "windows")]
+fn parse_reg_int(raw: &str) -> Option<i64> {
+    let trimmed = raw.trim();
+    match trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")) {
+        Some(hex) => i64::from_str_radix(hex, 16).ok(),
+        None => trimmed.parse::<i64>().ok(),
+    }
+}
+
 #[cfg(all(test, target_os = "windows"))]
 mod z_verdict_tests {
     use super::*;

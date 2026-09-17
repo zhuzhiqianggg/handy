@@ -23,6 +23,11 @@ import type {
   LayoutImportReport,
   LayoutSnapshotMeta,
   OverlayStatus,
+  CleanupReport,
+  IconMetrics,
+  LegacyRootInfo,
+  LogInfo,
+  ReclaimReport,
 } from '@/types/grid';
 import type {
   VaultItem,
@@ -171,7 +176,7 @@ export const ipc = {
   todosCreate: (title: string, dueAt?: number | null): Promise<Todo> =>
     call<Todo>('todos_create', { input: { title, dueAt: dueAt ?? null } }),
 
-  // —— 桌面格子（V33 真实收纳：拖进去 = 真把文件移进 桌面/Handy整理/<格子名>/）——
+  // —— 桌面格子（V37 呈现层：拖进去 / 移出 / 换格子都只改登记，文件永远留在桌面原位）——
 
   /** 格子列表（含条目计数） */
   gridBoxList: (): Promise<GridBox[]> => call<GridBox[]>('grid_box_list'),
@@ -189,7 +194,7 @@ export const ipc = {
       height: input.height ?? null,
       sort: input.sort ?? null,
     }),
-  /** 删除格子（收纳目录里还有文件则原样保留，只有空目录才顺手删掉） */
+  /** 删除格子（连带删掉它的登记；文件从来没被移动过，所以无需恢复） */
   gridBoxDelete: (boxId: number): Promise<void> => call<void>('grid_box_delete', { boxId }),
   /** 写挂件数据（便签正文 / 日历配置 JSON） */
   gridBoxSetContent: (boxId: number, content: string): Promise<void> =>
@@ -198,8 +203,11 @@ export const ipc = {
   // —— 桌面整理：一键整理 / 布局备份与还原（V19）——
 
   /**
-   * 一键收纳桌面：普通文件按类型**移动**进 `桌面/Handy整理/<类别>/`，每类一个格子。
-   * 快捷方式与文件夹不动（留在桌面默认位置）。
+   * 一键归类桌面：按类型把桌面条目**登记**进格子（每类一个格子）。
+   *
+   * ⚠️ **不动任何文件**（V37）：V33–V36 这里是真的 `fs::rename` 进
+   * `桌面/Handy整理/<类别>/`，被用户否掉后改回引用模型。`skipped` 统计的是
+   * 按设计跳过的快捷方式（`.lnk` 留在桌面原位）。
    */
   gridAutoArrange: (dir?: string | null): Promise<AutoArrangeReport> =>
     call<AutoArrangeReport>('grid_auto_arrange', { dir: dir ?? null }),
@@ -267,6 +275,38 @@ export const ipc = {
   /** 提取文件/文件夹的系统真实图标（RGBA base64）；失败或不支持返回 null */
   gridFileIcon: (path: string): Promise<FileIconData | null> =>
     call<FileIconData | null>('grid_file_icon', { path }),
+
+  // —— V37：历史收纳残留（预览 / 撤回 / 清理）与桌面图标度量 ——
+
+  /** 列出桌面上的遗留收纳目录（只读，不碰任何文件） */
+  gridLegacyScan: (): Promise<LegacyRootInfo[]> =>
+    call<LegacyRootInfo[]>('grid_legacy_scan'),
+  /** 把遗留收纳目录里的条目撤回桌面（**只移动，不删除**）；`dryRun` 默认只统计 */
+  gridLegacyReclaim: (dryRun = true): Promise<ReclaimReport> =>
+    call<ReclaimReport>('grid_legacy_reclaim', { dryRun }),
+  /** 删除遗留收纳目录（**真删**）；`dryRun` 默认只统计，内建「没撤干净就不删」的安全闸 */
+  gridLegacyCleanup: (dryRun = true): Promise<CleanupReport> =>
+    call<CleanupReport>('grid_legacy_cleanup', { dryRun }),
+  /** 系统桌面图标尺寸（让格子内图标与原生桌面一样大） */
+  desktopIconMetrics: (): Promise<IconMetrics> => call<IconMetrics>('desktop_icon_metrics'),
+
+  // —— V37：统一日志（前端错误上报 + 用户自助查看 / 导出）——
+
+  /** 上报前端错误 / 警告（写进 `%LOCALAPPDATA%\Handy\handy.log`） */
+  logFrontend: (
+    level: 'error' | 'warn' | 'info',
+    message: string,
+    detail?: string,
+  ): Promise<void> => call<void>('log_frontend', { level, message, detail: detail ?? null }),
+  /** 在文件管理器里打开日志目录（返回目录路径） */
+  logOpenDir: (): Promise<string> => call<string>('log_open_dir'),
+  /** 读日志尾部文本（默认最后 64 KB） */
+  logReadTail: (maxBytes?: number): Promise<string> =>
+    call<string>('log_read_tail', { maxBytes: maxBytes ?? null }),
+  /** 清空日志 */
+  logClear: (): Promise<void> => call<void>('log_clear'),
+  /** 日志文件概况（路径 / 大小 / 轮转份数） */
+  logInfo: (): Promise<LogInfo> => call<LogInfo>('log_info'),
 
   // —— 桌面层挂载 / 系统图标显隐（V20：让格子真正画在桌面上）——
 

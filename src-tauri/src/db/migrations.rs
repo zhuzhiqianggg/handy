@@ -147,6 +147,20 @@ pub const V8_GRID_ACCENT: &str = "
 ALTER TABLE grid_boxes ADD COLUMN accent TEXT NOT NULL DEFAULT '';
 ";
 
+/// v9：格子改「引用模型」—— 新增 `category`，并清掉历史登记（V37）。
+///
+/// **为什么要清 `grid_items`**：V33–V36 的 `file_path` 全部指向
+/// `桌面/Handy整理/<格子名>/` 下的**真实文件**（因为那几版真的把文件搬进去了）。
+/// 换成引用模型后这些路径已不该存在文件，留着只会变成一堆点不动的幽灵图标。
+/// 用户用「一键归类」重扫一遍即可 —— 桌面上的文件一个都没少，只是登记要重来一次。
+///
+/// **`category` 干嘛用**：自动归类要认出「哪个格子收文档、哪个收图片」。之前靠格子名
+/// 隐式匹配（名字叫「文档」就当它收文档），用户一改名就失联；显式记字段后改名也不影响。
+pub const V9_GRID_CATEGORY: &str = "
+ALTER TABLE grid_boxes ADD COLUMN category TEXT NOT NULL DEFAULT '';
+DELETE FROM grid_items;
+";
+
 /// 全部迁移：(版本号, SQL)。新增结构在**末尾追加**；移除历史结构可追加 DROP 迁移。
 pub const MIGRATIONS: &[(i64, &str)] = &[
     (1, V1_SCHEMA),
@@ -157,6 +171,7 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
     (6, V6_GRID_WIDGETS),
     (7, V7_DROP_SYSTEM_BOX),
     (8, V8_GRID_ACCENT),
+    (9, V9_GRID_CATEGORY),
 ];
 
 /// 当前毫秒时间戳（用于 `applied_at`）。
@@ -383,6 +398,79 @@ mod tests {
             versions(&conn),
             MIGRATIONS.iter().map(|(v, _)| *v).collect::<Vec<_>>(),
             "全部迁移（含 v7 / v8）都应被记录"
+        );
+
+        drop(conn);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// v9：老库（停在 v8）里的「真搬运」登记必须被清干净，`category` 必须可读。
+    ///
+    /// 现场还原的是**真实的装机形态**：V33–V36 那几版把文件 `fs::rename` 进了
+    /// `桌面/Handy整理/<格子名>/`，所以 `grid_items.file_path` 存的是那个目录下的真实路径。
+    /// 换成引用模型后这些路径指向的文件已经不在那儿了（用户要么撤回过、要么还在
+    /// 那 704 层嵌套里），留着就是一堆点不动的幽灵图标 —— 这正是用户截图里看到的景象。
+    ///
+    /// 两条断言各自守一个失败面：
+    ///   ① 不清 `grid_items` → 升级后界面满屏幽灵图标（用户以为「东西还在」）；
+    ///   ② 不加 `category` 列 / 缺省值给成 NULL → Rust 侧 `row.get::<String>` 直接报错，
+    ///      表现成「桌面格子整个打不开」，比幽灵图标严重得多。
+    #[test]
+    fn v8_db_clears_legacy_move_registrations() {
+        let (path, conn) = temp_conn("from-v8");
+        apply_upto(&conn, 8);
+        assert_eq!(versions(&conn), vec![1, 2, 3, 4, 5, 6, 7, 8], "预置应停在 v8");
+
+        // 一个「真搬运」时代的格子 + 它下面指向 Handy整理 目录的两条登记
+        conn.execute(
+            "INSERT INTO grid_boxes (name, pos_x, pos_y, width, height, sort, created_at, updated_at) \
+             VALUES ('文档', 0, 0, 320, 220, 0, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("预置格子失败");
+        let box_id: i64 = conn
+            .query_row("SELECT id FROM grid_boxes WHERE name = '文档'", [], |row| {
+                row.get(0)
+            })
+            .expect("读取格子 id 失败");
+        for (idx, name) in ["季度汇报.docx", "报销单.xlsx"].iter().enumerate() {
+            conn.execute(
+                "INSERT INTO grid_items (box_id, file_path, display_name, sort, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, '2026-01-01T00:00:00Z')",
+                rusqlite::params![
+                    box_id,
+                    format!("C:\\Users\\me\\Desktop\\Handy整理\\文档\\{name}"),
+                    name,
+                    idx as i64
+                ],
+            )
+            .expect("预置历史条目失败");
+        }
+
+        run(&conn).expect("v8 → 最新版本 升级失败");
+
+        let items: i64 = conn
+            .query_row("SELECT COUNT(*) FROM grid_items", [], |row| row.get(0))
+            .expect("统计条目失败");
+        assert_eq!(items, 0, "v9 必须清空指向已搬走文件的历史登记");
+
+        // 格子本身不能跟着被删 —— 用户的布局（位置/大小/名字）得留着
+        let boxes: i64 = conn
+            .query_row("SELECT COUNT(*) FROM grid_boxes", [], |row| row.get(0))
+            .expect("统计格子失败");
+        assert_eq!(boxes, 1, "v9 只清登记，不能动用户的格子");
+
+        let category: String = conn
+            .query_row("SELECT category FROM grid_boxes LIMIT 1", [], |row| {
+                row.get(0)
+            })
+            .expect("v9 升级后 category 读回失败（很可能是 NULL）");
+        assert_eq!(category, "", "老库升级后 category 应为空串");
+
+        assert_eq!(
+            versions(&conn),
+            MIGRATIONS.iter().map(|(v, _)| *v).collect::<Vec<_>>(),
+            "全部迁移（含 v9）都应被记录"
         );
 
         drop(conn);

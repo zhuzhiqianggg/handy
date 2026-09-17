@@ -1,13 +1,16 @@
 /**
  * 桌面网格挂件类型（与 Rust `commands/grid.rs` serde camelCase 一一对应）。
  *
- * 数据契约三方一致：迁移 SQL（`src-tauri/src/db/migrations.rs` v4 + v6）
+ * 数据契约三方一致：迁移 SQL（`src-tauri/src/db/migrations.rs` v4 / v6 / v8 / v9）
  * = Rust 结构体（`src-tauri/src/commands/grid.rs`）= 本文件。
  *
- * 核心语义（V33 起）：格子是**真实收纳格**——它绑定一个真实目录
- * `桌面/Handy整理/<格子名>/`，拖进格子 = 真把文件移进该目录（桌面图标随之消失，
- * 因此不与桌面重复）；条目上的 × = 把文件移回桌面根目录，不是删除。
- * 默认**不自动收录**桌面任何东西，快捷方式与图标一律留在原位。
+ * 核心语义（**V37 起重定**）：格子是桌面的**呈现层**，不拥有任何文件 —— 条目只是
+ * 「桌面上某个文件的引用」，拖进 / 移出 / 换格子都**只改登记，文件永不移动**
+ * （腾讯桌面整理就是这个行为）。
+ *
+ * ⚠️ V33–V36 曾经是「真实收纳」：把文件 `fs::rename` 进 `桌面/Handy整理/<格子名>/`。
+ * 那个模型已被用户明确否掉 ——「是桌面整理，不是让你把桌面上的东西都给我移动到一个
+ * 目录下面去」。别再按它理解这些字段。
  */
 
 /** 格子类型：收纳格 / 便签 / 日历（含今日计划）/ 系统入口 */
@@ -31,6 +34,13 @@ export interface GridBox {
   content: string;
   /** 配色键；`''` = 默认色（跟随格子类型） */
   accent: GridAccent;
+  /**
+   * 归类类别（`''` = 纯手动，不参与自动归类）。
+   *
+   * V37 引入：自动归类要认出「哪个格子收文档、哪个收图片」。之前靠格子名隐式匹配，
+   * 用户一改名就失联；显式记字段后改名也不影响。
+   */
+  category: string;
   /** 几何均为逻辑像素（相对挂件窗客户区左上角） */
   posX: number;
   posY: number;
@@ -42,11 +52,11 @@ export interface GridBox {
   updatedAt: string;
 }
 
-/** 格子条目：指向**收纳目录里的真实文件**（文件确实住在那里） */
+/** 格子条目：桌面上某个**真实文件**的引用（文件就住在 `filePath`，从未被搬走） */
 export interface GridItem {
   id: number;
   boxId: number;
-  /** 收纳目录内的绝对路径（或系统格子的 CLSID 路径） */
+  /** 被引用文件的绝对路径（就在桌面根目录里） */
   filePath: string;
   displayName: string;
   sort: number;
@@ -110,29 +120,29 @@ export interface FileIconData {
   rgbaBase64: string;
 }
 
-/** 桌面同步报告（`grid_desktop_sync` 返回）：**只对账，不收录** */
+/** 桌面同步报告（`grid_desktop_sync` 返回）：**只清理失效登记**，不收录 */
 export interface DesktopSyncReport {
-  /** 参与对账的收纳格数 */
+  /** 参与对账的格子数 */
   boxes: number;
-  /** 收纳目录里新发现并登记的条目数（手工在资源管理器里放进格子的文件） */
+  /** 新登记的条目数（恒为 0：自动归类只由用户显式触发） */
   itemsAdded: number;
-  /** 清理掉的失效登记数（文件已被移出 / 删除） */
+  /** 清理掉的失效登记数（引用的文件已被删 / 改名） */
   pruned: number;
 }
 
-/** 一键收纳结果摘要（`grid_auto_arrange` 返回）：真的移动了文件和文件夹 */
+/** 一键归类结果摘要（`grid_auto_arrange` 返回）：**只登记引用，不动任何文件** */
 export interface AutoArrangeReport {
   /** 桌面根目录扫描到的可见条目数（含快捷方式 / 文件夹） */
   scanned: number;
-  /** 本次真正移动进收纳目录的条目数（文件 + 文件夹） */
+  /** 本次登记进格子的条目数（文件 + 文件夹；文件全部原地未动） */
   itemsAdded: number;
-  /** 其中文件夹占的数量（V34 起文件夹也纳入收纳） */
+  /** 其中文件夹占的数量 */
   foldersMoved: number;
   /** 本次新建的格子数 */
   boxesCreated: number;
   /** 复用了同名已有格子的次数 */
   boxesReused: number;
-  /** 按设计跳过的条目数（只剩快捷方式 .lnk —— 用户要求留在桌面原位） */
+  /** 按设计跳过的条目数（快捷方式 .lnk —— 用户要求留在桌面原位） */
   skipped: number;
   /** 单条目失败原因（不中断整批） */
   failures: string[];
@@ -183,5 +193,73 @@ export interface LayoutSnapshotMeta {
   savedAt: string;
   boxCount: number;
   itemCount: number;
+}
+
+// —— V37：历史收纳残留的还原 / 清理，以及桌面图标度量 ——
+
+/**
+ * 遗留收纳根目录概况（`grid_legacy_scan`，只读）。
+ *
+ * V33–V36 的「真实收纳」在桌面留下过 `Handy整理` / `Handy整理 (2)` … 这类目录，
+ * 里面放着**被搬走的用户文件**（V36 事故还额外炸出过 4 个副本与 704 层嵌套）。
+ * 还原前先把规模摆给用户看，再动手。
+ */
+export interface LegacyRootInfo {
+  name: string;
+  path: string;
+  /** 将被上提回桌面的条目数（第一层容器的直接子项）；只数两层，不受上限影响 */
+  entries: number;
+  /** 目录内条目总数（含嵌套垃圾） */
+  totalEntries: number;
+  /** 其中「自己套自己」的嵌套垃圾条目数 */
+  nestedEntries: number;
+  bytes: number;
+  /**
+   * 是否因条目上限被截断。
+   *
+   * 事故现场实测 129,714 条 / 296 GB，而这个扫描是**打开页面就自动跑**的 ——
+   * 全量遍历会让界面看起来卡死，所以 Rust 侧封顶 10,000 条/棵。
+   * 为真时 `totalEntries` / `nestedEntries` / `bytes` 都应显示成「≥ N」。
+   */
+  truncated: boolean;
+}
+
+/** 还原结果（`grid_legacy_reclaim`）：文件**只移动，绝不删除** */
+export interface ReclaimReport {
+  moved: number;
+  /** 桌面已有同名而跳过（副本内容与主目录重复） */
+  skipped: number;
+  failures: string[];
+  roots: number;
+  /** true = 只是预演，没动任何文件 */
+  dryRun: boolean;
+}
+
+/** 清理结果（`grid_legacy_cleanup`）：删除遗留目录，含超长路径的嵌套垃圾 */
+export interface CleanupReport {
+  removed: number;
+  freedBytes: number;
+  /** 因「还有条目没撤回桌面」而被安全闸拒绝删除的目录 */
+  skipped: string[];
+  failures: string[];
+  dryRun: boolean;
+}
+
+/** 桌面图标度量（`desktop_icon_metrics`）：让格子内图标与原生桌面一样大 */
+export interface IconMetrics {
+  /** 图标边长（逻辑像素） */
+  iconSize: number;
+  /** 图标横向间距（0 = 未读到） */
+  spacing: number;
+  /** 来源：registry / control-panel / default */
+  source: string;
+}
+
+/** 日志文件概况（`log_info`） */
+export interface LogInfo {
+  dir: string;
+  path: string;
+  size: number;
+  rotated: number;
 }
 

@@ -26,8 +26,9 @@ import { ACCENT_ORDER, CalendarWidget, NOTE_ACCENTS, NoteWidget } from './Deskto
  *   - **盒子画布**：绝对定位的盒子（标题栏 + 条目网格），编辑模式可拖拽移动
  *     （标题栏）、右下角拖拽缩放、双击标题重命名；落库经 `gridBoxUpsert`；
  *   - **文件拖放**：`getCurrentWebview().onDragDropEvent`，drop 落点命中哪个盒子
- *     就把拖入文件**真的移动**进该盒子的目录（`gridItemAdd` → Rust `fs::rename`，
- *     同名冲突自动改名，绝不覆盖）；拖到别的盒子 = 再移动一次；
+ *     就把拖入的文件**登记**给该盒子（`gridItemAdd` → 只写 `grid_items` 一行）。
+ *     ⚠️ **磁盘上什么都不发生**（V37 呈现层）：V33–V36 这里走的是 `fs::rename` 真搬文件，
+ *     被用户否掉后已改回引用模型。拖到别的盒子 = 改一下登记归属而已；
  *   - **点击穿透协同**：透明区域默认穿透（Rust 侧 `set_ignore_cursor_events`），
  *     本组件把盒子 / 工具栏矩形按 `scaleFactor` 换算为物理像素上报
  *     （`gridOverlayUpdateRegions`），Rust 光标轮询命中后才开放交互；拖拽期间
@@ -183,8 +184,54 @@ async function loadIcon(path: string): Promise<IconEntry | null> {
   }
 }
 
-/** 条目图标：优先系统真实图标，加载失败回退通用线条图标 */
-function FileIcon({ path }: { path: string }): React.JSX.Element {
+/**
+ * 系统桌面图标尺寸（逻辑像素）。
+ *
+ * 用户 V37 反馈：「格子里面的图标大小应该跟正常桌面大小保持一致」。这个尺寸存在
+ * 注册表里（用户按 `Ctrl + 滚轮` 调的就是它），由 Rust 的 `desktop_icon_metrics` 读出。
+ * 读不到时先用 48（Windows 桌面默认值），不必让界面等它。
+ */
+function useDesktopIconSize(): number {
+  const [size, setSize] = useState(48);
+  useEffect(() => {
+    let cancelled = false;
+    void ipc
+      .desktopIconMetrics()
+      .then((metrics) => {
+        if (cancelled) {
+          return;
+        }
+        // 留痕：用户报「格子图标跟桌面不一样大」时，日志里能直接看到实际取到的数字
+        void ipc
+          .logFrontend(
+            'info',
+            `格子图标尺寸：${metrics.iconSize}px（来源 ${metrics.source}，间距 ${metrics.spacing}）`,
+          )
+          .catch(() => undefined);
+        if (metrics.iconSize > 0) {
+          setSize(metrics.iconSize);
+        }
+      })
+      .catch((error: unknown) => {
+        // 读不到就用默认值，不打扰用户 —— 但要在日志里留个痕
+        void ipc
+          .logFrontend('warn', '读取桌面图标尺寸失败，回退 48px', String(error))
+          .catch(() => undefined);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  return size;
+}
+
+/**
+ * 条目图标：优先系统真实图标，加载失败回退通用线条图标。
+ *
+ * `size` 由调用方传入（来自 [`useDesktopIconSize`]）—— 显示尺寸不再写死，跟着用户的
+ * 桌面图标设置走。`IconEntry.size` 只代表**位图分辨率**，不当显示尺寸用。
+ */
+function FileIcon({ path, size }: { path: string; size: number }): React.JSX.Element {
   const [icon, setIcon] = useState<IconEntry | null>(() => iconCache.get(path) ?? null);
   useEffect(() => {
     if (icon !== null) {
@@ -215,15 +262,17 @@ function FileIcon({ path }: { path: string }): React.JSX.Element {
         src={icon.url}
         alt=""
         draggable={false}
-        style={{ width: icon.size, height: icon.size }}
+        style={{ width: size, height: size }}
         className="shrink-0 object-contain [filter:drop-shadow(0_1px_2px_rgba(0,0,0,0.55))]"
       />
     );
   }
+  // 真图标还没取到时先用线条图标占位，按桌面尺寸的 0.8 画（线条图标视觉偏大）
+  const fallback = Math.round(size * 0.8);
   return isDirectoryPath(path) ? (
-    <FolderClosed className="h-7 w-7 text-amber-300" />
+    <FolderClosed style={{ width: fallback, height: fallback }} className="text-amber-300" />
   ) : (
-    <File className="h-7 w-7 text-sky-300" />
+    <File style={{ width: fallback, height: fallback }} className="text-sky-300" />
   );
 }
 
@@ -252,6 +301,14 @@ export function GridOverlay(): React.JSX.Element {
    * 列出来，不用先切模式，这是桌面上最本能的一个动作。
    */
   const [menuBox, setMenuBox] = useState<{ id: number; x: number; y: number } | null>(null);
+
+  /**
+   * 系统桌面图标尺寸（V37）。
+   *
+   * 格子里图标与桌面图标必须是同一个视觉尺度，否则「整理到格子里」看着就像换了一套
+   * 图标。尺寸不写死，跟着系统设置走（用户可能按 `Ctrl + 滚轮` 调过）。
+   */
+  const iconSize = useDesktopIconSize();
 
   /** 渲染无关的可变状态（事件回调内读取，避免闭包过期） */
   const boxesRef = useRef<GridBox[]>([]);
@@ -307,12 +364,12 @@ export function GridOverlay(): React.JSX.Element {
     void refresh().catch((error: Error) => showHint(error.message));
   }, [refresh, showHint]);
 
-  // —— 桌面对账（V33：只对账，不收录） ——
+  // —— 登记对账（V37：只校验存在性） ——
   //
-  // 格子内容是「收纳目录的真实内容」：用户在资源管理器里直接往格子的目录里放文件、
-  // 或把文件移走，这里对账后格子会跟着变。
-  // **不再自动把桌面文件收进格子** —— 那正是用户抱怨「和桌面图标重复、像复制了
-  // 一份」的来源；现在只有用户主动拖进格子才会收纳（真移动文件）。
+  // 格子内容是「登记过的桌面文件」：用户在资源管理器里把文件改名 / 删掉后，
+  // 这里对账（`grid_desktop_sync` → `list_live_items`）会把失效登记清掉，
+  // 免得格子里留一个点不动的幽灵图标。
+  // **不自动把新文件收进格子** —— 收录只发生在用户点「一键归类」或手动拖入时。
 
   /** 对账一次并按需刷新（有变化才重渲染，避免无谓的 DOM 抖动） */
   const syncDesktop = useCallback(async (): Promise<void> => {
@@ -721,7 +778,7 @@ export function GridOverlay(): React.JSX.Element {
         .gridItemAdd(boxId, filePath)
         .then((item) => {
           setItems((prev) => ({ ...prev, [boxId]: [...(prev[boxId] ?? []), item] }));
-          showHint(`已收纳：${item.displayName}`);
+          showHint(`已加入格子：${item.displayName}（文件仍在桌面原位）`);
         })
         .catch((error: Error) => showHint(error.message));
     },
@@ -961,7 +1018,7 @@ export function GridOverlay(): React.JSX.Element {
       .then((created) => {
         setBoxes((prev) => [...prev, created]);
         setItems((prev) => ({ ...prev, [created.id]: [] }));
-        showHint(`已新建收纳格：${created.name}（把文件拖进来即收纳）`);
+        showHint(`已新建收纳格：${created.name}（把文件拖进来即归拢显示）`);
       })
       .catch((error: Error) => showHint(error.message));
   }, [showHint]);
@@ -1076,7 +1133,7 @@ export function GridOverlay(): React.JSX.Element {
     void ipc.gridBoxSetContent(boxId, content).catch(() => undefined);
   }, []);
 
-  /** 删除格子（只删格子本身；收纳目录里还有文件则原样保留） */
+  /** 删除格子（只删格子与它的登记；文件本身从来没被移动过，所以什么都不用恢复） */
   const deleteBox = useCallback(
     (boxId: number): void => {
       void ipc
@@ -1098,13 +1155,15 @@ export function GridOverlay(): React.JSX.Element {
     void ipc.gridOverlayHide().catch(() => undefined);
   }, []);
 
-  /** 手动对账一次（把格子里目录的真实内容刷新进来） */
+  /** 手动对账一次（清掉文件已不存在的失效登记） */
   const syncNow = useCallback((): void => {
     void ipc
       .gridDesktopSync()
       .then(async (report) => {
         await refresh();
-        showHint(`已对账 ${report.boxes} 个收纳格：新增 ${report.itemsAdded} · 清理 ${report.pruned}`);
+        showHint(
+          `已对账 ${report.boxes} 个格子：新增 ${report.itemsAdded} · 清理失效 ${report.pruned}`,
+        );
       })
       .catch((error: Error) => showHint(error.message));
   }, [refresh, showHint]);
@@ -1285,7 +1344,7 @@ export function GridOverlay(): React.JSX.Element {
               {editMode && !isWidget ? (
                 <button
                   type="button"
-                  title="填路径收纳（也会把文件移动进格子目录）"
+                  title="按路径把这个文件归拢进当前格子（只登记显示，不动文件）"
                   onMouseDown={(event) => event.stopPropagation()}
                   onClick={() => beginAddPath(box.id)}
                   className="shrink-0 rounded p-0.5 opacity-80 transition hover:bg-white/20 hover:opacity-100"
@@ -1296,7 +1355,7 @@ export function GridOverlay(): React.JSX.Element {
               {editMode ? (
                 <button
                   type="button"
-                  title="删除格子（格子里的文件会留在收纳目录里，不会被删）"
+                  title="删除格子（只删格子和它的登记，你的文件一直留在桌面原位）"
                   onMouseDown={(event) => event.stopPropagation()}
                   onClick={() => deleteBox(box.id)}
                   className="shrink-0 rounded p-0.5 opacity-80 transition hover:bg-red-500/80 hover:opacity-100"
@@ -1361,12 +1420,14 @@ export function GridOverlay(): React.JSX.Element {
                 />
               </div>
             ) : (
-              /* 收纳格条目网格：双击打开原文件；悬停把文件移出格子（回桌面）。
-                 列宽 84px 是跟着 48px 系统图标定的 —— 桌面/资源管理器用的就是
-                 48px 大图标，格子里的图标要和它看起来是同一个东西。 */
+              /* 收纳格条目网格：双击打开原文件；悬停把文件从格子移出（文件不动）。
+                 列宽跟着**系统桌面图标尺寸**走（V37）：图标多大，格子就留多宽 ——
+                 这样格子里和桌面上看起来才是同一套图标。 */
               <div
                 className="grid min-h-0 flex-1 content-start gap-1 overflow-y-auto p-2"
-                style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(84px, 1fr))' }}
+                style={{
+                  gridTemplateColumns: `repeat(auto-fill, minmax(${iconSize + 36}px, 1fr))`,
+                }}
               >
               {addingBoxId === box.id ? (
                 <div className="col-span-full flex items-center gap-1">
@@ -1392,7 +1453,7 @@ export function GridOverlay(): React.JSX.Element {
                 <div
                   key={item.id}
                   data-grid-item="1"
-                  title={`${item.displayName}\n${item.filePath}\n双击打开 · 拖到其他格子移动 · 右上角 × 移回桌面`}
+                  title={`${item.displayName}\n${item.filePath}\n双击打开 · 拖到其他格子 · 右上角 × 从格子移出（文件不动）`}
                   draggable
                   onDragStart={(event) => startItemDrag(item, event)}
                   onDragEnd={endItemDrag}
@@ -1401,13 +1462,13 @@ export function GridOverlay(): React.JSX.Element {
                 >
                   <button
                     type="button"
-                    title="移出格子：文件回到桌面（不是删除）"
+                    title="从格子移出（文件留在桌面，不会删除）"
                     onClick={() => removeItem(item)}
                     className="absolute right-0.5 top-0.5 hidden rounded bg-black/60 p-0.5 text-neutral-100 hover:bg-red-500/85 group-hover:block"
                   >
                     <X className="h-3 w-3" />
                   </button>
-                  <FileIcon path={item.filePath} />
+                  <FileIcon path={item.filePath} size={iconSize} />
                   <span className="w-full truncate text-center text-[11px] font-medium leading-tight text-white [text-shadow:0_1px_3px_rgba(0,0,0,0.95)]">
                     {item.displayName}
                   </span>
@@ -1415,9 +1476,9 @@ export function GridOverlay(): React.JSX.Element {
               ))}
               {boxItems.length === 0 && (
                 <p className="col-span-full py-3 text-center text-[11px] leading-relaxed opacity-55">
-                  把文件拖到这里收纳
+                  把桌面上的文件拖到这里
                   <br />
-                  文件会移动进 桌面/Handy整理/{box.name}
+                  只是归拢显示，文件不会移动
                 </p>
               )}
               </div>
@@ -1472,10 +1533,9 @@ export function GridOverlay(): React.JSX.Element {
         >
           <p className="text-sm font-medium text-neutral-100">桌面上还没有格子</p>
           <p className="max-w-sm text-xs leading-relaxed text-neutral-300">
-            收纳格是桌面上的分区：把文件拖进去，文件会
-            <span className="text-neutral-100">真的移动</span>
-            到 桌面/Handy整理/格子名/ 里，桌面不再重复显示它；双击图标用默认程序打开；
-            右上角 × 把文件移回桌面（不是删除）。
+            收纳格是桌面上的分区：把文件拖进去，它就
+            <span className="text-neutral-100">归拢显示在格子里，文件本身留在桌面原位，不会被移动或删除</span>；
+            双击图标用默认程序打开；右上角 × 只是把它从格子里移出（不是删除文件）。
             <br />
             也可以直接加一个便签或日历挂件，桌面随手记、随手看计划。
           </p>
@@ -1591,7 +1651,7 @@ export function GridOverlay(): React.JSX.Element {
                 解散该格子
               </button>
               <p className="px-2.5 pb-1 pt-0.5 text-[10px] leading-relaxed text-neutral-500">
-                解散只删格子，「桌面/Handy整理/{box.name}/」里的文件原样保留
+                解散只删格子与它的登记，你的文件一直留在桌面原位
               </p>
             </div>
           );

@@ -5,6 +5,8 @@ import { bootstrap, bootstrapSync } from './core/bootstrap';
 import { useAppStore } from './stores/useAppStore';
 import { diagLog } from '@/lib/diag';
 import { ipc } from '@/lib/ipc';
+import { installErrorSink } from '@/lib/errorSink';
+import { ErrorBoundary } from '@/components/ErrorBoundary';
 import './index.css';
 
 /**
@@ -71,6 +73,9 @@ const rootElement = resolveRootElement();
 const BOOTSTRAP_GUARD_MS = 3500;
 
 function start(): void {
+  // 0) 全局错误捕获：必须赶在任何渲染之前装上 —— 最值钱的错误恰恰发生在挂载之前
+  installErrorSink();
+
   // 1) 同步装配（幂等）：注册表就绪后才有可渲染的视图树
   bootstrapSync();
 
@@ -106,7 +111,9 @@ function start(): void {
 
   ReactDOM.createRoot(rootElement).render(
     <React.StrictMode>
-      <App windowRoot={target.windowRoot} noteId={target.noteId} />
+      <ErrorBoundary label={target.windowRoot === 'main' ? '主界面' : '这个窗口'}>
+        <App windowRoot={target.windowRoot} noteId={target.noteId} />
+      </ErrorBoundary>
     </React.StrictMode>,
   );
 

@@ -28,13 +28,15 @@
 | 自检 | `scripts/audit/tool-audit.mjs`（静态）/ `layout-audit.mjs`（几何）/ `sample-smoke.mjs`（真点示例）/ **`window-probe.py`（V36：隔空验浮层窗的层级与渲染，见 §5）** |
 | 回归 | `scripts/regression/run.mjs` + `test-*.mjs`；`scripts/new-tool.mjs` 脚手架 |
 
-## 3. 状态快照（2026-09-17 12:15 · V36 已交付、已提交、已打包装机）
+## 3. 状态快照（2026-09-17 14:55 · V37 已交付、已打包装机）
 
-- Phase 1（MVP）功能全部交付；**最近一次打包是 V36**（见 PROJECT_STATUS §1.22），
+- Phase 1（MVP）功能全部交付；**最近一次打包是 V37**（见 PROJECT_STATUS §1.23），
   **已静默安装到用户机**（`%LOCALAPPDATA%\Handy\handy.exe`，NSIS currentUser，`/S`）。
   一键脚本 `bash scripts/build-release.sh`（tsc → 回归 → 清 dist → vite → tauri → 取证 → `/S` 装机 → 启动核验）。
-  V34/V35 都用 `--no-deploy --skip-tsc --skip-regression`（tsc/回归刚单独跑绿）+ **手工装机取证，且刻意不代为启动**。
+  近几轮都用 `--no-deploy` + **手工装机取证，且刻意不代为启动**。
   **唯一阻塞项 = 用户装机验收 GUI**（窗口/托盘/透明/桌面挂载/拖放/真实文件移动，沙箱验不了）。
+- **V37 的立意（用户原话）**：「是桌面整理，不是让你把桌面上的东西都给我移动到一个目录下面去，
+  这个完全是错误的」⇒ **全产品默认不再移动用户文件**（详见 §3.2 的 V37 条）。
 - ⚠️ **2026-09-16 起 agent 会话已启动不了本应用**：新旧版本一律挂死在启动早期（内存恒 26–39 MB、CPU 冻结、
   库一个字节不写）。已用「09-14 的旧产物做对照」证明**不是代码回归**（PROJECT_STATUS §1.19.2 / CONVENTIONS §13.5）。
   **所以「打包 + 静默安装」只做到装完为止，启动必须交给用户；V34 起也不再代为启动**（会留僵尸进程，
@@ -42,17 +44,25 @@
 - 工具箱 **25 个命令 / 6 分类**（text · data · encode · convert · generate · dev；V27 新增 `api-tester` 接口测试）；
   **模块目录 4 个**：toolbox / notes / vault / desktop-organizer（workstation、todos、desktop-grid、settings
   是**视图/独立窗口**，不是模块 —— 别再去找 `?module=workstation`）。
-- **桌面格子 V33 起是「真实收纳」**：格子 = 真目录 `桌面/Handy整理/<格名>/`，拖入 = 真 `fs::rename`；
-  **默认不自动收纳**；**V34 起文件夹也纳入收纳，只有 `.lnk` 原地不动**（用户：原生快捷方式不动态整理）。
-  旧的「只登记引用」模型（V25–V32）**已作废**，别再按它理解。
+- ★ **桌面格子 V37 起是「呈现层」**：格子 = 桌面图标的另一种排布，条目只是**引用登记**，
+  拖入 / 移出 / 换格子 / 一键归类**一律只改登记，文件永远留在桌面原位**（对标腾讯桌面整理）。
+  ⇒ 「真实收纳」（V33–V36，`fs::rename` 进 `桌面/Handy整理/<格名>/`）**已被用户否定并作废**，
+  「只登记引用」（V25–V32）也**不是**它（那版的问题是桌面与格子各显示一份，观感像复制）。
+  现在「重复显示」由**接管原生图标层**（隐藏 `SysListView32`）解决，这是本模型的组成部分而非可选项。
+  同理，「归类文件」页签顶部有**处理方式**开关，**默认归拢（不动文件）**，「移动到整理目录」必须显式选中。
 - **独立窗口 6 个**：main / note / settings / organizer / grid-overlay / workstation-bar（桌面顶部常驻贴条）。
 - **DB 迁移链**：v1 → v2 去剪贴板表 → v3 vault → v4 grid → v5 `todos.detail` → **v6 grid 挂件**
   （`grid_boxes.kind/content` + 把「系统」格子标 `system`）→ **v7 删掉「系统」格子及其登记行**（V34）→
-  **v8 `grid_boxes.accent`**（V35，便签配色）。
-  **v6–v8 尚未在真实库生效**（应用没跑到 `db::init`），由用户首次启动时顺次自动应用；
-  已由 `cargo test --lib db::migrations` 3 条断言守住。
+  **v8 `grid_boxes.accent`**（V35，便签配色）→ **v9 `grid_boxes.category` + `DELETE FROM grid_items`**（V37）。
+  **v6–v9 尚未在真实库生效**（真实库现停在 v8，见 §5「启动问题」），由用户首次启动时顺次自动应用；
+  已由 `cargo test --lib db::migrations` **4 条**断言守住（含 V37 新增的
+  `v8_db_clears_legacy_move_registrations`）。
+- **诊断日志（V37 起）**：`%LOCALAPPDATA%\Handy\handy.log`（统一入口 `src-tauri/src/logging.rs`，
+  2 MB 轮转留 3 份）+ 前端三类错误经 `src/lib/errorSink.ts` → `log_frontend`。
+  旧的 `grid-debug.log` **只记窗口层级、不记文件操作**，V36 事故因此无法从日志复盘 —— 别再依赖它。
+- 真实库位置是 `%APPDATA%\com.handy.desktop\handy.db`（**不是** `%LOCALAPPDATA%\Handy\`，那里没有 db）。
 - 批次明细与提交号 → PROJECT_STATUS §1（最近提交 `git log --oneline -6`）。
-  **V36 `97a164a`**；V35 `7d57ee2`；V34 `d366340`；V33 `eeed5f9`；V28 `bc05a8c`；V27 `f7e825f`+`4268257`；V26 `2969256`+`43a8a06`；V25 `5f8fe8a`+`3001510`。
+  **V37 `待回填`**；V36 `97a164a`；V35 `7d57ee2`；V34 `d366340`；V33 `eeed5f9`；V28 `bc05a8c`；V27 `f7e825f`+`4268257`；V26 `2969256`+`43a8a06`；V25 `5f8fe8a`+`3001510`。
 
 ### 3.1 历史批次一句话（细节见 PROJECT_STATUS §1.11–§1.13 与逐日日志）
 
@@ -81,6 +91,14 @@
   ⇒ 每秒重排一次 `SetWindowPos` ⇒ 一直闪。修法：判据改「**往下走一段能碰到桌面**」（`ZVerdict`，有界下探 24 层）、
   节奏改**时间量** `REASSERT_INTERVAL_SECS=3`、加**保险丝**（5 次退避 300 秒）。
   另新增 `scripts/audit/window-probe.py` 与格子**右键菜单**（CONVENTIONS §16）。
+- **V37**：① 用户三条反馈 = 客户端操作日志 / 格子图标尺寸 / **否定「把桌面搬进一个目录」**；
+  ② 模型改成**呈现层**（见 §3 快照）+ `is_storage_entry` 前缀判定 + `move_with_conflict_rename`
+  **拒绝把目录移进它自己**；③ 迁移 v9；④ 新增 `grid_legacy_scan/reclaim/cleanup`
+  与「诊断与修复」卡片，用于把遗留 `Handy整理*` 安全收回（`dry_run` 先行、绝不删除）；
+  ⑤ `desktop_icon_metrics` 读注册表 IconSize，> 64 时图标源切 `SHIL_JUMBO`。
+  ⚠️ **事故档案**：V33–V36 的 `fs::rename` 失败后走「递归复制 + 删源」，而 `copy_dir_recursive`
+  先建目标再遍历源 ⇒ 目标落在源内部时**一次调用就无限自复制**，在用户桌面炸出
+  **5 个目录 / 296 GB / 最深 1001 层 / 最长路径 7082 字符**（CONVENTIONS §17）。
 
 ## 4. 协作与操作约定
 

@@ -5,6 +5,7 @@
 
 pub mod commands;
 pub mod db;
+pub mod logging;
 pub mod platform;
 pub mod shortcut;
 pub mod tray;
@@ -44,6 +45,12 @@ pub fn run() {
             commands::app::platform_info,
             commands::app::app_quit,
             commands::app::app_show_main,
+            // 统一日志（V37）：前端错误上报 + 用户自助查看/清空
+            logging::log_frontend,
+            logging::log_open_dir,
+            logging::log_read_tail,
+            logging::log_clear,
+            logging::log_info,
             commands::app::app_hide_main,
             commands::app::app_toggle_main,
             commands::app::app_set_pinned,
@@ -109,6 +116,11 @@ pub fn run() {
             commands::grid::grid_auto_arrange,
             commands::grid::grid_desktop_sync,
             commands::grid::grid_file_icon,
+            // V37：历史收纳残留（预览 / 撤回桌面 / 清理）+ 桌面图标尺寸
+            commands::grid::grid_legacy_scan,
+            commands::grid::grid_legacy_reclaim,
+            commands::grid::grid_legacy_cleanup,
+            commands::grid::desktop_icon_metrics,
             commands::grid::grid_layout_export,
             commands::grid::grid_layout_import,
             commands::grid::grid_layout_save,
@@ -132,6 +144,9 @@ pub fn run() {
             commands::backup::backup_import,
         ])
         .setup(|app| {
+            // V37：每次启动在日志里画一条分隔线并写上版本号 —— 用户回传的日志里
+            // 必须能分清「这是哪一次运行」，否则相邻几次运行会搅在一起没法读。
+            logging::start_session(&app.package_info().version.to_string());
             // 待导入备份：必须在 db::init 之前应用（覆盖库文件后新连接才读新数据）
             match commands::backup::apply_pending_import_for_app(app.handle()) {
                 Ok(true) => println!("[Handy] 已应用待导入备份（重启后全部生效）"),

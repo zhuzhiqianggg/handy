@@ -19,7 +19,8 @@
  * 2. **probe 用例**（`probe` 字段，可无 chip）：打开页面后直接在**浏览器里**跑一段
  *    探针函数，把结构化结果带回来断言。用于「没有示例条、但界面本身就是验收对象」的地方：
  *    - `regex-tester`：30 条正则的**自检徽标**必须无「示例不匹配 / 正则无效」（V25 修的正是这个）；
- *    - `desktop-organizer`：模块首屏必须是「归类文件」页签 + 作用目录栏（V25 修的入口错位）。
+ *    - `desktop-organizer`：模块首屏必须是「归类文件」页签 + 作用目录栏（V25 修的入口错位），
+ *      且两种处理方式（归拢 / 移动）都在、格子页文案必须是 V37 的「呈现层·不动文件」。
  *    - `workstation-bar`（V28）：`?window=workstation-bar` 直接开贴条独立窗口，
  *      实测搜索框「输入 → 候选 → ↓ 键 → 回车派发打开并清空」整条链路。
  *
@@ -198,9 +199,17 @@ function probeRelativeTime() {
 }
 
 /**
- * 桌面整理控制台：首屏是「归类文件」，切到「桌面格子」要讲清 V33 的新语义
- * —— 格子是**真实收纳**（拖进去文件真的移进 桌面/Handy整理/格子名/），
- * 而不是只登记引用（旧文案「不移动」已随模型转向废弃）。
+ * 桌面整理控制台：首屏是「归类文件」，切到「桌面格子」要讲清 **V37 的新语义**。
+ *
+ * V25 起这个探针守的是「首屏必须是归类文件、不能在自己的框里玩」；
+ * V33 一度改成守「格子是真收纳」；到 V37 又被用户否掉 —— 原话「是桌面整理，
+ * 不是让你把桌面上的东西都给我移动到一个目录下面去，这个完全是错误的」。
+ *
+ * 所以现在守两条，而且第二条是**反向断言**（旧文案必须消失），
+ * 否则哪天有人把「真移动」四个字加回来，正向断言不会拦：
+ *   ① 首屏两个处理方式都在，且「归拢到桌面格子」是非破坏性的那个；
+ *   ② 格子页必须出现「呈现层 + 原地不动」，且**不得**再出现
+ *      「真实收纳 / 真的移动」——那正是被否掉的那一版的说辞。
  */
 async function probeDesktopConsole() {
   const tick = () => new Promise((r) => setTimeout(r, 400));
@@ -212,8 +221,10 @@ async function probeDesktopConsole() {
     tabFound: gridTab !== undefined,
     hasFilesTab: before.includes('归类文件'),
     hasWorkDir: before.includes('作用目录'),
-    hasMoveHint: before.includes('真移动'),
+    hasGroupMode: before.includes('归拢到桌面格子'),
+    hasMoveMode: before.includes('移动到整理目录'),
     gridHint: false,
+    legacyHintGone: false,
   };
   if (gridTab === undefined) {
     return out;
@@ -221,7 +232,8 @@ async function probeDesktopConsole() {
   gridTab.click();
   await tick();
   const after = document.body.innerText;
-  out.gridHint = after.includes('真实收纳') && after.includes('真的移动');
+  out.gridHint = after.includes('呈现层') && after.includes('原地不动');
+  out.legacyHintGone = !after.includes('真实收纳') && !after.includes('真的移动');
   return out;
 }
 
@@ -650,10 +662,14 @@ const CASES = [
       r.probe?.tabFound === true &&
       r.probe?.hasFilesTab === true &&
       r.probe?.hasWorkDir === true &&
-      r.probe?.hasMoveHint === true &&
-      r.probe?.gridHint === true,
+      r.probe?.hasGroupMode === true &&
+      r.probe?.hasMoveMode === true &&
+      r.probe?.gridHint === true &&
+      r.probe?.legacyHintGone === true,
     detail: (r) =>
-      `首屏=归类文件 ✓ 作用目录 ✓ 真移动提示 ✓ 切页签后=真实收纳 ${r.probe?.gridHint ? '✓' : '✗'}`,
+      `首屏=归类文件 ✓ 作用目录 ✓ 两种处理方式(归拢/移动)=${r.probe?.hasGroupMode}/${r.probe?.hasMoveMode} ` +
+      `切页签后=呈现层·原地不动 ${r.probe?.gridHint ? '✓' : '✗'} ` +
+      `旧「真移动」文案已清 ${r.probe?.legacyHintGone ? '✓' : '✗'}`,
   },
 
   // ——— V26 扩展：把剩下 4 个「没有示例条」的工具也补上（补齐 24/24）———
