@@ -1,23 +1,28 @@
-//! 桌面网格挂件（desktop grid widget）——**真实收纳型**桌面整理（V33 起重定）。
+//! 桌面网格挂件（desktop grid widget）——**呈现层**桌面整理（V37 起重定，V38 补完）。
 //!
-//! ## 模型（V33 转向，用户实测反馈驱动）
+//! ## 模型：格子是桌面的另一种呈现方式，不拥有任何文件
 //!
-//! 旧模型是**文件引用型**：格子只登记桌面文件的路径引用，文件一动不动。实测下来
-//! 它与桌面原图标**完全重复**（同一批文件在桌面和格子里各显示一份），用户的原话
-//! 是「并不是整理收纳，而是复制了一份而已」。
+//! 这条结论走过两轮弯路，别再按中间任何一版推理：
 //!
-//! 新模型是**真实收纳型**：
-//!   - 每个收纳格绑定一个真实目录 `桌面/Handy整理/<格子名>/`（与「归类文件」
-//!     共用同一个根目录，用户只需认一个目录）；
-//!   - **拖进格子 = 真把文件移进该目录**（同名不覆盖，冲突自动改名）；
-//!     文件离开桌面根目录 → 桌面图标自然消失 → 不再重复；
-//!   - 条目上的 × = **移出格子**（把文件移回桌面根目录），不是删除；
-//!   - **默认不自动收录桌面任何东西**（不藏图标、不搬文件）：桌面图标与快捷
-//!     方式一律留在原位，格子只呈现「已经收纳进来的文件」。
+//! | 版本 | 模型 | 结局 |
+//! | --- | --- | --- |
+//! | V25–V32 | 引用登记，但**不接管桌面呈现** | 桌面与格子各显示一份，用户：「并不是整理收纳，而是复制了一份而已」 |
+//! | V33–V36 | 真实收纳：`fs::rename` 进 `桌面/Handy整理/<格名>/` | 用户明确否决：「是桌面整理，不是让你把桌面上的东西都给我移动到一个目录下面去，这个完全是错误的」 |
+//! | **V37 起** | **呈现层**：只登记引用 + 由格子接管桌面呈现 | 现行方案 |
 //!
-//! 格子还是**挂件容器**：`kind` 区分 `folder`（收纳格）/ `note`（便签）/
-//! `calendar`（日历 + 今日计划）/ `system`（此电脑 · 回收站入口）。非 folder
-//! 类型的格子不绑定目录、不参与磁盘对账，内容存在 `content` 列里。
+//! 现行三条硬规矩：
+//!   1. **一个字节都不挪**：拖入 / 移出 / 换格子 / 一键整理，全部只改 `grid_items`
+//!      的一行登记，文件永远留在桌面原位（对标腾讯桌面整理）；
+//!   2. **桌面图标交给格子代管**（V38）：既然格子里的条目就是桌面文件的引用，
+//!      原生图标与之并存就是「桌面又两个相同的内容」（用户原话）。所以「接管」
+//!      = 隐藏 `SysListView32`，桌面上只留格子一份；偏好记在
+//!      [`META_KEY_TAKEOVER`]，收起挂件 / 退出应用立刻把图标还给系统；
+//!   3. **格子建了就在**（V38）：空格子也常驻显示。曾经按「空不占位」滤掉过，
+//!      用户反馈是「动不动就不见了，我找不到不见的规律到底是什么」。
+//!
+//! 格子同时是**挂件容器**：`kind` 区分 `folder`（收纳格）/ `note`（便签）/
+//! `calendar`（日历 + 今日计划）。非 folder 类型的格子不参与条目登记，内容存在
+//! `content` 列里，位置由用户自己摆 —— **自动排布会绕开它们**（见 [`FlowPlacer`]）。
 //!
 //! ## 桌面层挂件窗
 //!
@@ -287,87 +292,23 @@ fn clean_name(name: Option<String>) -> String {
     }
 }
 
-// —— 收纳目录（V33 的真实收纳层：格子 = 桌面/Handy整理/<格子名>/） ——
-
-/// 收纳根目录：`桌面/Handy整理`（与「归类文件」同一根，用户只需认一个目录）。
-///
-/// 兜底：若只存在历史的 `Handy收纳` 目录，则继续沿用，避免凭空多出一个空目录。
-fn storage_root() -> Result<PathBuf, String> {
-    let desktop = desktop_root()?;
-    let primary = desktop.join(STORAGE_ROOT_NAME);
-    if primary.is_dir() {
-        return Ok(primary);
-    }
-    let legacy = desktop.join(LEGACY_STORAGE_ROOT_NAME);
-    if legacy.is_dir() {
-        return Ok(legacy);
-    }
-    Ok(primary)
-}
+// —— 收纳目录：V33–V36 的「真实收纳」层已随 V37 的呈现层模型作废 ——
+//
+// 曾经这里有一整套 `storage_root()` / `box_dir()` / `ensure_dir()` / `list_dir_items()`：
+// 格子 = `桌面/Handy整理/<格子名>/` 的真实目录，拖入即 `fs::rename`。
+// V37 用户明确否掉后，这些函数全部成了无人调用的死代码（`grid_box_delete` 还在
+// 偷偷删空目录，V38 也一并拔掉了）。
+//
+// 保留 `STORAGE_ROOT_NAME` / `LEGACY_STORAGE_ROOT_NAME` 两个常量 —— 它们不再是
+// 「我们要写的目录」，而是「**永远不许进格子 / 永远不许参与归类**的目录名前缀」
+// （见 [`is_storage_entry`]），以及「诊断与修复」卡片的扫描目标。
+//
+// 桌面上那批历史遗留目录请走 [`grid_legacy_reclaim`] / [`grid_legacy_cleanup`]：
+// 先干跑预览、只移动不删除、桌面已有同名就跳过。
 
 /// 桌面根目录。
 fn desktop_root() -> Result<PathBuf, String> {
     dirs::desktop_dir().ok_or_else(|| "无法定位桌面目录".to_string())
-}
-
-/// 目录名清洗：Windows 非法字符换下划线，去首尾空白与结尾句点，空则用缺省名。
-fn clean_segment(name: &str) -> String {
-    let mut out = String::with_capacity(name.len());
-    for ch in name.trim().chars() {
-        if matches!(ch, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || (ch as u32) < 0x20
-        {
-            out.push('_');
-        } else {
-            out.push(ch);
-        }
-    }
-    let trimmed = out.trim().trim_end_matches(['.', ' ']).trim();
-    if trimmed.is_empty() {
-        "未命名".to_string()
-    } else {
-        // 过长名字会把整条路径撑爆（Windows MAX_PATH），截到 60 字符
-        trimmed.chars().take(60).collect()
-    }
-}
-
-/// 格子对应的真实收纳目录。
-fn box_dir(root: &Path, box_name: &str) -> PathBuf {
-    root.join(clean_segment(box_name))
-}
-
-/// 建目录（幂等）。
-fn ensure_dir(path: &Path) -> Result<(), String> {
-    if path.is_dir() {
-        return Ok(());
-    }
-    std::fs::create_dir_all(path)
-        .map_err(|err| format!("创建收纳目录失败（{}）：{err}", path.display()))
-}
-
-/// 枚举收纳目录里的条目（跳过隐藏 / 系统文件与点开头项；目录同样算条目）。
-fn list_dir_items(dir: &Path) -> Vec<(String, String)> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut out: Vec<(String, String)> = Vec::new();
-    for entry in entries.flatten() {
-        let Ok(meta) = entry.metadata() else { continue };
-        #[cfg(target_os = "windows")]
-        {
-            use std::os::windows::fs::MetadataExt;
-            const HIDDEN_OR_SYSTEM: u32 = 0x2 | 0x4;
-            if meta.file_attributes() & HIDDEN_OR_SYSTEM != 0 {
-                continue;
-            }
-        }
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') {
-            continue;
-        }
-        out.push((entry.path().to_string_lossy().to_string(), name));
-    }
-    out.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
-    out
 }
 
 /// 冲突安全移动：目标同名时自动追加 ` (2)`、` (3)` …，**绝不覆盖**。
@@ -487,7 +428,10 @@ fn list_live_items(conn: &Connection, box_id: i64) -> Result<Vec<GridItem>, Stri
     let mut live = Vec::with_capacity(registered.len());
     let mut pruned: Vec<i64> = Vec::new();
     for item in registered {
-        if Path::new(&item.file_path).exists() {
+        // 虚拟条目（`::{CLSID}`，如「此电脑 / 回收站」）在磁盘上本就不存在 ——
+        // 用 `exists()` 判会当场把它当成失效登记清掉，表现为「系统格子一刷新就空」。
+        // V38 起显式豁免（`grid_open_path` 早已支持打开这类路径）。
+        if item.file_path.starts_with("::") || Path::new(&item.file_path).exists() {
             live.push(item);
         } else {
             pruned.push(item.id);
@@ -647,13 +591,11 @@ pub async fn grid_box_upsert(
                 Some(s) => s,
                 None => next_sort(&conn, "SELECT COALESCE(MAX(sort) + 1, 0) FROM grid_boxes", None)?,
             };
-            // 已存在的盒子数 → 决定新盒子级联位置，避免多个新盒子完全重叠
-            let existing: i64 = conn
-                .query_row("SELECT COUNT(*) FROM grid_boxes", [], |row| row.get(0))
-                .unwrap_or(0);
-            let cascade = existing.max(0) as i64;
-            // 缺省落点 = 靠右自动流（与「一键收纳」共用同一套排布，见 arrange_position）
-            let (auto_x, auto_y) = arrange_position(layout_work_width(&app), cascade);
+            // 缺省落点：靠右流布局里第一块**不与任何已有格子（含便签 / 日历）相交**的空位
+            // （V38 起复用 `FlowPlacer`，与「一键整理」的排布是同一套规则）
+            let (work_w, work_h) = layout_work_size(&app);
+            let (auto_x, auto_y) =
+                free_slot_for(&conn, work_w, work_h, final_width, final_height);
             conn.execute(
                 "INSERT INTO grid_boxes \
                  (name, kind, content, accent, pos_x, pos_y, width, height, sort, created_at, updated_at) \
@@ -742,11 +684,13 @@ pub async fn grid_box_upsert(
     }
 }
 
-/// 删除盒子。**收纳进来的文件不会被删除**：目录里还有东西就原样保留（只是不再有
-/// 格子显示它）；目录已空才顺手删掉空目录，避免满桌面攒空文件夹。
+/// 删除格子。**只删格子与它的登记，绝不碰磁盘**（V38）。
+///
+/// V33–V36 在这里还会顺手删掉「已经空了的收纳目录」—— 那是「格子 = 真实目录」模型
+/// 的遗留。V37 换回呈现层后，格子与磁盘再无任何关系，用户桌面上的任何目录
+/// （包括历史遗留的 `Handy整理/`）都只由「诊断与修复」卡片经用户确认后处理。
 #[tauri::command]
 pub async fn grid_box_delete(app: AppHandle, box_id: i64) -> Result<(), String> {
-    let entity = load_box(&app, box_id)?;
     let conn = connect(&app)?;
     let affected = conn
         .execute("DELETE FROM grid_boxes WHERE id = ?1", params![box_id])
@@ -755,14 +699,6 @@ pub async fn grid_box_delete(app: AppHandle, box_id: i64) -> Result<(), String> 
         return Err(format!("盒子不存在或已被删除（id={box_id}）"));
     }
     // grid_items 由外键 ON DELETE CASCADE 自动清理（db::open 已启用 foreign_keys）
-    if entity.kind == "folder" {
-        if let Ok(root) = storage_root() {
-            let dir = box_dir(&root, &entity.name);
-            if dir.is_dir() && list_dir_items(&dir).is_empty() {
-                let _ = std::fs::remove_dir(&dir);
-            }
-        }
-    }
     Ok(())
 }
 
@@ -1155,7 +1091,18 @@ impl AttachMode {
 const META_KEY_ATTACH: &str = "attach_mode";
 
 /// `grid_meta` 中「系统桌面图标是否被隐藏」的键名（崩溃后启动时据此恢复）。
+///
+/// ⚠️ 这是**瞬时状态**（此刻图标是不是被我们藏着），不是偏好 —— 与
+/// [`META_KEY_TAKEOVER`] 分开记：收起挂件 / 退出应用会立刻恢复图标，但用户的
+/// 「由格子接管桌面」偏好要留着，下次显示格子时依它重新隐藏。
 const META_KEY_ICONS_HIDDEN: &str = "desktop_icons_hidden";
+
+/// `grid_meta` 中「是否由格子层接管桌面呈现」的键名（V38）。
+///
+/// 值 = `"1"`：整理桌面后隐藏系统桌面图标，桌面只由格子画 —— 用户 V38 原话
+/// 「不是整理了图标都收纳到格子里面 但是桌面原来的图标还在原地 没有消失
+/// 相当于桌面又两个相同的内容了」。`"0"` / 缺失 = 原生图标与格子共存。
+const META_KEY_TAKEOVER: &str = "desktop_takeover";
 
 /// `grid_meta` 中「不再自动收录」名单的键名（JSON 字符串数组）。
 ///
@@ -1661,8 +1608,36 @@ fn write_icons_hidden(app: &AppHandle, hidden: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// 读「整理由格子层接管桌面呈现」偏好（V38）。
+fn read_takeover(app: &AppHandle) -> bool {
+    let Ok(conn) = connect(app) else {
+        return false;
+    };
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT value FROM grid_meta WHERE key = ?1",
+            params![META_KEY_TAKEOVER],
+            |row| row.get(0),
+        )
+        .ok();
+    raw.as_deref() == Some("1")
+}
+
+/// 写「整理由格子层接管桌面呈现」偏好（V38）。
+fn write_takeover(app: &AppHandle, enabled: bool) -> Result<(), String> {
+    let conn = connect(app)?;
+    conn.execute(
+        "INSERT INTO grid_meta (key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![META_KEY_TAKEOVER, if enabled { "1" } else { "0" }],
+    )
+    .map_err(|err| format!("保存桌面接管偏好失败：{err}"))?;
+    Ok(())
+}
+
 /// 读「不再自动收录」名单（JSON 数组；损坏 / 缺失视为空集，不让坏数据废掉同步）。
 fn read_dismissed(conn: &Connection) -> Result<std::collections::HashSet<String>, String> {
+
     let raw: Option<String> = conn
         .query_row(
             "SELECT value FROM grid_meta WHERE key = ?1",
@@ -1755,6 +1730,40 @@ pub async fn grid_desktop_icons_set(app: AppHandle, hidden: bool) -> Result<bool
 #[tauri::command]
 pub async fn grid_desktop_icons_get() -> Result<bool, String> {
     Ok(desktop_icons_visible())
+}
+
+/// 切换「由格子接管桌面呈现」（V38）：`true` = 隐藏原生桌面图标，`false` = 共存。
+///
+/// 与 `grid_desktop_icons_set` 的区别：那条是**一次性**动作（开关一下就走），
+/// 这条会**记住**用户的选择，此后每次显示格子都按它执行（收起挂件 / 退出应用
+/// 依然立刻把图标还给系统，见 `grid_overlay_hide` / `restore_desktop_icons`）。
+///
+/// 返回「此刻图标是否确实处于隐藏态」—— 隐藏失败（例如被第三方桌面工具接管了
+/// 图标视图）时返回 false，前端据此提示用户「本机不支持自动隐藏，桌子会同时显示
+/// 格子与原图标」。
+#[tauri::command]
+pub async fn grid_takeover_set(app: AppHandle, enabled: bool) -> Result<bool, String> {
+    write_takeover(&app, enabled)?;
+    Ok(takeover_icons(&app, enabled))
+}
+
+/// 读「是否由格子接管桌面呈现」偏好 + 此刻图标的真实可见性。
+#[tauri::command]
+pub async fn grid_takeover_get(app: AppHandle) -> Result<TakeoverState, String> {
+    Ok(TakeoverState {
+        enabled: read_takeover(&app),
+        icons_visible: desktop_icons_visible(),
+    })
+}
+
+/// 桌面接管状态（前端工具栏据此显示「原生图标：已隐藏 / 已显示」）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TakeoverState {
+    /// 用户的偏好：整理后是否由格子接管桌面呈现
+    pub enabled: bool,
+    /// 此刻系统桌面图标是否可见（隐藏失败 / 已被收起时会与 enabled 不一致）
+    pub icons_visible: bool,
 }
 
 
@@ -1949,14 +1958,16 @@ static ICONS_TAKEN: AtomicBool = AtomicBool::new(false);
 /// 仅在贴桌模式有意义（普通窗口模式下系统图标本来就看得见，无需也不该去动）。
 /// 隐藏失败不阻断显示（例如桌面图标视图已被第三方桌面工具接管时找不到句柄），
 /// 只留日志 —— 格子层照样可用，只是出现「格子 + 原图标」双层。
-fn takeover_icons(app: &AppHandle, hidden: bool) {
+///
+/// 返回「此刻图标是否确实被我们藏起来了」（V38 起把结果透给调用方，让 UI 能说实话）。
+fn takeover_icons(app: &AppHandle, hidden: bool) -> bool {
     let applied = matches!(desktop_icons_apply(hidden), Ok(true));
     match (hidden, applied) {
         (true, true) => {
             let _ = write_icons_hidden(app, true);
         }
         (true, false) => {
-            println!("[Handy] 未找到系统桌面图标视图，跳过自动隐藏（可能已被第三方桌面工具接管）");
+            grid_log("未找到系统桌面图标视图，跳过隐藏（可能已被第三方桌面工具接管）");
         }
         (false, false) => {}
         (false, true) => {
@@ -1964,7 +1975,9 @@ fn takeover_icons(app: &AppHandle, hidden: bool) {
         }
     }
     // 只有真正把图标藏起来才标记代管；恢复或失败一律解除
-    ICONS_TAKEN.store(applied && hidden, Ordering::Relaxed);
+    let taken = applied && hidden;
+    ICONS_TAKEN.store(taken, Ordering::Relaxed);
+    taken
 }
 
 /// 兜底恢复：挂件层已不可见但图标仍在代管 → 立即还给系统（轮询线程调用）。
@@ -1978,9 +1991,12 @@ fn release_icons_if_taken(app: &AppHandle) {
 
 /// 创建（幂等复用）并显示挂件窗。
 ///
-/// V32 起格子层**不再自动隐藏系统桌面图标**（用户明确要求「原桌面 + 多一些格子」
-/// 的共存形态；自动隐藏还制造过图标泄漏 —— 挂件白屏时图标跟着一起失踪）。
-/// 想隐藏图标仍有手动开关（`grid_desktop_icons_set`，管理页）。
+/// 系统桌面图标的隐藏**不在这里决定**（V38）：由用户的「接管桌面」偏好
+/// （[`META_KEY_TAKEOVER`]，一键整理时置位）决定，见 [`apply_takeover_pref`]。
+/// V32 曾为了「原桌面 + 多一些格子」的共存形态彻底关掉自动隐藏 —— 那时格子只是
+/// 额外一层；V37 起格子变成桌面的**呈现层**（文件不再移动），两份图标并存就成了
+/// 用户眼里的「桌面有两个相同的内容」，所以又需要它回来，但必须是**用户可切换的偏好**
+/// 而不是每次启动都擅自决定的动作。
 fn show_overlay(app: &AppHandle) -> Result<(), String> {
     let mode = read_attach_mode(app);
     // 已存在 → 先 show 再归位。
@@ -1998,6 +2014,7 @@ fn show_overlay(app: &AppHandle) -> Result<(), String> {
         ensure_poller(app.clone());
         // 用户主动「显示」= 重来一次：Z 序自愈的计数与退避全部复位
         reset_reassert_state();
+        apply_takeover_pref(app);
         grid_log("显示挂件层（复用已有窗口）");
         return attach;
     }
@@ -2041,9 +2058,23 @@ fn show_overlay(app: &AppHandle) -> Result<(), String> {
     mark_overlay_shown();
     // 新窗从零开始，自愈状态一并复位
     reset_reassert_state();
+    apply_takeover_pref(app);
     grid_log("新建并显示挂件层");
     ensure_poller(app.clone());
     attach
+}
+
+/// 按用户的「接管桌面」偏好决定此刻要不要隐藏系统桌面图标（V38）。
+///
+/// 三条路径都会调它：新建挂件窗、复用已有窗、应用启动恢复格子层 —— 于是
+/// 「整理过 → 图标藏起来」这个状态在收起再显示、重启之后都保持一致。
+fn apply_takeover_pref(app: &AppHandle) {
+    if read_takeover(app) {
+        let taken = takeover_icons(app, true);
+        if !taken {
+            grid_log("接管偏好为开，但本机隐藏桌面图标失败（格子与原图标将同时显示）");
+        }
+    }
 }
 
 /// 读「挂件层是否应处于显示状态」。
@@ -2374,57 +2405,259 @@ pub async fn grid_open_path(app: AppHandle, path: String) -> Result<(), String> 
 // 因此「还原布局」只是丢弃 / 重建格子，不涉及任何文件回迁，天然安全。
 // ————————————————————————————————————————————————————————————————
 
-/// 一键整理的格子排布：**靠右自动流**（详见 [`arrange_position`]）。
+/// 一键整理的格子排布：**靠右自动流**（详见 [`FlowPlacer`]）。
 const ARRANGE_MARGIN: i64 = 32;
+/// 相邻两列的右边界间距（列宽 320 + 24 间隙）
 const ARRANGE_STEP_X: i64 = 344;
-const ARRANGE_STEP_Y: i64 = 268;
+/// 同一列内相邻两个格子的纵向间隙
+const ARRANGE_GAP_Y: i64 = 24;
 const ARRANGE_BOX_W: i64 = 320;
 const ARRANGE_BOX_H: i64 = 244;
+/// 格子最小尺寸（与前端 `MIN_BOX_W/H` 一致，布局时不得再小）
+const MIN_BOX_W: i64 = 160;
+const MIN_BOX_H: i64 = 120;
 /// 单行最多摆几列（超宽屏也别一路排到左边缘之外）
 const ARRANGE_MAX_COLUMNS: i64 = 8;
 
-/// 按工作区宽度算一行能摆几列（至少 1 列、最多 [`ARRANGE_MAX_COLUMNS`] 列）。
-fn arrange_columns(work_width: i64) -> i64 {
-    ((work_width - ARRANGE_MARGIN) / ARRANGE_STEP_X).clamp(1, ARRANGE_MAX_COLUMNS)
+/// 一个矩形（逻辑像素）—— 排布时的占位 / 禁区。
+#[derive(Debug, Clone, Copy)]
+struct SlotRect {
+    x: i64,
+    y: i64,
+    w: i64,
+    h: i64,
 }
 
-/// 靠右自动流的落点：第 `index` 个格子（0 起）的逻辑像素坐标。
+impl SlotRect {
+    /// 两个矩形是否相交（边缘相接不算相交，允许紧贴）。
+    fn intersects(&self, other: &SlotRect) -> bool {
+        self.x < other.x + other.w
+            && other.x < self.x + self.w
+            && self.y < other.y + other.h
+            && other.y < self.y + self.h
+    }
+}
+
+/// **靠右自动流排布器**（V38 抽出，统一「一键整理」与「新建格子」两处落点计算）。
 ///
-/// 用户建议原话：「建议格子靠右自动流布局」。直觉来自桌面图标 —— 从右边缘开始摆，
-/// 摆满一列往左推一列，一行到底再换下一行；这样新格子永远落在眼睛习惯的位置，
-/// 也不会把桌面左侧压满。
-fn arrange_position(work_width: i64, index: i64) -> (i64, i64) {
-    let columns = arrange_columns(work_width);
-    let col = index % columns;
-    let row = index / columns;
-    // col = 0 最靠右，往左依次推进一列；`.`max(MARGIN) 兜住极窄工作区
-    let x = (work_width - ARRANGE_MARGIN - ARRANGE_BOX_W - col * ARRANGE_STEP_X).max(ARRANGE_MARGIN);
-    let y = ARRANGE_MARGIN + row * ARRANGE_STEP_Y;
-    (x, y)
+/// 规则（对应用户那句「没有计算桌面合理的规划格子位置、流布局结构」）：
+///   1. 从工作区**右边缘**开始；
+///   2. 一列之内**自上而下**摆满，装不下再往左推一列（不是先横着一行行铺）；
+///   3. 每个格子用**自己的宽高**算占位，不再假定所有格子一样大；
+///   4. `blocked` 里的矩形是禁区 —— 便签 / 日历挂件的位置、以及本列刚摆下的格子，
+///      候选点撞上禁区就往下让开（而不是硬叠上去）。
+///
+/// 为什么是「自上而下的一列列」而不是「一行行」：桌面上图标本来就是左侧竖排，
+/// 格子贴着右边缘竖向堆叠时视觉上像另一条「图标列」，横向铺开反而会横穿整个桌面。
+struct FlowPlacer {
+    margin: i64,
+    work_h: i64,
+    /// 当前列的右边界（逻辑像素）
+    col_right: i64,
+    /// 当前列的纵向游标
+    cursor_y: i64,
+    /// 已占用的矩形（禁区 + 已摆下的格子）
+    blocked: Vec<SlotRect>,
 }
 
-/// 一键收纳结果摘要（前端据此提示「收纳了几个条目、建了几个格子」）。
+impl FlowPlacer {
+    fn new(work_w: i64, work_h: i64, blocked: Vec<SlotRect>) -> Self {
+        // 工作区尺寸拿不到时退回 1280×720，宁可摆得挤一点也不能算出负坐标
+        let work_w = if work_w > 0 { work_w } else { 1280 };
+        let work_h = if work_h > 0 { work_h } else { 720 };
+        Self {
+            margin: ARRANGE_MARGIN,
+            work_h,
+            col_right: work_w - ARRANGE_MARGIN,
+            cursor_y: ARRANGE_MARGIN,
+            blocked,
+        }
+    }
+
+    /// 给一个 `w×h` 的格子找下一个落点。`None` = 桌面已经排不下了。
+    fn next(&mut self, w: i64, h: i64) -> Option<(i64, i64)> {
+        let w = w.max(MIN_BOX_W);
+        let h = h.max(MIN_BOX_H);
+        // 最多往左推 ARRANGE_MAX_COLUMNS 列，推不动就放弃（返回 None）
+        for _ in 0..ARRANGE_MAX_COLUMNS + 1 {
+            if self.col_right - w < self.margin {
+                // 这一列连宽度都不够 → 再往左只会更糟
+                return None;
+            }
+            let x = self.col_right - w;
+            if let Some(y) = self.find_row(x, w, h) {
+                let rect = SlotRect { x, y, w, h };
+                self.blocked.push(rect);
+                self.cursor_y = y + h + ARRANGE_GAP_Y;
+                return Some((x, y));
+            }
+            // 本列排到底 → 换左边一列，游标回到顶部
+            self.col_right -= ARRANGE_STEP_X;
+            self.cursor_y = self.margin;
+        }
+        None
+    }
+
+    /// 在列内（x 固定）自上而下找第一个「不与禁区相交、且不越出下边界」的 y。
+    fn find_row(&self, x: i64, w: i64, h: i64) -> Option<i64> {
+        let mut y = self.cursor_y;
+        // 每撞一次禁区就跳到它的下沿；上限兜住病态数据（避免死循环）
+        for _ in 0..64 {
+            if y + h > self.work_h - self.margin {
+                return None;
+            }
+            let rect = SlotRect { x, y, w, h };
+            match self.blocked.iter().find(|other| rect.intersects(other)) {
+                Some(hit) => y = hit.y + hit.h + ARRANGE_GAP_Y,
+                None => return Some(y),
+            }
+        }
+        None
+    }
+}
+
+/// 读出全部格子的几何（含挂件），按 `sort, id` 顺序。
+fn load_box_rects(conn: &Connection) -> Result<Vec<(GridBoxRect, bool)>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, kind, pos_x, pos_y, width, height FROM grid_boxes \
+             ORDER BY sort ASC, id ASC",
+        )
+        .map_err(|err| format!("读取格子几何失败：{err}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                GridBoxRect {
+                    id: row.get(0)?,
+                    x: row.get(2)?,
+                    y: row.get(3)?,
+                    w: row.get::<_, i64>(4)?.max(MIN_BOX_W),
+                    h: row.get::<_, i64>(5)?.max(MIN_BOX_H),
+                },
+                row.get::<_, String>(1)? != "folder",
+            ))
+        })
+        .map_err(|err| format!("读取格子几何失败：{err}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| format!("读取格子几何失败：{err}"))?;
+    Ok(rows)
+}
+
+/// 排布用的格子几何（`is_widget` = 便签 / 日历这类不参与自动排布的挂件）。
+struct GridBoxRect {
+    id: i64,
+    x: i64,
+    y: i64,
+    w: i64,
+    h: i64,
+}
+
+impl GridBoxRect {
+    fn rect(&self) -> SlotRect {
+        SlotRect {
+            x: self.x,
+            y: self.y,
+            w: self.w,
+            h: self.h,
+        }
+    }
+}
+
+/// **重排桌面上所有收纳格**，返回真正被挪动的格子数。
+///
+/// 为什么要「全量重排」而不是「只摆新格子」：用户实测（V38）点完整理后抱怨
+/// 「格子是自动创建了但是很乱，没有计算桌面合理的规划格子位置」—— 根因是新建的格子
+/// 按「已有格子个数」取槽位、而复用的旧格子**保留着自己当年的坐标**，两拨坐标凑在一起
+/// 就是一团乱麻。所以整理这一步直接把所有收纳格重新流布一遍。
+///
+/// 挂件（便签 / 日历）**位置不动** —— 那是用户自己摆的，但它们的矩形会作为禁区，
+/// 免得新排的格子压在上面。
+fn layout_all_boxes(conn: &Connection, work_w: i64, work_h: i64) -> Result<usize, String> {
+    let rows = load_box_rects(conn)?;
+    let blocked: Vec<SlotRect> = rows
+        .iter()
+        .filter(|(_, is_widget)| *is_widget)
+        .map(|(rect, _)| rect.rect())
+        .collect();
+    let mut placer = FlowPlacer::new(work_w, work_h, blocked);
+    let mut moved = 0usize;
+    let mut stuck = 0usize;
+    for (rect, is_widget) in &rows {
+        if *is_widget {
+            continue;
+        }
+        let Some((x, y)) = placer.next(rect.w, rect.h) else {
+            stuck += 1;
+            continue;
+        };
+        if x == rect.x && y == rect.y {
+            continue;
+        }
+        conn.execute(
+            "UPDATE grid_boxes SET pos_x = ?1, pos_y = ?2, updated_at = ?3 WHERE id = ?4",
+            params![x, y, now_iso(), rect.id],
+        )
+        .map_err(|err| format!("排布格子失败：{err}"))?;
+        moved += 1;
+    }
+    if moved > 0 || stuck > 0 {
+        grid_log(&format!(
+            "重排格子：挪动 {moved} 个（工作区 {work_w}×{work_h}），{stuck} 个没地方放（保持原位）"
+        ));
+    }
+    Ok(moved)
+}
+
+/// 给一个**即将新建**的格子算落点：不挪动任何已有格子，只找一块空位。
+///
+/// 全部已有格子（含挂件）都当禁区 —— 新建的格子永远不该叠在别人身上。
+fn free_slot_for(conn: &Connection, work_w: i64, work_h: i64, w: i64, h: i64) -> (i64, i64) {
+    let blocked: Vec<SlotRect> = load_box_rects(conn)
+        .map(|rows| rows.iter().map(|(rect, _)| rect.rect()).collect())
+        .unwrap_or_default();
+    let mut placer = FlowPlacer::new(work_w, work_h, blocked);
+    placer.next(w, h).unwrap_or_else(|| {
+        // 排不下了（桌面已满）：退回右上角，至少保证落在可见区域里
+        (ARRANGE_MARGIN, ARRANGE_MARGIN)
+    })
+}
+
+/// 一键整理结果摘要（前端据此提示「登记了几个条目、建了几个格子、挪了几个格子」）。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AutoArrangeReport {
     /// 桌面根目录扫描到的可见条目数（含快捷方式 / 文件夹）
     pub scanned: usize,
-    /// 本次真正移动进收纳目录的条目数（文件 + 文件夹）
+    /// 本次登记进格子的条目数（V37 起**只登记，不移动文件**）
     pub items_added: usize,
-    /// 其中文件夹占的数量（V34 起文件夹也纳入收纳）
+    /// 其中文件夹占的数量
     pub folders_moved: usize,
+    /// 其中快捷方式（`.lnk`）占的数量
+    pub lnk_added: usize,
     /// 本次新建的格子数
     pub boxes_created: usize,
     /// 复用了同名已有格子的次数
     pub boxes_reused: usize,
-    /// 按设计跳过的条目数（只剩快捷方式 `.lnk` —— 用户要求留在桌面原位）
+    /// 按规则跳过的条目数（自己的历史收纳容器 `Handy整理*` / `Handy收纳*`）
     pub skipped: usize,
+    /// 本次被重新排布的格子数（V38：整理会**全量重排**，不只摆新格子）
+    pub boxes_laid_out: usize,
+    /// 整理后系统桌面图标是否已由格子层接管（true = 原生图标已隐藏）
+    pub icons_hidden: bool,
     /// 单条目失败原因（不中断整批，前端原样展示给用户）
     pub failures: Vec<String>,
 }
 
-/// 把扫描结果归入「格子名」：文件夹单独一组，文件按扩展名类别分组。
+/// 把扫描结果归入「格子名」：快捷方式 / 文件夹各自单独一组，其余按扩展名类别分组。
+///
+/// ⚠️ `.lnk` 必须归类（V38 改）：V34 时用户说过「原生快捷方式不需要动态整理」，
+/// 那是在**图标仍显示在桌面**的前提下。V38 起整理会隐藏系统桌面图标、由格子代管
+/// 桌面呈现 —— 这时若还跳过 `.lnk`，用户桌面上那二十几个程序快捷方式会**当场消失**
+/// 且无处可点。归类（只登记、不移动）才是安全的做法。
 fn arrange_group_of(item: &crate::commands::organizer::OrganizerItem) -> String {
+    if item.is_lnk {
+        return "快捷方式".to_string();
+    }
     if item.is_dir {
         return "文件夹".to_string();
     }
@@ -2434,13 +2667,67 @@ fn arrange_group_of(item: &crate::commands::organizer::OrganizerItem) -> String 
     item.category.clone()
 }
 
-/// 分组展示顺序：文件夹最前，「其他」最后，中间类别保持扫描自然顺序。
+/// 分组展示顺序：文件夹最前，快捷方式其次（桌面上最常用），「其他」最后。
 fn arrange_group_rank(name: &str) -> i64 {
     match name {
         "文件夹" => 0,
-        "其他" => 2,
-        _ => 1,
+        "快捷方式" => 1,
+        "其他" => 3,
+        _ => 2,
     }
+}
+
+/// 「系统」格里的虚拟条目：Explorer **恒定显示**、磁盘上没有对应文件的桌面入口。
+///
+/// 为什么 V38 又把它们请回来：V34 删掉「系统」格的依据是「此电脑 / 回收站本来就一直
+/// 显示在桌面上，格子里那份纯属重复」。而现在整理会**隐藏原生桌面图标**，那三个入口
+/// 若没人接管就彻底点不到了 —— 前提变了，结论就得跟着变。
+///
+/// 路径是 shell 命名空间 CLSID，`grid_open_path` 用 `ShellExecuteW` 直接打开；
+/// `list_live_items` 对 `::` 开头显式豁免存在性校验（否则会被当成失效登记清掉）。
+const SYSTEM_ENTRIES: [(&str, &str); 3] = [
+    ("::{20D04FE0-3AEA-1069-A2D8-08002B30309D}", "此电脑"),
+    ("::{645FF040-5081-101B-9F08-00AA002F954E}", "回收站"),
+    ("::{59031A47-3F72-44A7-89C5-5595FE6B30EE}", "用户的文件"),
+];
+
+/// 确保存在「系统」格并补齐三个系统入口（幂等）。
+fn ensure_system_box(conn: &Connection) -> Result<i64, String> {
+    let existing: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM grid_boxes WHERE name = ?1 AND kind = 'system' ORDER BY id LIMIT 1",
+            params!["系统"],
+            |row| row.get(0),
+        )
+        .ok();
+    let box_id = match existing {
+        Some(id) => id,
+        None => {
+            let now = now_iso();
+            let sort = next_sort(conn, "SELECT COALESCE(MAX(sort) + 1, 0) FROM grid_boxes", None)?;
+            conn.execute(
+                "INSERT INTO grid_boxes \
+                 (name, kind, category, pos_x, pos_y, width, height, sort, created_at, updated_at) \
+                 VALUES ('系统', 'system', '', ?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+                params![
+                    ARRANGE_MARGIN,
+                    ARRANGE_MARGIN,
+                    ARRANGE_BOX_W,
+                    MIN_BOX_H + 80,
+                    sort,
+                    now,
+                ],
+            )
+            .map_err(|err| format!("创建「系统」格失败：{err}"))?;
+            conn.last_insert_rowid()
+        }
+    };
+    // 三个入口都是虚拟路径，register_item 会照常做「已存在 / 用户说过不要 / 已归属」
+    // 三重检查，所以这里重复调用是幂等的
+    for (path, name) in SYSTEM_ENTRIES {
+        let _ = register_item(conn, box_id, Path::new(path), name);
+    }
+    Ok(box_id)
 }
 
 /// 一键归类核心（连接与桌面目录由调用方给定）。
@@ -2449,26 +2736,28 @@ fn arrange_group_rank(name: &str) -> i64 {
 ///   - 用户否掉了 V33–V36 的「真实收纳」——「是桌面整理不是让你把桌面上的东西都给我
 ///     移动到一个目录下面去」。现在扫到的条目只是在格子里**登记一条引用**，
 ///     文件本体一个字节都不动；
-///   - **文件夹照样归类**（只跳过 `.lnk`）：用户实测「文件夹的整理根本都不生效」，
+///   - **文件夹照样归类**（只跳过自己的历史收纳容器）：用户实测「文件夹的整理根本都不生效」，
 ///     根因是早期这里把 `is_dir` 整个跳过 —— 「文件夹」格因此永远是空的；
-///   - **自己的收纳容器永不参与**：见 [`is_storage_entry`]（V36 那次 195 GB 事故）；
-///   - **靠右自动流排布**：新格子从工作区右边缘起、自右往左推进（见 [`arrange_position`]）。
+///   - **快捷方式也归类**（V38）：整理后原生图标会被格子层接管，跳过 `.lnk` 会让
+///     用户桌面上的程序快捷方式当场消失；
+///   - **自己的收纳容器永不参与**：见 [`is_storage_entry`]（V36 那次 296 GB 事故）；
+///   - **全量重排**（V38）：所有收纳格重新按靠右流布局摆放，见 [`layout_all_boxes`]。
 ///
-/// `work_width` 是工作区（挂件窗）的逻辑宽度，用于算右对齐落点；<= 0 时退回 1280。
+/// `work_width` / `work_height` 是工作区（挂件窗）的逻辑尺寸；<= 0 时各自退回
+/// 1280 / 720。
 fn auto_arrange_inner(
     conn: &Connection,
     desktop: &Path,
     work_width: i64,
+    work_height: i64,
 ) -> Result<AutoArrangeReport, String> {
     use std::collections::HashMap;
 
-    let width = if work_width > 0 { work_width } else { 1280 };
     let scanned = crate::commands::organizer::scan_items(desktop)?;
     let total_scanned = scanned.len();
 
-    // 已有格子：名称 → id；`occupied` 记录已占用的排布槽位，新格子往后排
+    // 已有格子：名称 → id（新格子按类别名复用同名格子）
     let mut existing: HashMap<String, i64> = HashMap::new();
-    let mut occupied: i64 = 0;
     {
         let mut stmt = conn
             .prepare("SELECT id, name FROM grid_boxes ORDER BY sort ASC, id ASC")
@@ -2480,16 +2769,18 @@ fn auto_arrange_inner(
             .map_err(|err| format!("读取格子失败：{err}"))?;
         for row in rows {
             let (id, name) = row.map_err(|err| format!("读取格子失败：{err}"))?;
-            occupied += 1;
             existing.insert(name, id);
         }
     }
 
-    // 按类别分组（**只跳过快捷方式**；文件夹归「文件夹」组）
+    // 按类别分组（文件夹 / 快捷方式各自一组，其余按扩展名类别）
     let mut grouped: Vec<(String, Vec<usize>)> = Vec::new();
+    let mut skipped = 0usize;
     for (index, item) in scanned.iter().enumerate() {
-        // `.lnk` 按用户要求不动；自己的收纳容器永不参与（V36 事故根源）
-        if item.is_lnk || is_storage_entry(&item.name) {
+        // 自己的收纳容器永不参与（V36 事故根源）：它一旦被当成普通文件夹归类，
+        // 又有任何一次移动兜底逻辑走偏，就会自我复制成 296 GB
+        if is_storage_entry(&item.name) {
+            skipped += 1;
             continue;
         }
         let key = arrange_group_of(item);
@@ -2504,10 +2795,12 @@ fn auto_arrange_inner(
         scanned: total_scanned,
         items_added: 0,
         folders_moved: 0,
+        lnk_added: 0,
         boxes_created: 0,
         boxes_reused: 0,
-        // 快捷方式按设计不动，明确计入「跳过」，让用户看到不是漏了
-        skipped: scanned.iter().filter(|item| item.is_lnk).count(),
+        skipped,
+        boxes_laid_out: 0,
+        icons_hidden: false,
         failures: Vec::new(),
     };
 
@@ -2522,8 +2815,9 @@ fn auto_arrange_inner(
             }
             None => {
                 let now = now_iso();
-                let (pos_x, pos_y) = arrange_position(width, occupied);
-                // 全表求最大值：该 SQL 无占位符，必须传 None
+                // 落点先给个临时值 —— 循环结束后统一全量重排（layout_all_boxes），
+                // 这样「新建的」和「复用的」格子会被同一套流布局摆整齐，
+                // 而不是新格子按槽位、旧格子留在当年的老坐标上各说各话。
                 let sort = next_sort(
                     conn,
                     "SELECT COALESCE(MAX(sort) + 1, 0) FROM grid_boxes",
@@ -2536,8 +2830,8 @@ fn auto_arrange_inner(
                     params![
                         label,
                         label,
-                        pos_x,
-                        pos_y,
+                        ARRANGE_MARGIN,
+                        ARRANGE_MARGIN,
                         ARRANGE_BOX_W,
                         ARRANGE_BOX_H,
                         sort,
@@ -2548,7 +2842,6 @@ fn auto_arrange_inner(
                 .map_err(|err| format!("创建格子「{label}」失败：{err}"))?;
                 let id = conn.last_insert_rowid();
                 existing.insert(label.clone(), id);
-                occupied += 1;
                 report.boxes_created += 1;
                 id
             }
@@ -2565,6 +2858,9 @@ fn auto_arrange_inner(
                     if item.is_dir {
                         report.folders_moved += 1;
                     }
+                    if item.is_lnk {
+                        report.lnk_added += 1;
+                    }
                 }
                 Ok(false) => {}
                 Err(err) => report.failures.push(format!("{}：{err}", item.name)),
@@ -2572,44 +2868,75 @@ fn auto_arrange_inner(
         }
     }
 
+    // 系统入口格（此电脑 / 回收站 / 用户文件夹）：整理后原生图标由格子接管，
+    // 这几个 Explorer 恒定显示的入口必须由格子补回来，否则用户就点不到它们了。
+    if report.items_added > 0 {
+        ensure_system_box(conn)?;
+    }
+
+    // 全量重排（含复用与新建设立的格子）
+    report.boxes_laid_out = layout_all_boxes(conn, work_width, work_height)?;
+
     grid_log(&format!(
-        "一键归类：扫到 {} 项，登记 {} 项（文件全部原地未动），跳过 {} 个快捷方式，格子新建 {} / 复用 {}，失败 {}",
+        "一键整理：扫到 {} 项，登记 {} 项（文件全部原地未动，含快捷方式 {}、文件夹 {}），\
+         跳过 {} 个历史收纳容器，格子新建 {} / 复用 {} / 重排 {}，失败 {}",
         report.scanned,
         report.items_added,
+        report.lnk_added,
+        report.folders_moved,
         report.skipped,
         report.boxes_created,
         report.boxes_reused,
+        report.boxes_laid_out,
         report.failures.len()
     ));
     Ok(report)
 }
 
-/// 布局可用的逻辑宽度。
+/// 布局可用的逻辑尺寸 `(宽, 高)`。
 ///
-/// 优先用挂件窗自身的宽度 —— 格子的 `pos_x` 本来就是**相对挂件窗客户区**的，
-/// 拿显示器宽度去算会在「窗口没铺满屏幕」时把格子推到窗口外面。
-/// 窗口还没建时退回主显示器工作区宽度；都拿不到给 1280。
-fn layout_work_width(app: &AppHandle) -> i64 {
+/// 优先用挂件窗自身的尺寸 —— 格子的 `pos_x/pos_y` 本来就是**相对挂件窗客户区**的，
+/// 拿显示器尺寸去算会在「窗口没铺满屏幕」时把格子推到窗口外面。
+/// 窗口还没建时退回主显示器工作区；都拿不到给 1280×720。
+///
+/// V38 补上高度：排布改成「一列自上而下摆满再往左推一列」之后，**没有高度就算不出
+/// 一列能放几个**，格子在纵向会越排越出去（用户实测截图里就是一路排到桌面底部之外）。
+fn layout_work_size(app: &AppHandle) -> (i64, i64) {
     if let Some(win) = app.get_webview_window(GRID_LABEL) {
         if let (Ok(size), Ok(scale)) = (win.inner_size(), win.scale_factor()) {
-            if scale > 0.0 && size.width > 0 {
-                return (f64::from(size.width) / scale).round() as i64;
+            if scale > 0.0 && size.width > 0 && size.height > 0 {
+                return (
+                    (f64::from(size.width) / scale).round() as i64,
+                    (f64::from(size.height) / scale).round() as i64,
+                );
             }
         }
     }
     if let Ok(Some(monitor)) = app.primary_monitor() {
         let scale = monitor.scale_factor();
         if scale > 0.0 {
-            return (f64::from(monitor.work_area().size.width) / scale).round() as i64;
+            let area = monitor.work_area();
+            return (
+                (f64::from(area.size.width) / scale).round() as i64,
+                (f64::from(area.size.height) / scale).round() as i64,
+            );
         }
     }
-    1280
+    (1280, 720)
 }
 
-/// 一键收纳桌面：扫描 → 文件与文件夹按类型移动进 `桌面/Handy整理/<类别>/` → 每类一格。
+/// 一键整理桌面 —— 「桌面整理」模块的主入口（工具栏的整理按钮也走这里）。
 ///
-/// **只有快捷方式（`.lnk`）不动**（用户明确要求「原生快捷方式不需要动态整理」）；
-/// 文件夹按用户实测反馈一并收纳（V34：「文件夹的整理根本都不生效」）。
+/// 一次点击做完五件事（用户原话：「我点击整理应该是自动整理规划桌面」）：
+///   ① 扫桌面 → 按类型（文件夹 / 快捷方式 / 图片 / 文档 / 压缩包 / 安装包 / 其他）分组；
+///   ② **只登记引用**：文件一个字节都不动（V37 呈现层模型）；
+///   ③ 每个类别一个格子，同名格子复用；
+///   ④ **全量重排**所有格子（靠右流布局，避开便签 / 日历挂件）；
+///   ⑤ 补上「系统」格（此电脑 / 回收站 / 用户文件夹）并**隐藏系统桌面图标** ——
+///      桌面呈现此后完全由格子层负责，同一份内容不会再显示两遍。
+///      这一步的偏好记在 `grid_meta.desktop_takeover`，收起挂件 / 退出应用都会
+///      立刻把图标还给系统；工具栏的「原生桌面图标」开关可随时切回共存模式。
+///
 /// `dir` 仅供测试 / 自定义目录，缺省为用户桌面。
 #[tauri::command]
 pub async fn grid_auto_arrange(
@@ -2621,7 +2948,20 @@ pub async fn grid_auto_arrange(
         _ => desktop_root()?,
     };
     let conn = connect(&app)?;
-    auto_arrange_inner(&conn, &desktop, layout_work_width(&app))
+    let (work_w, work_h) = layout_work_size(&app);
+    let mut report = auto_arrange_inner(&conn, &desktop, work_w, work_h)?;
+
+    // 只有真的往里登记了东西才接管桌面 —— 空跑一次（桌面已干净）不该顺手把用户图标藏了
+    if report.items_added > 0 {
+        if let Err(err) = write_takeover(&app, true) {
+            grid_log(&format!("保存桌面接管偏好失败：{err}"));
+        }
+        report.icons_hidden = takeover_icons(&app, true);
+        if !report.icons_hidden {
+            grid_log("接管桌面失败（未找到系统桌面图标视图），格子与原生图标将同时显示");
+        }
+    }
+    Ok(report)
 }
 
 /// 对账全部收纳格：按磁盘目录补齐新出现的文件、清掉已消失的登记。
@@ -2785,6 +3125,14 @@ fn shell_icon_handle(path: &str) -> Option<windows::Win32::UI::WindowsAndMessagi
         .chain(std::iter::once(0))
         .collect();
 
+    // ⓪ shell 命名空间（`::{CLSID}`，如「此电脑 / 回收站 / 用户的文件」）：
+    //    `SHGetFileInfoW` 把它当**文件路径**解析，必然失败 —— 必须先
+    //    `SHParseDisplayName` 拿到 PIDL，再带 `SHGFI_PIDL` 求图标。
+    //    V38 新增「系统」格时才发现这条分支缺失（此前格子只装真实文件路径）。
+    if path.starts_with("::") {
+        return virtual_shell_icon(&wide);
+    }
+
     // ① 系统大图标列表（48×48）
     let mut sfi = SHFILEINFOW::default();
     let info_ok = unsafe {
@@ -2825,6 +3173,49 @@ fn shell_icon_handle(path: &str) -> Option<windows::Win32::UI::WindowsAndMessagi
         return None;
     }
     Some(fallback.hIcon)
+}
+
+/// shell 命名空间条目（`::{CLSID}`）的图标：字符串 → PIDL → 系统图像列表。
+///
+/// 失败一律 `None`（前端回退线条图标）—— 取不到图标不该阻断格子显示。
+#[cfg(target_os = "windows")]
+fn virtual_shell_icon(wide: &[u16]) -> Option<windows::Win32::UI::WindowsAndMessaging::HICON> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL;
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::UI::Shell::Common::ITEMIDLIST;
+    use windows::Win32::UI::Shell::{
+        SHGetFileInfoW, SHParseDisplayName, SHFILEINFOW, SHGFI_PIDL, SHGFI_SYSICONINDEX,
+    };
+
+    // SAFETY: 入参是 NUL 结尾的宽字符串；SHParseDisplayName 分配的 PIDL 归调用方，
+    // 用完 `CoTaskMemFree` 释放（Windows 规定的配对方式）。
+    unsafe {
+        let mut pidl: *mut ITEMIDLIST = std::ptr::null_mut();
+        if SHParseDisplayName(PCWSTR(wide.as_ptr()), None, &mut pidl, 0, None).is_err()
+            || pidl.is_null()
+        {
+            return None;
+        }
+        let mut sfi = SHFILEINFOW::default();
+        let ok = SHGetFileInfoW(
+            PCWSTR(pidl as *const u16),
+            FILE_ATTRIBUTE_NORMAL,
+            Some(&mut sfi as *mut SHFILEINFOW as *mut _),
+            std::mem::size_of::<SHFILEINFOW>() as u32,
+            SHGFI_SYSICONINDEX | SHGFI_PIDL,
+        );
+        CoTaskMemFree(Some(pidl as *const std::ffi::c_void));
+        if ok == 0 {
+            return None;
+        }
+        if desktop_icon_size_cached() > 64 {
+            if let Some(icon) = image_list_icon(sfi.iIcon, SHIL_JUMBO) {
+                return Some(icon);
+            }
+        }
+        image_list_icon(sfi.iIcon, SHIL_EXTRALARGE)
+    }
 }
 
 /// `SHIL_EXTRALARGE`：系统图像列表里 48×48 的那一档（`SHGetImageList` 的索引值）。
@@ -3856,6 +4247,145 @@ mod z_verdict_tests {
         assert!(REASSERT_GIVEUP_BACKOFF_SECS >= 60);
         // 自检节奏必须是时间量，不能跟着轮询周期走（V35 的教训）
         assert!(REASSERT_INTERVAL_SECS >= 1);
+    }
+}
+
+/// `FlowPlacer` 的排布规则。
+///
+/// 用户 V38 原话：「点击整理桌面后格子是自动创建了 但是很乱，没有计算桌面合理的
+/// 规划格子位置 流布局结构」。这些断言把「合理」钉成可复算的东西 —— 否则下次改排布参数，
+/// 「很乱」又会悄悄回来。
+///
+/// 刻意**不依赖 Windows API**（只用到 `SlotRect` / `FlowPlacer`），所以在任何平台上跑。
+#[cfg(test)]
+mod flow_placer_tests {
+    use super::{SlotRect, ARRANGE_BOX_H, ARRANGE_BOX_W, ARRANGE_GAP_Y, MIN_BOX_H, MIN_BOX_W};
+    use super::{FlowPlacer, ARRANGE_MARGIN};
+
+    fn overlap(a: &SlotRect, b: &SlotRect) -> bool {
+        a.intersects(b)
+    }
+
+    #[test]
+    fn first_box_lands_in_the_top_right_corner() {
+        let mut p = FlowPlacer::new(1920, 1080, Vec::new());
+        let (x, y) = p.next(ARRANGE_BOX_W, ARRANGE_BOX_H).expect("首块必有位置");
+        assert_eq!(y, ARRANGE_MARGIN, "首扎根在顶部");
+        assert_eq!(
+            x,
+            1920 - ARRANGE_MARGIN - ARRANGE_BOX_W,
+            "右边缘对齐（贴右边但不是贴死屏幕边缘）"
+        );
+    }
+
+    #[test]
+    fn stacks_down_before_flowing_left() {
+        let mut p = FlowPlacer::new(1920, 1080, Vec::new());
+        let first = p.next(ARRANGE_BOX_W, ARRANGE_BOX_H).unwrap();
+        let second = p.next(ARRANGE_BOX_W, ARRANGE_BOX_H).unwrap();
+        // 同一列：x 不动，y 往下退一格
+        assert_eq!(second.0, first.0);
+        assert_eq!(second.1, first.1 + ARRANGE_BOX_H + ARRANGE_GAP_Y);
+
+        // 一路摆到列尾，下一个必须换到左边一列，且回到顶部
+        let mut last_col = second.0;
+        for _ in 0..16 {
+            match p.next(ARRANGE_BOX_W, ARRANGE_BOX_H) {
+                Some((x, _)) => last_col = x,
+                None => break,
+            }
+        }
+        assert!(last_col < second.0, "排不下时应该往左推一列");
+    }
+
+    #[test]
+    fn respects_widget_no_go_zones() {
+        // 便签 / 日历是用户自己摆的，新排的格子不许压上去。
+        // 禁区刻意挡住「右上角」这个首选项位置 —— 否则 new walker 一开始就走 top-right，
+        // 根本不会经过「让开」那条分支，这条测试就成了摆设。
+        let widget = SlotRect {
+            x: 1500,
+            y: ARRANGE_MARGIN,
+            w: 300,
+            h: 200,
+        };
+        let mut p = FlowPlacer::new(1920, 1080, vec![widget]);
+        let (x, y) = p.next(ARRANGE_BOX_W, ARRANGE_BOX_H).expect("禁区之外还有地方");
+        let placed = SlotRect {
+            x,
+            y,
+            w: ARRANGE_BOX_W,
+            h: ARRANGE_BOX_H,
+        };
+        assert!(!overlap(&placed, &widget), "挂件位置必须让开");
+        assert!(
+            y >= widget.y + widget.h,
+            "撞上禁区应该是往下让开，而不是横向漂移或叠上去"
+        );
+    }
+
+    #[test]
+    fn never_runs_off_the_bottom_nor_off_the_left() {
+        let mut p = FlowPlacer::new(900, 500, Vec::new());
+        let mut placed = Vec::new();
+        while let Some((x, y)) = p.next(ARRANGE_BOX_W, ARRANGE_BOX_H) {
+            assert!(y + ARRANGE_BOX_H <= 500 - ARRANGE_MARGIN, "不许排到桌面之外");
+            assert!(x >= ARRANGE_MARGIN, "不许排到左边界之外");
+            placed.push(SlotRect {
+                x,
+                y,
+                w: ARRANGE_BOX_W,
+                h: ARRANGE_BOX_H,
+            });
+        }
+        // 小桌面确实塞得下几个（否则这条测试等于什么都没验）
+        assert!(!placed.is_empty(), "900×500 至少要摆得下一个格子");
+    }
+
+    #[test]
+    fn reports_exhaustion_instead_of_piling_up() {
+        // 极窄桌面：连一列都放不下 → 明确放弃，而不是返回负坐标或互相叠压
+        let mut p = FlowPlacer::new(200, 400, Vec::new());
+        assert_eq!(p.next(ARRANGE_BOX_W, ARRANGE_BOX_H), None);
+    }
+
+    #[test]
+    fn a_full_pass_never_overlaps() {
+        let mut p = FlowPlacer::new(1920, 1080, Vec::new());
+        let mut placed = Vec::new();
+        for _ in 0..12 {
+            match p.next(ARRANGE_BOX_W, ARRANGE_BOX_H) {
+                Some((x, y)) => placed.push(SlotRect {
+                    x,
+                    y,
+                    w: ARRANGE_BOX_W,
+                    h: ARRANGE_BOX_H,
+                }),
+                None => break,
+            }
+        }
+        for i in 0..placed.len() {
+            for j in (i + 1)..placed.len() {
+                assert!(
+                    !overlap(&placed[i], &placed[j]),
+                    "第 {i} 与第 {j} 个格子重叠了：{:?} vs {:?}",
+                    placed[i],
+                    placed[j]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn honours_each_boxs_own_size_and_a_minimum() {
+        // 尺寸不统一才是常态（用户把某个格子拉宽 / 拉高过），不能按固定步进假定
+        let mut p = FlowPlacer::new(1920, 1080, Vec::new());
+        let (x, y) = p.next(8, 8).expect("极小尺寸也要有位置");
+        // 内部分别被夹到 MIN_BOX_W / MIN_BOX_H：x 是右边界减宽度
+        assert_eq!(x, 1920 - ARRANGE_MARGIN - MIN_BOX_W);
+        assert_eq!(y, ARRANGE_MARGIN);
+        let second = p.next(ARRANGE_BOX_W, ARRANGE_BOX_H).unwrap();
+        assert_eq!(second.1, ARRANGE_MARGIN + MIN_BOX_H + ARRANGE_GAP_Y);
     }
 }
 

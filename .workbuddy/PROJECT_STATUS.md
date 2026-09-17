@@ -1585,6 +1585,94 @@ Rust 侧 `row.get::<String>` 直接报错，表现成「桌面格子整个打不
 
 ---
 
+### 1.24 V38 批次（用户三张截图反馈：**新格子被锁 · 格子莫名消失 · 整理后更乱且桌面两份内容**）
+
+#### 1.24.1 三条反馈原文
+
+> 1. 「我点击整理应该是自动整理规划桌面问题内容哇。新加的格子默认直接不显示操作很不方便，
+>    应该是新加的自动给我锁定了这不合理 —— 我新加的就是要操作的，你直接锁定了还怎么操作」
+> 2. 「操作半天锁着是归类的，但是连格子都消失了 —— 为什么这个格子不用就定在桌面上，
+>    动不动就不见了，我找不到不见的规律到底是什么」
+> 3. 「莫名其妙的格子又出来了，点击整理桌面后格子是自动创建了，但是很乱，没有计算桌面合理的
+>    规划格子位置 流布局结构；而且图标都收纳到格子里面了，桌面原来的图标还在原地没有消失，
+>    相当于桌面又两个相同的内容了」
+
+#### 1.24.2 根因（**都不是玄学，三条各自有确定的代码位置**）
+
+| # | 现象 | 根因 | 修法 |
+| --- | --- | --- | --- |
+| ① | 新格子建完**拖不动、改不了名** | `editMode` 默认 `false`（锁定态），而 `addBox` 建完**不解锁**；叠加 ② 的空滤后，新建的空格子甚至会立刻隐身 | 新增 `focusNewBox`：`gridSetInteractive(true)` + `setEditMode(true)` + **琥珀色 ring 高亮 2.4s**（新建意图明确，没道理让用户再去找锁图标） |
+| ② | 格子「**动不动就不见了**，找不到规律」 | `visibleBoxes = boxes.filter(kind!=='folder' \|\| editMode \|\| itemCount>0)` —— **空格子不占位**。V34 立这条时只想到「空框挡视线」，但 v9 迁移清空 `grid_items` 后，**所有 folder 格同时满足空格条件 ⇒ 集体蒸发**，而管理页里它们一个都没少 | `visibleBoxes = boxes`，空格子常驻并显示「把桌面文件拖进来」引导。**空滤彻底取消**（可发现性 > 少一个空框） |
+| ③a | 整理后格子**乱成一团**、没有排布感 | 旧 `arrange_position` 按「已有格子个数」套固定步进（344/268），**假定所有格子一样大**（320×244），且**只摆新建的格子** —— 复用的旧格子保留当年坐标，两拨坐标混在一起。更要命的是它**不拿工作区高度**，纵向一路排到桌面之外 | 抽出 **`FlowPlacer`**：靠右起、一列内自上而下、每行用自己的宽高、`blocked` 禁区（便签/日历）必须让开、最多 8 列有界。`grid_auto_arrange` 与 `grid_box_upsert`（新建落点 `free_slot_for`）**共用同一套** |
+| ③b | 「整理」= **全量重排**，不是只摆新建的 | 见 ③a 的「只摆新格子」 | 新增 `layout_all_boxes`：整理时把所有 folder 格按 `sort, id` 重新流布一遍，挂件位置保持不动但作为禁区；`AutoArrangeReport.boxesLaidOut` 回报参与重排的数量 |
+| ③c | **桌面两份相同内容**（原生图标没消失） | V32 起 `show_overlay` 不再自动隐藏系统图标（当时为避免图标泄漏），但 V37 已把模型改成「引用呈现」—— 同一个文件在桌面图标里一份、在格子里一份 | **接管桌面呈现**（V38 核心动作）：见下节 |
+| ③d | 隐藏图标后桌面「什么都没了」的风险 | 此电脑 / 回收站 / 用户文件夹是 Explorer 恒定显示的入口，隐藏后就点不到了 | `ensure_system_box`：幂等建「系统」格并登记三条 `::` 虚拟路径（CLSID），`list_live_items` 对 `::` 前缀豁免存在性校验 |
+| ③e | `.lnk` 原本被设计为「跳过」 | V34 跳过它们的前提是**原生图标还在**。接管之后还跳过，桌上的程序快捷方式就**没有入口可点**了 | `arrange_group_of` 把 `.lnk` 归进「快捷方式」格（仍然只登记、不移动），并新增计数字段 `lnkAdded` |
+
+#### 1.24.3 接管桌面呈现的完整链路（V38 新增）
+
+| 环节 | 实现 |
+| --- | --- |
+| 偏好持久化 | `grid_meta.desktop_takeover`（`META_KEY_TAKEOVER`），与「一次性切换」的 `grid_desktop_icons_set` **分开记** |
+| 生效时机 | `grid_auto_arrange` 里置位并立即执行；`show_overlay` / `apply_takeover_pref` 在每次显示格子时按偏好重放 |
+| 归还时机 | 收起挂件（`restore_desktop_icons`）、退出应用 **立刻**把图标还给系统 —— 绝不让用户「关了软件桌面还是空的」 |
+| 手动出口 | 浮层工具栏新增 **Monitor / MonitorOff** 按钮（`grid_takeover_set`）+ `grid_takeover_get` 回报 `{enabled, iconsVisible}`：**隐藏失败要如实提示**（第三方桌面工具抢着管图标视图时，桌上的确会两份并存，不能假装藏好了） |
+| 前端类型契约 | `TakeoverState` 新增到 `src/types/grid.ts`，`ipc.gridTakeoverGet/Set` 到 `src/lib/ipc.ts` |
+
+#### 1.24.4 改动清单
+
+| 文件 | 改动 |
+| --- | --- |
+| `src-tauri/src/commands/grid.rs` | `FlowPlacer`（新）/ `layout_all_boxes` / `free_slot_for` / `layout_work_size`（补高度）/ `ensure_system_box` / `takeover_icons` / `grid_takeover_set|get` / `AutoArrangeReport` 加 `lnkAdded` `boxesLaidOut` `iconsHidden` / `arrange_group_of` 收 `.lnk` / `grid_box_delete` **不再删磁盘目录** / `list_live_items` 豁免 `::` / 删掉 V33 遗留的 `storage_root` 等一堆死代码 / **`shell_icon_handle` 支持 CLSID**（`SHParseDisplayName` + `SHGFI_PIDL`） |
+| `src-tauri/Cargo.toml` | `windows` features 增 `Win32_UI_Shell_Common` |
+| `src-tauri/src/lib.rs` | 注册两条新命令；`.setup()` 接管态自恢复 |
+| `GridOverlay.tsx` | `visibleBoxes` 取消空滤 / `focusNewBox`（新建解锁 + 高亮）/ `arrangeDesktop` / `toggleTakeover` + 工具栏两个新按钮 / 接管态读取与实话提示 |
+| `types/grid.ts` · `ipc.ts` | `TakeoverState`、`AutoArrangeReport` 新字段、两条 IPC |
+| `GridManagerView.tsx` · `OrganizerView.tsx` | 过期的「快捷方式留在原位 / 跳过的是快捷方式」文案改回真话（跳过的是历史收纳容器） |
+
+#### 1.24.5 验证
+
+| 项 | 结果 |
+| --- | --- |
+| `cargo check` | EXIT=0，无 warning |
+| `cargo test --lib` | **19 → 26 条全绿**（新增 7 条 `flow_placer_tests`） |
+| `tsc --noEmit` | EXIT=0 |
+| 回归 17 套 | 17/17 PASS |
+| `tool-audit` | 325 PASS / 0 FAIL / 0 WARN |
+
+**为什么给排布器写 7 条断言**：用户嘴里那句「很乱、没有计算合理的规划格子位置」如果不钉成可复算的
+规则，下次改任何一个排布参数它都会悄悄回来。新断言覆盖：右上角起点、**先竖排后左推**、挂件禁区必须
+让开（且不退化成横向漂移）、不越过下/左边界、桌面排不下时**明确 None 而不是叠压**、一轮跑完两两不重叠、
+以及「每个格子用自己的尺寸 + 夹到最小尺寸」。刻意在任意平台可跑（不碰 Windows API）。
+
+#### 1.24.6 产物与取证
+
+| 项 | 值 |
+| --- | --- |
+| 一键流水线 | `bash scripts/build-release.sh --no-deploy --skip-tsc --skip-regression`（PortableGit 全路径 bash + 显式 PATH），**5 分 41 秒**（19:55:25 → 20:01:06），`EXIT=0`，日志 `.build-logs/20260917-195525` |
+| vite build | 19:55:25 → 19:55:36（`built in 8.02s`）—— 与布局审计**分两条命令**跑，避开删除垫片（见 §3 坑2） |
+| tauri build | 19:55:36 → 20:01:05（约 5.5 分钟） |
+| 取证（mtime） | `handy.exe` **20:01:05** 晚于 `dist/index.html` **19:55:36** ✔ 前端确实进了二进制 |
+| 取证（哈希，强取证） | 安装后的 `%LOCALAPPDATA%\Handy\handy.exe` 与 `target/release/handy.exe` **逐字节只差 3 个字节**（偏移 10159668–10159670：安装端 `116 123 123` = `N S S`，构建端 `125 116 113` = `U N K`），即 Tauri 打包标记 `__TAURI_BUNDLE_TYPE_VAR_UNK` → `..._NSS` ⇒ **装上去的就是本次 V38 构建产物**（明细 `.build-logs/v38-exe-diff.txt`） |
+| 产物 | `handy.exe` **11,207,680 B**（V37 为 11,209,728 B，−2,048 B）· NSIS **4,330,108 B** · MSI **5,574,656 B** |
+| 静默安装 | 先 `taskkill /IM handy.exe /F`（本次意外把旧版拉起来了），再 NSIS `/S` → `%LOCALAPPDATA%\Handy\handy.exe`（**20:01**，11,207,680 B）→ `cmp -l` 取证 ✔ |
+| ⚠️ 未启动 | 按 V34 起的规矩**装完即止**，请用户自己双击启动 |
+
+#### 1.24.7 验收要点（请重点确认这三条）
+
+1. **新建收纳格** —— 点工具栏 `+` 之后，新格子应立刻**可拖动 / 可拉大小 / 可改名**（默认进入编辑态），
+   并且有一圈琥珀色高亮告诉你它在哪；**格子建了就一直在**（哪怕里面一个文件都没有，也不会过一会儿蒸发）；
+2. **点「整理桌面」** —— 浮层工具栏的 ✨ 按钮（不是只能在管理页里点）。整理完应该：
+   ① 文件一个都没动（资源管理器里对照看，桌面所有人都还在原位）；
+   ② 格子**贴着右边一列列自上而下**排布，没有互相压盖、没有跑出桌面边界、没有压在便签/日历上；
+   ③ 快捷方式进了「快捷方式」格而不是消失；
+   ④ **原生桌面图标不见了**，桌面上只剩格子这一份；
+   ⑤ 「系统」格里能点到此电脑 / 回收站 / 用户文件夹；
+4. **随时能退出接管** —— 工具栏的 Monitor 图标点一下就恢复原生桌面图标；
+   **收起挂件 / 退出 Handy 必须立刻把图标还回来**（若退出后桌面还是空的，请立刻反馈，这是 P0）。
+
+---
+
 ## 2. 剩余任务与已知风险
 
 ### 2.1 🔴 唯一阻塞项：装机 GUI 验收（用户执行）

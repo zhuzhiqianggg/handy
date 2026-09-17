@@ -214,7 +214,7 @@ export default function OrganizerView(_props: OrganizerViewProps = {}): React.JS
         toast.warning('桌面已经很干净了', { description: '没有扫描到可归拢的条目' });
       } else if (rep.itemsAdded === 0) {
         toast.info('没有需要归拢的条目', {
-          description: `扫描到 ${rep.scanned} 项，其中快捷方式 ${rep.skipped} 项按设计不动`,
+          description: `扫描到 ${rep.scanned} 项，跳过 ${rep.skipped} 个历史收纳容器`,
         });
       } else {
         toast.success(`已归拢 ${rep.itemsAdded} 个条目到桌面格子`, {

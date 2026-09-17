@@ -138,14 +138,45 @@ export interface AutoArrangeReport {
   itemsAdded: number;
   /** 其中文件夹占的数量 */
   foldersMoved: number;
+  /**
+   * 其中快捷方式占的数量。
+   *
+   * V38 起 `.lnk` **参与归类**（进「快捷方式」格）。V34 时跳过它们，是因为那时
+   * 原生图标还留在桌面上；现在整理会接管桌面呈现，再跳过的话程序快捷方式会
+   * 当场没有入口可点。
+   */
+  lnkAdded: number;
   /** 本次新建的格子数 */
   boxesCreated: number;
   /** 复用了同名已有格子的次数 */
   boxesReused: number;
-  /** 按设计跳过的条目数（快捷方式 .lnk —— 用户要求留在桌面原位） */
+  /** 按设计跳过的条目数（自己的历史收纳容器 `Handy整理*` / `Handy收纳*`） */
   skipped: number;
+  /** 本次被重新排布的格子数（V38 起整理 = **全量重排**，不只摆新格子） */
+  boxesLaidOut: number;
+  /**
+   * 整理后系统桌面图标是否已由格子层接管（true = 原生图标已隐藏）。
+   *
+   * false 通常意味着本机不支持自动隐藏（例如第三方桌面工具占着图标视图），
+   * 此时桌面会同时显示格子与原图标 —— 前端要如实告诉用户。
+   */
+  iconsHidden: boolean;
   /** 单条目失败原因（不中断整批） */
   failures: string[];
+}
+
+/**
+ * 桌面接管状态（`grid_takeover_get` / `grid_takeover_set` 返回）。
+ *
+ * V38：所谓「桌面整理」= **由格子层接管桌面的呈现方式**。格子里的条目是
+ * 桌面文件的引用，原生图标与之区别的第二份内容就是重复 —— 所以一旦选择接管，
+ * 系统桌面图标要藏起来，桌面上只留格子一份。
+ */
+export interface TakeoverState {
+  /** 用户偏好：接管 = 隐藏原生桌面图标；关掉 = 图标与格子共存 */
+  enabled: boolean;
+  /** 此刻系统桌面图标是否可见（隐藏失败 / 已被收起时会与 enabled 不一致） */
+  iconsVisible: boolean;
 }
 
 /** 布局快照里的单条引用 */

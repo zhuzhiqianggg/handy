@@ -241,9 +241,11 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
       '一键归类桌面？\n\n' +
         '会把桌面上的文件和文件夹按类型登记进对应格子（每个类别一个格子）。\n\n' +
         '· 文件不会被移动，一个都不会 —— 格子只是把它们归拢显示；\n' +
-        '· 快捷方式（.lnk）留在原位，不参与归类；\n' +
+        '· 快捷方式（.lnk）整体登记进「快捷方式」格，同样不移动；\n' +
         '· 文件夹整体登记进「文件夹」格；\n' +
-        '· 从格子里移出过的条目不会再被塞回来。\n\n' +
+        '· 从格子里移出过的条目不会再被塞回来；\n' +
+        '· 整理后桌面图标交由格子接管（原生图标收起，桌面上不再有重复的一份），\n' +
+        '  收起挂件或点浮层工具栏的图标开关可随时恢复。\n\n' +
         '确定继续？',
     );
     if (!ok) {
@@ -261,7 +263,7 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
         }
         if (report.itemsAdded === 0) {
           toast.info('没有需要归类的条目', {
-            description: `扫描到 ${report.scanned} 项，其中快捷方式 ${report.skipped} 项按设计不动`,
+            description: `扫描到 ${report.scanned} 项，跳过 ${report.skipped} 个历史收纳容器`,
           });
           return;
         }

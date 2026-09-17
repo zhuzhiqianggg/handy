@@ -112,6 +112,9 @@ pub fn run() {
             commands::grid::grid_attach_set,
             commands::grid::grid_desktop_icons_set,
             commands::grid::grid_desktop_icons_get,
+            // V38：桌面接管偏好（整理后隐藏原生图标，由格子代管桌面呈现）
+            commands::grid::grid_takeover_set,
+            commands::grid::grid_takeover_get,
             // —— 桌面整理：一键整理 / 布局备份与还原（V19）——
             commands::grid::grid_auto_arrange,
             commands::grid::grid_desktop_sync,
@@ -168,6 +171,11 @@ pub fn run() {
                 Ok(path) => println!("[Handy] 数据库就绪：{}", path.display()),
                 Err(err) => eprintln!("[Handy] 数据库初始化失败：{err}"),
             }
+            // 上次是被强杀 / 崩溃时图标可能还藏着 → 先无条件还给系统（V38：此前
+            // `heal_desktop_icons` 写好了却没人调用，等于没有自愈）。必须在
+            // `restore_overlay_if_visible` 之前：如果用户开了接管偏好，紧接着的
+            // 恢复格子层会按偏好重新隐藏，两者顺序不能反。
+            commands::grid::heal_desktop_icons(app.handle());
             // 桌面格子层「永久生效」：上次显示中（含重启前就在接管）→ 本次启动自动摆回桌面
             commands::grid::restore_overlay_if_visible(app.handle());
             // 主窗口启动显示（V16 修复）：`visible:false` 交给逻辑控制显隐，

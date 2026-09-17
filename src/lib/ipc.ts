@@ -23,6 +23,7 @@ import type {
   LayoutImportReport,
   LayoutSnapshotMeta,
   OverlayStatus,
+  TakeoverState,
   CleanupReport,
   IconMetrics,
   LegacyRootInfo,
@@ -194,6 +195,16 @@ export const ipc = {
       height: input.height ?? null,
       sort: input.sort ?? null,
     }),
+  gridTakeoverGet: (): Promise<TakeoverState> => call<TakeoverState>('grid_takeover_get'),
+  /**
+   * 切换「由格子接管桌面呈现」（V38）：`true` = 隐藏原生桌面图标，`false` = 共存。
+   *
+   * 与一次性的 `gridDesktopIconsSet` 不同：这条会**记住**选择，此后每次显示格子
+   * 都按它执行。返回「此刻图标是否确实处于隐藏态」—— 隐藏失败时返回 false，
+   * 前端据此提示「本机不支持自动隐藏，桌面上会同时看到格子与原图标」。
+   */
+  gridTakeoverSet: (enabled: boolean): Promise<boolean> =>
+    call<boolean>('grid_takeover_set', { enabled }),
   /** 删除格子（连带删掉它的登记；文件从来没被移动过，所以无需恢复） */
   gridBoxDelete: (boxId: number): Promise<void> => call<void>('grid_box_delete', { boxId }),
   /** 写挂件数据（便签正文 / 日历配置 JSON） */

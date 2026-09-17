@@ -4,18 +4,23 @@ import {
   EyeOff,
   File,
   FolderClosed,
+  HardDrive,
   Lock,
   LockOpen,
+  Monitor,
+  MonitorOff,
   Palette,
   Plus,
+  Sparkles,
   StickyNote,
   Trash2,
   Wand2,
   X,
 } from 'lucide-react';
 import { ipc } from '@/lib/ipc';
+import { reportOperation } from '@/lib/errorSink';
 import { isTauri } from '@/platform/detect';
-import type { GridAccent, GridBox, GridItem, GridRegion } from '@/types/grid';
+import type { GridAccent, GridBox, GridItem, GridRegion, TakeoverState } from '@/types/grid';
 import { ACCENT_ORDER, CalendarWidget, NOTE_ACCENTS, NoteWidget } from './DesktopWidgets';
 
 /**
@@ -34,9 +39,19 @@ import { ACCENT_ORDER, CalendarWidget, NOTE_ACCENTS, NoteWidget } from './Deskto
  *     （`gridOverlayUpdateRegions`），Rust 光标轮询命中后才开放交互；拖拽期间
  *     经 `gridSetInteractive(true)` 显式申请保持可交互，避免拖快了被切回穿透；
  *   - **窗口几何持久化**：moved / resized 停稳 500ms 后写 `grid_geometry_set`；
- *   - **浮动工具栏**（常驻，右下角）：锁定/解锁布局、添加收纳格 / 便签 / 日历、隐藏挂件。
+ *   - **浮动工具栏**（常驻，右下角）：锁定/解锁布局、添加收纳格 / 便签 / 日历、
+ *     **整理桌面**（一键归类 + 重排 + 接管原生图标）、原生图标显示切换、隐藏挂件。
  *
- * 交互约定：锁定态 = 只能双击打开条目 / 悬停「×」把条目移回桌面；编辑态 = 布局操作全开放。
+ * 交互约定：锁定态 = 只能双击打开条目 / 悬停「×」把条目从格子移出；编辑态 = 布局操作全开放。
+ *
+ * # V38 两条硬规矩（都是用户实测反馈推出来的）
+ *
+ * 1. **格子永不自己消失**。V34 曾让「没有条目的格子」不在桌面占位，理由是「空框挡视线」；
+ *    但 v9 迁移把登记清空后，用户桌面上的格子**集体蒸发**，而管理页里它们都还在 ——
+ *    用户原话「动不动就不见了，我找不到不见的规律到底是什么」。现在就一句话：
+ *    注册了就在，空着也在（空着显示引导文案）。
+ * 2. **新建的格子必须立刻能操作**。用户点「+」新建收纳格，落在锁定态里既拖不动也改不了名，
+ *    成了「我新加的就是要操作的，你直接锁定了还怎么操作」。现在新建 → 自动解锁并高亮它。
  */
 
 /** 盒子最小尺寸（与 Rust 侧 grid_box_upsert 的下限一致） */
@@ -301,6 +316,22 @@ export function GridOverlay(): React.JSX.Element {
    * 列出来，不用先切模式，这是桌面上最本能的一个动作。
    */
   const [menuBox, setMenuBox] = useState<{ id: number; x: number; y: number } | null>(null);
+  /**
+   * 刚新建的格子 id —— 一段**高亮**期（2.4 秒）。
+   *
+   * V38 用户原话：「新加的格子默认直接不显示操作，很不方便……我新加的就是要操作的」。
+   * 新建之后光解锁还不够：桌面上可能已经有五六个格子，用户得先找到它。高亮就是回答
+   * 「你要操作的那个在这」。
+   */
+  const [focusBoxId, setFocusBoxId] = useState<number | null>(null);
+  /**
+   * 桌面接管态（V38）：`enabled` = 用户选择由格子层呈现桌面（原生图标藏起来）。
+   *
+   * 必须同时看 `iconsVisible` 才能讲实话 —— 隐藏动作可能失败（第三方桌面工具占着
+   * 图标视图），那时桌上是「格子 + 原图标」两份内容，正是用户投诉的那件事，不能装作
+   * 已经藏好了。
+   */
+  const [takeover, setTakeover] = useState<TakeoverState | null>(null);
 
   /**
    * 系统桌面图标尺寸（V37）。
@@ -397,18 +428,24 @@ export function GridOverlay(): React.JSX.Element {
     };
   }, [syncDesktop]);
 
-  // 挂件窗隐藏后再显示不会重新挂载，这里只在窗口创建时提示一次桌面图标状态。
-  // V32 起格子层默认**不再隐藏**系统图标（原桌面 + 格子共存的形态），所以只有手动
-  // 开过「隐藏系统图标」的用户才会看到这条提示 —— 顺带提醒他收起即恢复。
+  // 挂件窗隐藏后再显示不会重新挂载，这里只在窗口创建时读一次桌面接管态。
+  //
+  // V38 起「整理桌面 = 接管呈现」：整理会一次性把原生桌面图标交给格子层代管，
+  // 否则桌面与格子各显示一份，就是用户说的「相当于桌面又两个相同的内容」。
+  // 旧的 `gridDesktopIconsGet` 只能报「现在可见吗」，分不出「用户选了接管」还是
+  // 「想接管但没藏成」—— 后者必须如实告知，所以改用 `gridTakeoverGet`。
   useEffect(() => {
     if (!isTauri()) {
       return;
     }
     void ipc
-      .gridDesktopIconsGet()
-      .then((visible) => {
-        if (!visible) {
-          showHint('系统桌面图标处于隐藏状态（可在管理页恢复），收起挂件即恢复');
+      .gridTakeoverGet()
+      .then((state) => {
+        setTakeover(state);
+        if (state.enabled && state.iconsVisible) {
+          showHint('桌面图标没能自动隐藏（多由第三方桌面工具引起），格子与原图标会同时显示');
+        } else if (state.enabled) {
+          showHint('桌面已由格子接管：原生图标已隐藏，收起挂件即恢复');
         }
       })
       .catch(() => undefined);
@@ -509,16 +546,14 @@ export function GridOverlay(): React.JSX.Element {
   /**
    * 桌面上真正要画的格子。
    *
-   * V34（用户要求「整理的时候只展示分类下面有东西的格子」）：**空的收纳格不在桌面
-   * 上占位** —— 一个空框浮在壁纸上只会挡视线、看着也乱。
+   * V38：**所有格子一律常驻显示，空的也显示**。
    *
-   * 但空格子并没有消失：解锁布局（编辑态）后它们全部显形，可以往里拖文件、重命名、
-   * 删除；平时它们在管理页里照旧可管。一旦有内容就自动出现在桌面上。
-   * 挂件（便签 / 日历）与内容无关，任何模式下都展示。
+   * V34–V37 这里会滤掉「没有条目的收纳格」（当时的理由：空框浮在壁纸上挡视线）。
+   * 代价是用户根本找不到规律：v9 迁移把登记清空后，桌面上的格子集体消失，而管理页里
+   * 它们还在 —— 用户原话「动不动就不见了 我找不到不见的规律到底是什么」。
+   * 空格子现在是**可发现性**的一部分：它就在那儿，里面写着「把桌面文件拖进来」。
    */
-  const visibleBoxes = boxes.filter(
-    (box) => box.kind !== 'folder' || editMode || (items[box.id]?.length ?? 0) > 0,
-  );
+  const visibleBoxes = boxes;
 
   /** 区域键（几何或缩放变化才重新上报，避免 mousemove 高频 invoke） */
   const regionsKey = `${visibleBoxes
@@ -1004,24 +1039,112 @@ export function GridOverlay(): React.JSX.Element {
     });
   }, []);
 
+  /**
+   * 把刚新建的格子「交给用户」：**自动解锁编辑态 + 高亮 2.4 秒**。
+   *
+   * V38 用户原话：「新加的格子默认直接不显示操作，很不方便，应该是新加的自动给我锁定了，
+   * 这不合理，我新加的就是要操作的，你直接锁定了还怎么操作」。
+   * 新建是明确的「我要摆它」意图，此时还让他去找锁图标解锁，纯属添堵。
+   */
+  const focusNewBox = useCallback((boxId: number): void => {
+    setEditMode(true);
+    void ipc.gridSetInteractive(true).catch(() => undefined);
+    setFocusBoxId(boxId);
+    window.setTimeout(() => {
+      setFocusBoxId((prev) => (prev === boxId ? null : prev));
+    }, 2400);
+  }, []);
+
+  /**
+   * 一键整理桌面（V38）：把桌面条目按类型登记进格子，**再用同一套流布局全部重排**。
+   *
+   * 用户原话：「点击整理桌面后格子是自动创建了，但是很乱，没有计算桌面合理的规划
+   * 格子位置 流布局结构，而且桌面原来的图标还在原地没有消失，相当于桌面又两个相同的
+   * 内容了」。所以这一版整理做三件事：
+   *   1. **按类型分组登记** —— 文件夹 / 快捷方式 / 各类文档各自一格；`.lnk` 必须
+   *      参与（V34 曾跳过它，那是因为当时原生图标还在；现在接管了呈现，跳过的话
+   *      用户桌上的程序快捷方式会当场没有入口可点）；
+   *   2. **全量重排** —— 不只摆新建的格子，`boxesLaidOut` 是所有参与排布的格子，
+   *      排序规则是「靠右、自上而下、碰到便签 / 日历就让开」的流布局；
+   *   3. **接管桌面呈现** —— 隐藏原生桌面图标，桌面上只留格子这一份。
+   *
+   * 全程 **不移动任何文件**（V37 呈现层定下的规矩）。
+   */
+  const arrangeDesktop = useCallback((): void => {
+    showHint('正在整理桌面…');
+    void ipc
+      .gridAutoArrange()
+      .then((report) => refresh().then(() => report))
+      .then((report) => {
+        setTakeover({ enabled: true, iconsVisible: !report.iconsHidden });
+        const parts = [
+          `登记 ${report.itemsAdded} 项`,
+          `新建 ${report.boxesCreated} 格`,
+          `重排 ${report.boxesLaidOut} 格`,
+        ];
+        if (report.lnkAdded > 0) {
+          parts.push(`快捷方式 ${report.lnkAdded} 个`);
+        }
+        showHint(
+          report.iconsHidden
+            ? `整理完成：${parts.join('、')}；桌面图标已交由格子接管`
+            : `整理完成：${parts.join('、')}；本机不支持自动隐藏图标，建议手动切换为接管`,
+        );
+      })
+      .catch((error: Error) => {
+        reportOperation('整理桌面', error);
+        showHint(error.message);
+      });
+  }, [refresh, showHint]);
+
+  /**
+   * 切换「由格子接管桌面呈现」（V38）：开 = 隐藏原生图标，关 = 图标与格子共存。
+   *
+   * 为什么要给用户这个开关：隐藏桌面图标是接管别人的地盘，万一第三方桌面工具抢着
+   * 管，用户得有一键退回到「原桌面原样」的出口 —— 否则桌上一个文件都点不到。
+   */
+  const toggleTakeover = useCallback((): void => {
+    const next = !(takeover?.enabled ?? false);
+    void ipc
+      .gridTakeoverSet(next)
+      .then((hidden) => {
+        setTakeover({ enabled: next, iconsVisible: !hidden });
+        if (next && hidden) {
+          showHint('桌面已交由格子接管：原生图标收起，格子就是桌面');
+        } else if (next) {
+          showHint('没能自动隐藏桌面图标，格子与原生图标会同时显示');
+        } else {
+          showHint('已恢复原生桌面图标');
+        }
+      })
+      .catch((error: Error) => {
+        reportOperation('切换桌面接管', error);
+        showHint(error.message);
+      });
+  }, [takeover, showHint]);
+
   const addBox = useCallback((): void => {
     const count = boxesRef.current.length;
     void ipc
       .gridBoxUpsert({
         name: `新格子 ${count + 1}`,
         kind: 'folder',
-        // 不指定落点 → 由 Rust 按「靠右自动流」算（与一键收纳共用同一套排布）：
-        // 新格子永远出现在眼睛习惯的右侧，且不会叠在已有格子上
+        // 不指定落点 → 由 Rust 用同一套「靠右流布局」算出一块**不与任何已有格子
+        // （含便签 / 日历）重叠**的空位，且不会跑出桌面之外
         width: 320,
         height: 220,
       })
       .then((created) => {
         setBoxes((prev) => [...prev, created]);
         setItems((prev) => ({ ...prev, [created.id]: [] }));
-        showHint(`已新建收纳格：${created.name}（把文件拖进来即归拢显示）`);
+        focusNewBox(created.id);
+        showHint(`已新建收纳格：${created.name} —— 已解锁，可以直接拖动 / 拉大小 / 改名`);
       })
-      .catch((error: Error) => showHint(error.message));
-  }, [showHint]);
+      .catch((error: Error) => {
+        reportOperation('新建收纳格', error);
+        showHint(error.message);
+      });
+  }, [focusNewBox, showHint]);
 
   /**
    * 新建挂件（便签 / 日历）—— 桌面上直接可用的轻量小组件。
@@ -1258,7 +1381,16 @@ export function GridOverlay(): React.JSX.Element {
               editMode
                 ? 'border border-dashed bg-neutral-900/55 backdrop-blur-md'
                 : 'shadow-[0_10px_30px_rgba(0,0,0,0.34),inset_0_1px_0_rgba(255,255,255,0.09)] backdrop-blur-lg backdrop-saturate-150'
-            } ${isDropTarget ? 'ring-2 ring-sky-300/85' : editMode ? accentRing(box.accent) : ''}`}
+            } ${
+              // V38：新建的格子先给一圈高亮（新的不一定在视线的位置上），胜过暗示用户去找
+              focusBoxId === box.id
+                ? 'ring-2 ring-amber-300/90'
+                : isDropTarget
+                  ? 'ring-2 ring-sky-300/85'
+                  : editMode
+                    ? accentRing(box.accent)
+                    : ''
+            }`}
             onDragOver={(event) => {
               // 内部条目拖拽：允许作为放点（系统文件拖放走 webview 级事件，不经过这里）
               if (itemDragRef.current !== null) {
@@ -1511,20 +1643,7 @@ export function GridOverlay(): React.JSX.Element {
         );
       })}
 
-      {/* 格子都在、但都是空的 → 桌面上会一片空白。必须给个交代，
-          否则用户会以为「格子又莫名消失了」。 */}
-      {boxes.length > 0 && visibleBoxes.length === 0 && (
-        <div
-          style={{ pointerEvents: 'auto' }}
-          className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-xl bg-neutral-900/70 px-4 py-3 text-center text-xs leading-relaxed text-neutral-200 shadow-lg backdrop-blur"
-        >
-          {boxes.length} 个格子还是空的，就先不在桌面上占位了
-          <br />
-          <span className="opacity-70">点右下角解锁图标即可看到它们，或先往里放文件</span>
-        </div>
-      )}
-
-      {/* 空态引导：卡片自身可交互（已纳入命中区域），可直接创建第一个盒子 */}
+      {/* 一个格子都没有时给引导（卡片自身可交互，已纳入命中区域） */}
       {boxes.length === 0 && (
         <div
           ref={emptyRef}
@@ -1707,6 +1826,28 @@ export function GridOverlay(): React.JSX.Element {
           className="rounded-full p-1.5 text-neutral-200 transition hover:bg-white/10 disabled:opacity-30 disabled:hover:bg-transparent"
         >
           <CalendarDays className="h-4 w-4" />
+        </button>
+        <button
+          type="button"
+          onClick={arrangeDesktop}
+          title="整理桌面：按类型登记进格子 + 靠右流布局重排 + 接管原生图标（不移动任何文件）"
+          className="rounded-full p-1.5 text-neutral-200 transition hover:bg-white/10"
+        >
+          <Sparkles className="h-4 w-4" />
+        </button>
+        <button
+          type="button"
+          onClick={toggleTakeover}
+          title={
+            takeover?.enabled
+              ? '桌面已由格子接管（原生图标隐藏）—— 点这里恢复原生图标'
+              : '由格子接管桌面呈现：隐藏原生桌面图标，避免桌面上出现两份相同内容'
+          }
+          className={`rounded-full p-1.5 transition hover:bg-white/10 ${
+            takeover?.enabled ? 'text-emerald-300' : 'text-neutral-200'
+          }`}
+        >
+          {takeover?.enabled ? <MonitorOff className="h-4 w-4" /> : <Monitor className="h-4 w-4" />}
         </button>
         <button
           type="button"
