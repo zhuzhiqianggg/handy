@@ -244,6 +244,14 @@ export function GridOverlay(): React.JSX.Element {
   const [scaleFactor, setScaleFactor] = useState(1);
   /** 正在挑选配色的格子 id（V35：多个便签并存时用来区分） */
   const [accentBoxId, setAccentBoxId] = useState<number | null>(null);
+  /**
+   * 格子右键菜单（V35 借鉴腾讯桌面整理的操作面板）。
+   *
+   * 为什么要有：格子的能力已经不少（重命名 / 配色 / 解散 / 新建同款），但**入口都是
+   * 「先解锁布局、再找标题栏上的小按钮」** —— 用户原话是「我都搞不懂」。右键就直接
+   * 列出来，不用先切模式，这是桌面上最本能的一个动作。
+   */
+  const [menuBox, setMenuBox] = useState<{ id: number; x: number; y: number } | null>(null);
 
   /** 渲染无关的可变状态（事件回调内读取，避免闭包过期） */
   const boxesRef = useRef<GridBox[]>([]);
@@ -253,6 +261,7 @@ export function GridOverlay(): React.JSX.Element {
   const itemDragRef = useRef<ItemDrag | null>(null);
   const hintTimerRef = useRef<number | undefined>(undefined);
   const toolbarRef = useRef<HTMLDivElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
   /** 空态卡片的 DOM 引用：它也要纳入命中区域，否则「创建第一个盒子」按钮点不到 */
   const emptyRef = useRef<HTMLDivElement | null>(null);
   /** 各挂件最近一次上报的「内容自然高度」：用户手动拉过之后据此判断内容有没有变 */
@@ -1108,6 +1117,57 @@ export function GridOverlay(): React.JSX.Element {
    */
   const hasCalendar = boxes.some((box) => box.kind === 'calendar');
 
+  /** 新建一个与模板同款（同尺寸、同配色）的收纳格。 */
+  const duplicateBox = useCallback(
+    (template: GridBox): void => {
+      void ipc
+        .gridBoxUpsert({
+          name: `${template.name} 副本`,
+          kind: 'folder',
+          accent: template.accent,
+          width: template.width,
+          height: template.height,
+        })
+        .then((created) => {
+          setBoxes((prev) => [...prev, created]);
+          setItems((prev) => ({ ...prev, [created.id]: [] }));
+          showHint(`已新建收纳格：${created.name}`);
+        })
+        .catch((error: Error) => showHint(error.message));
+    },
+    [showHint],
+  );
+
+  /**
+   * 右键菜单的关闭时机。
+   *
+   * 注意**不能**只靠「在菜单上 stopPropagation 就完事」：菜单是 React 节点，
+   * 而这里挂的是 window 上的原生监听，原生事件照样会冒泡到 window。
+   * 所以用 ref 判一下点击是不是落在菜单内部。
+   */
+  useEffect(() => {
+    if (menuBox === null) {
+      return undefined;
+    }
+    const onDown = (event: MouseEvent): void => {
+      if (menuRef.current?.contains(event.target as Node) === true) {
+        return;
+      }
+      setMenuBox(null);
+    };
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') {
+        setMenuBox(null);
+      }
+    };
+    window.addEventListener('mousedown', onDown);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('mousedown', onDown);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [menuBox]);
+
   return (
     <div className="fixed inset-0 select-none overflow-hidden" style={{ pointerEvents: 'none' }}>
       {/* 盒子画布：每个盒子自身恢复指针事件（外层穿透不继承） */}
@@ -1170,6 +1230,13 @@ export function GridOverlay(): React.JSX.Element {
                 return;
               }
               startMove(event, box);
+            }}
+            onContextMenu={(event) => {
+              // 借鉴腾讯桌面整理：右键格子直接出操作面板，不必先解锁布局再找小按钮。
+              // 用 clientX/clientY —— 根容器是 fixed inset-0，和视口是同一套坐标。
+              event.preventDefault();
+              setAccentBoxId(null);
+              setMenuBox({ id: box.id, x: event.clientX, y: event.clientY });
             }}
           >
             {/* 标题栏：拖拽移动（随时可用）+ 双击重命名 */}
@@ -1438,9 +1505,100 @@ export function GridOverlay(): React.JSX.Element {
         </div>
       )}
 
+      {/* 格子右键菜单（V35）。借鉴腾讯桌面整理：所有格子操作都在这里，不必先解锁布局。 */}
+      {menuBox !== null &&
+        (() => {
+          const box = boxes.find((item) => item.id === menuBox.id);
+          if (box === undefined) {
+            return null;
+          }
+          const isFolder = box.kind === 'folder';
+          const rowClass =
+            'flex w-full items-center gap-2 px-2.5 py-1.5 text-left transition hover:bg-white/10';
+          return (
+            <div
+              key="grid-box-menu"
+              ref={menuRef}
+              style={{ left: menuBox.x, top: menuBox.y, pointerEvents: 'auto' }}
+              className="absolute z-50 w-48 overflow-hidden rounded-lg bg-neutral-900/95 py-1 text-xs text-neutral-100 shadow-2xl ring-1 ring-white/15 backdrop-blur"
+            >
+              <div className="truncate px-2.5 pb-1 pt-0.5 text-[10px] text-neutral-400">
+                {box.name}
+              </div>
+              <button
+                type="button"
+                className={rowClass}
+                onClick={() => {
+                  const target = box;
+                  setMenuBox(null);
+                  beginRename(target);
+                }}
+              >
+                重命名格子
+              </button>
+              {isFolder ? (
+                <button
+                  type="button"
+                  className={rowClass}
+                  onClick={() => {
+                    const target = box;
+                    setMenuBox(null);
+                    duplicateBox(target);
+                  }}
+                >
+                  新建同款格子
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className={rowClass}
+                  onClick={() => {
+                    setMenuBox(null);
+                    addWidget(box.kind === 'note' ? 'note' : 'calendar');
+                  }}
+                >
+                  {box.kind === 'note' ? '再加一个便签' : '日历只有一个'}
+                </button>
+              )}
+              <div className="px-2.5 pb-0.5 pt-1.5 text-[10px] text-neutral-400">配色</div>
+              <div className="flex flex-wrap gap-1 px-2.5 pb-1.5">
+                {ACCENT_ORDER.map((key) => (
+                  <button
+                    key={key || 'default'}
+                    type="button"
+                    title={NOTE_ACCENTS[key].label}
+                    aria-label={`配色 ${NOTE_ACCENTS[key].label}`}
+                    onClick={() => {
+                      setAccent(box.id, key);
+                    }}
+                    style={{ background: NOTE_ACCENTS[key].hex }}
+                    className={`h-4 w-4 rounded-full ring-1 ring-white/25 transition hover:scale-110 ${
+                      box.accent === key ? 'ring-2 ring-sky-300' : ''
+                    }`}
+                  />
+                ))}
+              </div>
+              <div className="my-1 h-px bg-white/10" />
+              <button
+                type="button"
+                className={`${rowClass} text-rose-300`}
+                onClick={() => {
+                  const target = box.id;
+                  setMenuBox(null);
+                  deleteBox(target);
+                }}
+              >
+                解散该格子
+              </button>
+              <p className="px-2.5 pb-1 pt-0.5 text-[10px] leading-relaxed text-neutral-500">
+                解散只删格子，「桌面/Handy整理/{box.name}/」里的文件原样保留
+              </p>
+            </div>
+          );
+        })()}
+
       {/* 提示条（非交互文本） */}
-      {hint && (
-        <div className="absolute left-1/2 top-4 -translate-x-1/2 rounded-md bg-neutral-900/80 px-3 py-1.5 text-xs text-neutral-100 shadow-lg backdrop-blur">
+      {hint && (        <div className="absolute left-1/2 top-4 -translate-x-1/2 rounded-md bg-neutral-900/80 px-3 py-1.5 text-xs text-neutral-100 shadow-lg backdrop-blur">
           {hint}
         </div>
       )}

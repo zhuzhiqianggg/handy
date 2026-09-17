@@ -90,18 +90,32 @@ const POLL_INTERVAL_MS: u64 = 25;
 /// 贴着格子边缘点击桌面文件。
 const HIT_PADDING: f64 = 4.0;
 
-/// 每隔多少个轮询周期检查一次 Z 序（错位才重排，见 [`reassert_attach`]）。
+/// Z 序自检的**时间**间隔（秒）。
 ///
-/// V33：从 33 周期放宽到 250 周期（≈15 秒）—— 装了第三方桌面工具时判据会持续
-/// 不成立，于是每 2 秒重排一次 Z 序，窗口反复重绘就是「闪一下」的观感来源。
-/// 放宽确实治住了闪烁，但代价是**真错位时要等十几秒才自愈**，用户看到的是
-/// 「格子跑我窗口上面去了，半天不下来」。
+/// # 为什么是「秒」而不是「多少个轮询周期」（V35 修的坑）
 ///
-/// V34：真正的错位根因已定位并修掉（`show()` 会把窗口顶到 Z 序顶层，见
-/// [`show_overlay`] 的顺序说明），所以这里可以既收紧又快 —— 设成 40 周期
-/// （≈2.4 秒）配合 [`reassert_attach`] 的「连续两次判定」，真错位 5 秒内必被纠正，
-/// 而瞬时抖动仍被拒之门外（两次判定之间隔着完整一个轮询周期）。
-const REASSERT_TICKS: u64 = 40;
+/// V34 这里是 `REASSERT_TICKS = 40`，含义随 `POLL_INTERVAL_MS` 走：当时 60ms × 40 ≈ 2.4 秒。
+/// V35 为了拖拽手感把轮询提到 **25ms**，同一个 40 就悄悄变成 **1 秒** ——
+/// 自检频率翻了 2.4 倍，而这一点在两边代码里都看不出来。
+/// **轮询周期是「手感参数」，不该顺手改掉自愈的节奏**，所以这里改用时间。
+const REASSERT_INTERVAL_SECS: u64 = 3;
+
+/// 判定「我还在不在桌面上方」时，最多往下走多少个窗口。
+///
+/// 见 [`z_verdict`]：桌面正上方那一格是**公共地段**，中间夹几层很正常，
+/// 所以判据是「往下走一小段能不能碰到桌面」，而不是「正下方必须正好是桌面」。
+/// 走满这么多层还没碰到桌面，就认为「被压得很高」（同样需要纠正）。
+const REASSERT_SCAN_STEPS: usize = 24;
+
+/// 连续纠正失败多少次后，退到 [`REASSERT_GIVEUP_BACKOFF_SECS`] 的长间隔。
+///
+/// **这条是「永不停止地闪」的保险丝**：只要判据和现实有一点对不上，
+/// 无限重试就会变成无限重排 —— 用户看到的就是「一直闪、偶尔又出来」。
+/// 宁可少纠正几次，也绝不允许进入无限循环。
+const REASSERT_MAX_FIXES: u32 = 5;
+
+/// 触发保险丝后的冷却（秒）：期间只计数不再动手，过后再试一小轮。
+const REASSERT_GIVEUP_BACKOFF_SECS: u64 = 300;
 
 /// 收纳根目录名（桌面下的一级目录；与「归类文件」共用，避免两个相似目录）。
 const STORAGE_ROOT_NAME: &str = "Handy整理";
@@ -1331,52 +1345,145 @@ fn apply_attach(win: &WebviewWindow, mode: AttachMode) -> Result<(), String> {
     }
 }
 
-/// 周期复位：**只在 Z 序真的错位时**才重排。
+/// 挂件窗相对桌面的纵深位置。
+#[cfg(target_os = "windows")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ZVerdict {
+    /// 就在桌面「那一带」：往下走一段能碰到桌面 ⇒ 层级正确，什么都不用做。
+    InDesktopBand,
+    /// 一路走到底都没碰到桌面 ⇒ 被压在桌面**下面**（用户看到的是「格子不见了」）。
+    BelowDesktop,
+    /// 走了 [`REASSERT_SCAN_STEPS`] 层还没碰到桌面 ⇒ 被顶得**很高**（会盖住别的窗口）。
+    TooHigh,
+}
+
+/// 从「自己往下走看到的窗口链」判定纵深。
 ///
-/// 每次都无脑 `SetWindowPos` 会让窗口反复重绘 —— 那正是 V20「点一下闪一下」的
-/// 观感来源之一。这里用 `GetWindow(hwnd, GW_HWNDNEXT)`（紧贴在我下面的是谁）
-/// 判断：桌面窗口就在正下方 = 层级正确，直接返回。
+/// 抽成纯函数是为了能测 —— 这条判据历史上错过两次，不能再靠肉眼审。
 ///
-/// V34 补充：把三个句柄一并记进日志。用户报「格子跑到其他窗口上面」时，只有这行
-/// 能区分「attach 压根没生效」还是「被别的窗口插队」，不必靠猜。
+/// - `chain`：从自己**正下方那一个**开始，依次往下的窗口（最多 [`REASSERT_SCAN_STEPS`] 个）
+/// - `hit_bottom`：还没走满 [`REASSERT_SCAN_STEPS`] 就走到底了（Z 序末端）
+#[cfg(target_os = "windows")]
+fn classify_chain(chain: &[HWND], host: HWND, hit_bottom: bool) -> ZVerdict {
+    if chain.contains(&host) {
+        // 往下走一段能碰到桌面 ⇒ 我们在它上面。**中间夹着谁都不算问题**：
+        // 输入法助手窗、本应用主窗常年就停在这一带。
+        return ZVerdict::InDesktopBand;
+    }
+    if hit_bottom {
+        ZVerdict::BelowDesktop
+    } else {
+        ZVerdict::TooHigh
+    }
+}
+
+/// 判定挂件窗相对桌面宿主的纵深（走链部分，见 [`classify_chain`]）。
+#[cfg(target_os = "windows")]
+fn z_verdict(hwnd: HWND) -> Option<ZVerdict> {
+    use windows::Win32::UI::WindowsAndMessaging::{GetWindow, GW_HWNDNEXT};
+    let host = desktop_host()?;
+    if host == hwnd {
+        return Some(ZVerdict::InDesktopBand);
+    }
+    let mut chain: Vec<HWND> = Vec::with_capacity(REASSERT_SCAN_STEPS);
+    let mut hit_bottom = false;
+    let mut cursor = hwnd;
+    for _ in 0..REASSERT_SCAN_STEPS {
+        // SAFETY: 有效 HWND，仅查询 Z 序。
+        let next = unsafe { GetWindow(cursor, GW_HWNDNEXT) }.unwrap_or_else(|_| null_hwnd());
+        if next.0.is_null() {
+            hit_bottom = true;
+            break;
+        }
+        chain.push(next);
+        if next == host {
+            break;
+        }
+        cursor = next;
+    }
+    Some(classify_chain(&chain, host, hit_bottom))
+}
+
+/// 周期复位：**只在 Z 序真的不对时**才重排。
+///
+/// 每次都无脑 `SetWindowPos` 会让窗口反复重绘 —— 那正是「闪一下」的观感来源。
+/// 判据见 [`z_verdict`]（V35 前是「正下方必须正好是桌面」，那条在真实桌面上
+/// 几乎永远不成立，是本轮修掉的核心缺陷）。
+///
+/// 三重保险，确保**永远不会变成无限重排**：
+///   1. 判据宽容（`InDesktopBand` 就算对）⇒ 稳态下一次都不会触发；
+///   2. 自检有**时间**间隔（[`REASSERT_INTERVAL_SECS`]）⇒ 不会跟着轮询提速而变密；
+///   3. 连续纠正失败到 [`REASSERT_MAX_FIXES`] 次就退避 [`REASSERT_GIVEUP_BACKOFF_SECS`] 秒
+///      ⇒ 就算判据和现实仍对不上，也只会偶发纠正，不会连续闪。
 fn reassert_attach(win: &WebviewWindow) {
     #[cfg(target_os = "windows")]
     {
-        use windows::Win32::UI::WindowsAndMessaging::{GetWindow, GW_HWNDNEXT};
         if AttachMode::current() != AttachMode::Desktop {
             return;
         }
         let Ok(hwnd) = overlay_hwnd(win) else {
             return;
         };
-        let Some(host) = desktop_host() else {
-            return;
-        };
-        // SAFETY: 有效 HWND，仅查询 Z 序。
-        let below = unsafe { GetWindow(hwnd, GW_HWNDNEXT) }.unwrap_or_else(|_| null_hwnd());
-        if below == host {
-            REASSERT_MISMATCH.store(0, Ordering::Relaxed);
+
+        // 保险丝：上次触发后退避期内直接不动手（每轮只判断时间，不碰窗口）。
+        let now = unix_secs();
+        let retry_at = REASSERT_RETRY_AT.load(Ordering::Relaxed);
+        if retry_at > now {
             return;
         }
-        // 去抖：连续两次判定错位才重排。第三方桌面工具会频繁瞬时改变 Z 序，
-        // 一次不匹配就 SetWindowPos 会让窗口反复重绘 —— 即用户看到的「闪一下」。
-        // V34 把轮询周期从 ~15 秒收紧到 ~2.4 秒（见 REASSERT_TICKS）：两次判定之间
-        // 仍隔着整整一个轮询周期，足以滤掉瞬时抖动，而真正的错位 5 秒内必被纠正。
-        let strikes = REASSERT_MISMATCH.fetch_add(1, Ordering::Relaxed) + 1;
-        if strikes < 2 {
-            return;
+
+        match z_verdict(hwnd) {
+            Some(ZVerdict::InDesktopBand) => {
+                // 层级正确：清零计数。走到这里说明判据和现实一致，可以重新信任自愈。
+                REASSERT_MISMATCH.store(0, Ordering::Relaxed);
+                REASSERT_FIXES.store(0, Ordering::Relaxed);
+                REASSERT_GAVE_UP.store(false, Ordering::Relaxed);
+                return;
+            }
+            None => return, // 拿不到桌面宿主：判不了就别乱动
+            Some(verdict) => {
+                // 去抖：连续两次判定不对才动手（滤掉第三方桌面工具的瞬时抢层）。
+                if REASSERT_MISMATCH.fetch_add(1, Ordering::Relaxed) + 1 < 2 {
+                    return;
+                }
+                REASSERT_MISMATCH.store(0, Ordering::Relaxed);
+
+                let fixes = REASSERT_FIXES.fetch_add(1, Ordering::Relaxed) + 1;
+                if fixes > REASSERT_MAX_FIXES {
+                    REASSERT_FIXES.store(0, Ordering::Relaxed);
+                    REASSERT_RETRY_AT.store(now + REASSERT_GIVEUP_BACKOFF_SECS, Ordering::Relaxed);
+                    if !REASSERT_GAVE_UP.swap(true, Ordering::Relaxed) {
+                        grid_log(&format!(
+                            "Z 序自动纠正已连续失败 {REASSERT_MAX_FIXES} 次，暂停 {REASSERT_GIVEUP_BACKOFF_SECS} 秒（避免一直闪）。\
+                             判据可能与此机环境不符，请在反馈里带上这行日志。"
+                        ));
+                    }
+                    return;
+                }
+
+                let Some(host) = desktop_host() else {
+                    return;
+                };
+                grid_log(&format!(
+                    "Z 序不对（{verdict:?}，第 {fixes} 次纠正），重新贴回桌面层（overlay={:?} host={:?}）",
+                    hwnd.0, host.0
+                ));
+                let _ = place_above_desktop(hwnd);
+            }
         }
-        REASSERT_MISMATCH.store(0, Ordering::Relaxed);
-        grid_log(&format!(
-            "Z 序错位（连续两次；我正下方不是桌面窗口），重新贴回桌面层（overlay={:?} host={:?} below={:?}）",
-            hwnd.0, host.0, below.0
-        ));
-        let _ = place_above_desktop(hwnd);
     }
     #[cfg(not(target_os = "windows"))]
     {
         let _ = win;
     }
+}
+
+/// 用户主动「隐藏再显示格子」时复位 Z 序自愈的状态（保险丝重新上膛）。
+fn reset_reassert_state() {
+    REASSERT_MISMATCH.store(0, Ordering::Relaxed);
+    REASSERT_FIXES.store(0, Ordering::Relaxed);
+    REASSERT_RETRY_AT.store(0, Ordering::Relaxed);
+    REASSERT_GAVE_UP.store(false, Ordering::Relaxed);
 }
 
 /// 「显示桌面」（Win+D）/ 最小化之后把挂件层捞回来。
@@ -1640,7 +1747,9 @@ fn ensure_poller(app: AppHandle) {
         .spawn(move || {
             // 上次施加的穿透态（None = 尚未施加），仅在状态变化时调用窗口 API
             let mut last_ignore: Option<bool> = None;
-            let mut tick: u64 = 0;
+            // Z 序自检按**时间**触发（V35：以前按轮询周期数算，轮询一提速就跟着变密，
+            // 把自检从 2.4 秒一次变成 1 秒一次，用户看到的就是「一直闪」）。
+            let mut last_reassert = std::time::Instant::now();
             // 窗口连续"不在"的轮询次数：把「该不该重建」的判定降到约 30 秒一次，
             // 否则每 60ms 就要查一次库。
             let mut missing_ticks: u64 = 0;
@@ -1690,9 +1799,10 @@ fn ensure_poller(app: AppHandle) {
                     release_icons_if_taken(&app);
                     continue;
                 }
-                tick += 1;
-                // 周期性校验层级（错位才重排）：Explorer 重启 / 别的窗口插队后自愈
-                if tick % REASSERT_TICKS == 0 {
+                // 周期性校验层级（层级不对才重排）：Explorer 重启 / 别的窗口插队后自愈。
+                // 按**时间**触发，与轮询周期解耦（见 REASSERT_INTERVAL_SECS 的说明）。
+                if last_reassert.elapsed() >= std::time::Duration::from_secs(REASSERT_INTERVAL_SECS) {
+                    last_reassert = std::time::Instant::now();
                     reassert_attach(&win);
                 }
                 // 白屏自愈（V33 收窄）：**只在冷启动后从未收到过心跳**时才判定前端没起来。
@@ -1805,6 +1915,8 @@ fn show_overlay(app: &AppHandle) -> Result<(), String> {
         let _ = write_overlay_visible(app, true);
         mark_overlay_shown();
         ensure_poller(app.clone());
+        // 用户主动「显示」= 重来一次：Z 序自愈的计数与退避全部复位
+        reset_reassert_state();
         grid_log("显示挂件层（复用已有窗口）");
         return attach;
     }
@@ -1846,6 +1958,8 @@ fn show_overlay(app: &AppHandle) -> Result<(), String> {
     let _ = write_overlay_visible(app, true);
     // 冷启动基线：给 webview 启动 + React 挂载留出宽限（判定见轮询线程）
     mark_overlay_shown();
+    // 新窗从零开始，自愈状态一并复位
+    reset_reassert_state();
     grid_log("新建并显示挂件层");
     ensure_poller(app.clone());
     attach
@@ -1908,6 +2022,8 @@ pub async fn grid_overlay_hide(app: AppHandle) -> Result<(), String> {
     // 收起格子层即交还桌面：系统图标恢复显示（与 show 时隐藏对称）
     takeover_icons(&app, false);
     let _ = write_overlay_visible(&app, false);
+    // 收起时把 Z 序自愈的计数清零：下次显示是干净的一轮
+    reset_reassert_state();
     grid_log("收起挂件层");
     Ok(())
 }
@@ -1962,6 +2078,15 @@ static REBUILD_GAVE_UP: AtomicBool = AtomicBool::new(false);
 
 /// Z 序连续不匹配的次数（去抖用）。
 static REASSERT_MISMATCH: AtomicU32 = AtomicU32::new(0);
+
+/// 本轮已连续纠正失败的次数（到 [`REASSERT_MAX_FIXES`] 就退避）。
+static REASSERT_FIXES: AtomicU32 = AtomicU32::new(0);
+
+/// 退避期内不再纠正的截止时刻（unix 秒，0 = 不在退避）。
+static REASSERT_RETRY_AT: AtomicU64 = AtomicU64::new(0);
+
+/// 是否已触发过保险丝（只记一次日志，不刷屏）。
+static REASSERT_GAVE_UP: AtomicBool = AtomicBool::new(false);
 
 /// 上次自动重建的时刻（unix 秒；用于冷却 [`HEARTBEAT_REBUILD_COOLDOWN_SECS`]）。
 static LAST_REBUILD_AT: AtomicU64 = AtomicU64::new(0);
@@ -3096,5 +3221,80 @@ pub async fn grid_layout_delete(app: AppHandle, snapshot_id: String) -> Result<(
         return Err("布局快照不存在或已被删除".to_string());
     }
     Ok(())
+}
+
+/// Z 序纵深判据的回归。
+///
+/// 这条判据是本项目历史上**错过两次**的地方（V33 放宽周期、V34 收紧周期都是围绕它打转），
+/// 而且它的失效方式特别隐蔽：判据错了不会报错，只会「每秒重排一次」——
+/// 用户看到的是「格子一直闪、有时又出来」，代码里看不出任何异常。
+/// 所以这里把判据的**语义**钉住，改的时候必须让这些断言仍然成立。
+#[cfg(all(test, target_os = "windows"))]
+mod z_verdict_tests {
+    use super::*;
+    use std::ffi::c_void;
+
+    /// 造一个假句柄（只用于比较，不会交给系统 API）
+    fn h(value: usize) -> HWND {
+        HWND(value as *mut c_void)
+    }
+
+    #[test]
+    fn desktop_directly_below_is_the_ideal_case() {
+        let host = h(1);
+        assert_eq!(
+            classify_chain(&[host], host, false),
+            ZVerdict::InDesktopBand
+        );
+    }
+
+    #[test]
+    fn interlopers_between_us_and_desktop_are_not_a_mismatch() {
+        // ★ 这条就是 V35 修的核心缺陷。
+        // 桌面正上方那一格是公共地段：搜狗输入法的 6 个隐藏助手窗、本应用主窗
+        // 都会停在这儿。旧判据要求「正下方必须**正好**是桌面」，于是一出现邻居
+        // 就判错位 ⇒ 每秒纠一次、永远纠不完 ⇒ 用户看到「一直闪」。
+        // 现在只要往下走一段能碰到桌面就算对。
+        let host = h(1);
+        let chain = [h(0x708d4), h(0x2f0b72), h(0x1035a), host];
+        assert_eq!(classify_chain(&chain, host, false), ZVerdict::InDesktopBand);
+    }
+
+    #[test]
+    fn walking_to_the_bottom_without_finding_desktop_means_we_are_below_it() {
+        // 被压在桌面下面 = 用户看到的「格子不见了」，必须纠正
+        let host = h(1);
+        let chain = [h(9), h(8)];
+        assert_eq!(classify_chain(&chain, host, true), ZVerdict::BelowDesktop);
+    }
+
+    #[test]
+    fn many_windows_above_us_means_we_are_too_high() {
+        // 走满扫描预算还没碰到桌面 ⇒ 被顶得很高（会盖住别的窗口），也要纠正
+        let host = h(1);
+        let chain: Vec<HWND> = (100..100 + REASSERT_SCAN_STEPS).map(h).collect();
+        assert_eq!(chain.len(), REASSERT_SCAN_STEPS);
+        assert_eq!(classify_chain(&chain, host, false), ZVerdict::TooHigh);
+    }
+
+    #[test]
+    fn empty_chain_at_bottom_is_below_desktop() {
+        let host = h(1);
+        assert_eq!(classify_chain(&[], host, true), ZVerdict::BelowDesktop);
+    }
+
+    #[test]
+    fn scan_budget_is_big_enough_for_a_busy_desktop_edge() {
+        // 保险丝不能因为「邻居多了几个」就误判成 TooHigh —— 给足余量。
+        assert!(
+            REASSERT_SCAN_STEPS >= 12,
+            "桌面正上方是公共地段，扫描预算太小会把正常邻居算成「被顶得很高」"
+        );
+        // 纠正必须有上限，否则一旦判据与现实不符就是无限重排（= 一直闪）
+        assert!(REASSERT_MAX_FIXES >= 1 && REASSERT_MAX_FIXES <= 10);
+        assert!(REASSERT_GIVEUP_BACKOFF_SECS >= 60);
+        // 自检节奏必须是时间量，不能跟着轮询周期走（V35 的教训）
+        assert!(REASSERT_INTERVAL_SECS >= 1);
+    }
 }
 

@@ -3,7 +3,8 @@
 > **读取指引**：现状总览/续接指引 → [`../PROJECT_STATUS.md`](../PROJECT_STATUS.md)（从 handy 打开先读它）；
 > 历史批次约定（V18–V25，动对应模块时查）→ [`CONVENTIONS.md`](./CONVENTIONS.md)；逐日进展 → 同目录 `YYYY-MM-DD.md`。
 > ⚠️ 本文件曾膨胀到 16.9k 字符被注入截断（**截断点越靠后越读不到，存档越全反而越无效**）。
-> 2026-09-16 瘦身至 ~6.5k：明细搬进 PROJECT_STATUS / CONVENTIONS，本文件只留**跨会话必读**。
+> 2026-09-16 瘦身至 ~6.5k；V35/V36 又补了几段，现 **~9.2k**（2026-09-17 实测）。
+> **再加内容前先删等量的旧内容** —— 明细一律搬进 PROJECT_STATUS / CONVENTIONS，本文件只留**跨会话必读**。
 
 ## 1. 产品既定标识（不可随意更改）
 
@@ -24,12 +25,12 @@
 | Rust | `src-tauri/src/{platform,db,commands}`、`src-tauri/capabilities/`、`src-tauri/tauri.conf.json` |
 | 参考项目 | `D:\_Projects\ops\ops-tools`（网页版）——**只读借鉴，禁止修改** |
 | 构建 | `scripts/rust-env.sh`（注入 MSVC，Rust 构建必用）、`scripts/dev-static.cjs` |
-| 自检三件套 | `scripts/audit/tool-audit.mjs`（静态）/ `layout-audit.mjs`（几何）/ `sample-smoke.mjs`（真点示例） |
+| 自检 | `scripts/audit/tool-audit.mjs`（静态）/ `layout-audit.mjs`（几何）/ `sample-smoke.mjs`（真点示例）/ **`window-probe.py`（V36：隔空验浮层窗的层级与渲染，见 §5）** |
 | 回归 | `scripts/regression/run.mjs` + `test-*.mjs`；`scripts/new-tool.mjs` 脚手架 |
 
-## 3. 状态快照（2026-09-17 11:45 · V35 已交付、已提交、已打包装机）
+## 3. 状态快照（2026-09-17 12:15 · V36 已交付、已提交、已打包装机）
 
-- Phase 1（MVP）功能全部交付；**最近一次打包是 V35**（见 PROJECT_STATUS §1.21.9），
+- Phase 1（MVP）功能全部交付；**最近一次打包是 V36**（见 PROJECT_STATUS §1.22），
   **已静默安装到用户机**（`%LOCALAPPDATA%\Handy\handy.exe`，NSIS currentUser，`/S`）。
   一键脚本 `bash scripts/build-release.sh`（tsc → 回归 → 清 dist → vite → tauri → 取证 → `/S` 装机 → 启动核验）。
   V34/V35 都用 `--no-deploy --skip-tsc --skip-regression`（tsc/回归刚单独跑绿）+ **手工装机取证，且刻意不代为启动**。
@@ -53,54 +54,33 @@
 - 批次明细与提交号 → PROJECT_STATUS §1（最近提交 `git log --oneline -6`）。
   **V35 `7d57ee2`**；V34 `d366340`；V33 `eeed5f9`；V28 `bc05a8c`；V27 `f7e825f`+`4268257`；V26 `2969256`+`43a8a06`；V25 `5f8fe8a`+`3001510`。
 
-### 3.1 V25–V27 事实源（细节见 PROJECT_STATUS §1.11–§1.13 与日志）
+### 3.1 历史批次一句话（细节见 PROJECT_STATUS §1.11–§1.13 与逐日日志）
 
-- **V25**：密码符号不连排（`passwordGen.ts` 唯一核心 + `separatedPositions`）；正则库全库自洽（`HitBadge` 自报命中数）；
-  桌面整理「能力有、入口错」→ 双页签控制台默认真归类。方法论沉淀 **CONVENTIONS.md §12**。
-- **V26**：工具箱纯逻辑层从零覆盖 → 1459 条断言（6 套新回归全带外部锚点：RFC 4648/1321、NIST、jwt.io、
-  Goessner JSONPath、IEC 80000-13；与 `node:crypto` 交叉验证）；修 6 处「不报错只给错答案」缺陷
-  （URL 主机:端口被当协议 / FileSize 切进制差 1024⁴ 倍 / JSON→TS 静默错类型等）；抽出 `src/lib/byteUnits.ts`。
-- **V27**：新增 `api-tester` 接口测试（cURL 导入 + **Rust `http_request` 直发绕 CORS**，reqwest 0.13 走 rustls；
-  敏感头不落盘）+ 建议条 14 处识别误报清零（JWT 依 RFC 7515 要求头部解出 JSON 对象；Base64 要求解码为合法 UTF-8）；
-  `jsonLocate` 与 V8 差分 0 分歧、误导报错改准确；回归 **17 套 / 1778 条**、冒烟 28 用例 / 25 工具、
-  工具自检 325 PASS。
+- **V25**：密码符号不连排 / 正则库全库自洽 / 桌面整理「能力有、入口错」→ 双页签控制台（**CONVENTIONS §12**）。
+- **V26**：工具箱纯逻辑层从零覆盖 → 1459 条断言（外部锚点 RFC/NIST/jwt.io/IEC + `node:crypto` 交叉验证）；
+  修 6 处「**不报错只给错答案**」缺陷；抽出 `src/lib/byteUnits.ts`。
+- **V27**：新增 `api-tester`（cURL 导入 + **Rust `http_request` 直发绕 CORS**，敏感头不落盘）；
+  建议条 14 处识别误报清零；回归扩到 17 套。
 
-### 3.2 V30–V35 事实源（桌面格子这条线的关键转折，别再按旧结论推理）
+### 3.2 桌面格子这条线的事实源（**别再按旧结论推理**；细节见 PROJECT_STATUS §1.19–§1.22）
 
-- **V30**：格子层开始「接管桌面」（自动隐藏系统图标 + 每 5s `grid_desktop_sync` **自动收录**桌面文件）。
-- **V31**：`grid_item_move` + HTML5 跨格拖拽；`grid_meta/overlay_visible` + `restore_overlay_if_visible`
-  让格子层重启后自动摆回。
-- **V32**：止损 —— 撤掉自动隐藏图标；心跳自愈（90s 无心跳→重建）；`grid_overlay_fault` 落库取证。
-  ⚠️ 这两处（**自动收录**与**90s 自愈**）正是 V33 挖出的闪烁/「复制一份」根因，别以为 V32 已经修好。
-- **V33**：① 模型换血 → **真实收纳**（见 §3 快照）；② 自愈判据改「显示后从未收到心跳」+ 冷却 + 次数上限，
-  Z 序去抖 `REASSERT_TICKS` 33→250 且连续 2 次不匹配才动手；③ `grid-overlay-status` 唯一事实源 + 2s 轮询；
-  ④ 挂件体系（`kind`: folder/note/calendar/system；便签 + 日历·计划复用 `todos` 表）；⑤ 迁移 v6；
-  ⑥ 新增 `cargo test --lib db::migrations`（迁移此前零断言）。方法论沉淀 **CONVENTIONS.md §13**。
-- **V34**：① ★ **Z 序根因** —— `show_overlay` 里 `apply_attach` 与 `show()` 顺序写反（`show()` 会提拔
-  到 Z 序顶层，把刚贴好的桌面层级顶掉）⇒ 用户两条相反抱怨（「盖在我窗口上面」/「点别处就消失」）
-  **是同一条链**，修法是 `show()` 在前、`apply_attach()` 最后；② 驻留：窗口不在但状态是显示中 →
-  自动重建（30s 冷却），`REASSERT_TICKS` 250→**40**（约 2.4s，错位 5 秒内纠正）；
-  ③ **靠右自动流布局** `arrange_position`（右边缘起、往左推列）；④ 便签改用 `RichMarkdown` 所见即所得；
-  ⑤ 日历挂件复用 `lib/lunar|holidays|planUtils` **与工作台逐项一致** + 点某天加计划 + 悬停 tooltip；
-  ⑥ **取消系统格**（`ensure_system_box` 删除 + 迁移 v7）治「两个我的电脑」；
-  ⑦ 图标改 `SHGetImageList(SHIL_EXTRALARGE)` 48×48 + `.lnk` 叠层（48 而非 32 才对得上桌面「中等图标」）；
-  ⑧ 文件夹纳入收纳（原 `if item.is_dir { continue }` 整类跳过）；⑨ 空格子不占桌面 + 柔光无边框。
-  ⚠️ ⑨ 的「**挂件各限一个**」**已被 V35 推翻**（便签改成可以多个，只有日历仍唯一）。
-  方法论沉淀 **CONVENTIONS.md §14**。
-- **V34 的 `REASSERT_TICKS` 40 在 V35 变了含义**：V35 把 `POLL_INTERVAL_MS` 60→25ms，
-  于是 40 周期 = **约 1.0s**（V34 时是 2.4s）。数字没动、实际间隔变了 —— 改轮询周期要连带看它。
-- **V35**（用户 5 条反馈，2 张截图）：① ★ **Win+D 丢格子** —— 挂件层是**普通顶层窗**，
-  Win+D「给所有顶层窗发最小化」照样命中；**没走 `SetParent`**（坐标体系变相对父窗 + WorkerW 重建连带），
-  改为轮询判 `IsIconic` → `SW_SHOWNOACTIVATE` → 重贴回桌面层；
-  ② ★ **拖拽识别不到** —— 挂件窗平时 `ignore_cursor_events(true)`，命中全靠 Rust 按全局光标判定，
-  60ms 采样追不上连续移动 ⇒ **25ms + HIT_PADDING 4px 命中区外扩**；缩放由只有 `se` 补齐 **8 向**
-  （边手柄两端各留 12px 给角；`n`/`w` 边缩放要**同时移原点**）；补 `raiseBox`（交互开始抬到最上层）；
-  ③ **便签改回可以多个**（用户改口，见上）+ 自动命名/配色 + 标题栏调色盘落库 `accent`（迁移 **v8**）+ 双击重命名；
-  ④ 日历默认 **360×430**、日期格 3 行（公历/农历·节气·节日/标记行：计划点 + 生日🎂）、休班角标、
-  **随条数自动撑高**（`scrollHeight` + `autoHeightBlockedRef` 让位守卫，上限 `innerHeight×0.7`）；
-  ⑤ 挂件卡片改**深色磨砂**（渐变 + 顶部高光 + 大柔影，**不加硬边框**）治「透明发糊」；
-  ⑥ 日期/纪念日逻辑抽到 `src/lib/dateUtils.ts`、`src/lib/anniversaries.ts` 并 **re-export**（调用方零改动）。
-  方法论沉淀 **CONVENTIONS.md §15**。
+- **V30–V32**（已被后续推翻，仅用于理解历史）：自动隐藏系统图标 + 每 5s 自动收录 → **都撤了**。
+  旧「文件引用型」格子模型（V25–V32）**已作废**。
+- **V33**：模型换血 → **真实收纳**（见 §3 快照）；心跳自愈判据改「显示后从未收到心跳」+ 冷却 + 上限；
+  `grid-overlay-status` 唯一事实源；挂件体系 + 迁移 v6；**CONVENTIONS §13**。
+- **V34**：`show_overlay` 里 `apply_attach`/`show()` **顺序写反**（`show()` 会把窗口顶到 Z 序顶层）；
+  驻留自动重建（30s 冷却）；靠右自动流布局；便签改 `RichMarkdown`；**取消系统格**（迁移 v7）；
+  图标改 48×48 + `.lnk` 叠层；文件夹纳入收纳；空格子不占桌面（**CONVENTIONS §14**）。
+  ⚠️ 其中「**挂件各限一个**」**已被 V35 推翻**。
+- **V35**：Win+D 丢格子 → `IsIconic` 检测 + `SW_SHOWNOACTIVATE` 还原（**没走 `SetParent`**）；
+  拖拽识别不到 → 轮询 **60→25ms** + 命中区外扩 4px；缩放补 **8 向**；便签改回**可以多个** + `accent`（迁移 **v8**）；
+  日历 3 行日期格 + 自动撑高 + 深色磨砂（CONVENTIONS §15）。
+  ⚠️ **这次提速把 Z 序自检的节奏也带快了 2.4 倍，是 V36 的直接诱因**。
+- **V36**：★ **「点显示 → 闪一下就没」的真根因 = Z 序自检的判据永远不成立**
+  （它要求「正下方**正好**是桌面」，但桌面正上方那一格是**公共地段**：搜狗 6 个隐藏助手窗 + 本应用主窗都在那儿）
+  ⇒ 每秒重排一次 `SetWindowPos` ⇒ 一直闪。修法：判据改「**往下走一段能碰到桌面**」（`ZVerdict`，有界下探 24 层）、
+  节奏改**时间量** `REASSERT_INTERVAL_SECS=3`、加**保险丝**（5 次退避 300 秒）。
+  另新增 `scripts/audit/window-probe.py` 与格子**右键菜单**（CONVENTIONS §16）。
 
 ## 4. 协作与操作约定
 
@@ -158,6 +138,13 @@
   做对照证明与环境有关、与代码无关。⇒ **真实 GUI 行为只能用户装机验收，启动动作交用户**。
 - **跑迁移/GUI 相关问题的第一原则**：先拿一个**已知 good 的旧产物**做对照（本项目现成有
   `%LOCALAPPDATA%\Handy\handy.exe.zombie`），一步就能把「代码回归」和「环境坏了」分开。
+- **浮层窗「不见了」的追问顺序（V36 立）**：**先读应用自己的日志数行数**
+  （`%LOCALAPPDATA%\Handy\grid-debug.log`；周期性动作必有可数日志，行数×间隔 = 循环频率），
+  再跑 `python scripts/audit/window-probe.py zlist` 看层级、`render` 看画没画东西。
+  肉眼看不出区别的四件事（层级高了 / 压在桌面下 / 最小化隐藏 / 前端没画），这套组合一步分清。
+  ⚠️ 本机 PowerShell 通道的 `Add-Type` 被安全层拦（`Get-Date` 也返回空）⇒ 取时间用
+  `node -e "console.log(new Date().toString())"`，抓屏/枚举窗口用 ctypes（探针脚本已固化）。
+  ⚠️ **会话注入的「当前时间」不可信**（2026-09-17 那次差了 12 小时），跨零点批次必须实测。
 
 ## 6. 验证纪律（血泪教训）
 
