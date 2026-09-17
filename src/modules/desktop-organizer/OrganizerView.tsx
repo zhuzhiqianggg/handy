@@ -214,7 +214,7 @@ export default function OrganizerView(_props: OrganizerViewProps = {}): React.JS
         toast.warning('桌面已经很干净了', { description: '没有扫描到可归拢的条目' });
       } else if (rep.itemsAdded === 0) {
         toast.info('没有需要归拢的条目', {
-          description: `扫描到 ${rep.scanned} 项，跳过 ${rep.skipped} 个历史收纳容器`,
+          description: `扫描到 ${rep.scanned} 项（含公共桌面），格子布局已按内容重排`,
         });
       } else {
         toast.success(`已归拢 ${rep.itemsAdded} 个条目到桌面格子`, {
@@ -519,7 +519,8 @@ export default function OrganizerView(_props: OrganizerViewProps = {}): React.JS
             </div>
             <p className="mt-1.5 text-[11px] text-muted-foreground">
               新建格子 {groupReport.boxesCreated} 个 · 复用 {groupReport.boxesReused} 个 ·
-              含文件夹 {groupReport.foldersMoved} 个 · 快捷方式按设计跳过 {groupReport.skipped} 个
+              含文件夹 {groupReport.foldersMoved} 个 · 重排 {groupReport.boxesLaidOut} 格 ·
+              按内容调尺寸 {groupReport.boxesResized} 格
             </p>
             {groupReport.failures.length > 0 && (
               <div className="mt-2 flex flex-col gap-1">

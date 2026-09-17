@@ -147,7 +147,7 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
   const addBox = useCallback((): void => {
     setBusy(true);
     void ipc
-      // 不指定落点 → 由 Rust 按「靠右自动流」算（与一键收纳共用同一套排布），
+      // 不指定落点 → 由 Rust 按「左起自动流」算（与一键收纳共用同一套排布），
       // 多个新格子依次往左推进，不会叠在同一处
       .gridBoxUpsert({
         name: `新格子 ${boxes.length + 1}`,
@@ -263,7 +263,7 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
         }
         if (report.itemsAdded === 0) {
           toast.info('没有需要归类的条目', {
-            description: `扫描到 ${report.scanned} 项，跳过 ${report.skipped} 个历史收纳容器`,
+            description: `扫描到 ${report.scanned} 项（含公共桌面），格子布局已按内容重排`,
           });
           return;
         }

@@ -1764,6 +1764,108 @@ Rust 侧 `row.get::<String>` 直接报错，表现成「桌面格子整个打不
 
 ---
 
+### 1.26 V40 批次（用户截图反馈：**原图标还在 · 宽度要对齐 · 高度按图标多少撑开 · 桌面那么多文件没整理好**）
+
+#### 1.26.1 反馈原文
+
+> 「现在这个看着整齐一点了 但是桌面原图标还存在呢？ 而且你要合理计算，让格子对齐整齐哇，
+> 宽度对齐，整理排列，流布局等，高度根据图标多少自动撑开 ，你看桌面上面那么多文件文件夹
+> 都没有整理好呢」
+
+#### 1.26.2 根因（**四条都在代码里指名道姓地找到了**）
+
+| # | 现象 | 根因（证据） |
+| --- | --- | --- |
+| ① | 「桌面原图标还存在呢」 | `grid_auto_arrange` 末尾写的是 **`if report.items_added > 0 { takeover_icons(true) }`** —— 本意是「空跑一次不该顺手把用户图标藏了」。但用户的桌面**早就全部登记过了**，每次整理回的都是「登记 0 项」⇒ **点整理根本不触发接管**。V39 刚做的 `reassert_takeover` 也救不了：它只在「偏好本来就是开」时才自检，而这次偏好**从没被打开过** |
+| ② | 同一现象的第二条路径 | 轮询线程 `if !win.is_visible() { release_icons_if_taken() }` —— Win+D /「显示桌面」/ Explorer 重建让挂件层**瞬态**不可见，图标当场被还回系统；哪怕刚自检藏好，下一次 Win+D 又还回去。用户截图那一刻若正好落在窗口期，看到的就是「格子 + 原图标」两份 |
+| ③ | 「宽度对齐、整理排列」 | `layout_all_boxes` 的列宽是**每格自己算的**（`auto_box_size` 按「尽量方形」推），真实库里出现 **160 / 228 / 300 三种宽度混排**（`便签 260 / 日历 460` 是挂件另有尺寸）⇒ 左边缘必然参差。而 `FlowPlacer` 仍是 V39 的**靠右**流布，日历那块大禁区卡在右上角，格子被迫一路往左让、堆在屏幕中间 |
+| ④ | 「桌面上面那么多文件文件夹都没有整理好呢」 | **`C:\Users\Public\Desktop` 有 15 个快捷方式**（微信/QQ/Chrome/PyCharm/ToDesk/钉钉…）而 Handy 只扫 `dirs::desktop_dir()`（用户桌面）。Windows 桌面是把**两个目录合并显示**的 —— 只整理一半，看着永远是「没整完」。另有一处雪上加霜：V38–V39 的 `skipped` 会把桌面上的历史容器 `Handy整理*` 永远排除在格子之外 |
+
+#### 1.26.3 四件修复
+
+| # | 修复 | 实现 |
+| --- | --- | --- |
+| ① | **整理一律接管**（修「原图标还在」的主路径） | `grid_auto_arrange` 末尾改为**无条件按接管偏好执行**：写 `desktop_takeover = true` + `takeover_icons(true)`，并把真实结果透给前端（`report.iconsHidden`）。同时留一道**安全闸** —— 仅当 `read_overlay_visible(&app)` 为真（挂件层确实在显示）才动手：否则（用户在管理页点整理而格子层是收起的）会把图标藏掉却没有格子顶上来，桌面直接变空白（V30.1 踩过的坑，比「两份内容」严重） |
+| ② | **瞬态不可见不再归还**（修同一现象的第二条路径） | 新增 `OVERLAY_AWAY_SINCE` + **`OVERLAY_AWAY_GRACE_SECS = 30`**：挂件层不可见只**记起点**，连续 30 秒才真归还（真收起 / 退出仍走 `grid_overlay_hide` 的**立即**归还，不受影响）。`OVERLAY_AWAY_SINCE.swap(0)` 非零（= 刚从不可见回来）时**立刻** `reassert_takeover`，不等下一个 3 秒周期 —— 那 3 秒里用户看到的就是两份内容 |
+| ③ | **统一列宽 + 左起首次适配流布局 + 高度随内容** | 拆出 `desired_box_width`（单格「想多宽」）/ `standard_box_width`（全批取最宽，受工作区上限夹）/ `box_height_at(items, 宽, icon, max_h)`（**按统一列宽**算行数 → 反推高度）。`FlowPlacer` 改**左起**（新增 `col_left(k)`）、自上而下**首次适配**、列间距等宽（`col_w + ARRANGE_GAP_X`）。**`system` 格从挂件改判为内容格**（`is_content_kind`）—— 它本质上就是「此电脑 / 回收站」的入口格，以前按挂件走锚点、自成一个 320 宽度，正是「宽度对齐」问题的一部分 |
+| ④ | **扫两个桌面根 + 不再排除历史容器** | 新增 `public_desktop_root()`（读 `%PUBLIC%\Desktop`，取不到返回 `None` 而非报错）与 `desktop_roots()`（用户桌面 + 公共桌面，去重）。`auto_arrange_inner` 改为遍历 `roots`，单个根扫描失败**只记 `failures` 不中断**另一个。同时**取消**对 `Handy整理*` 的跳过（V37 起整理一个字节都不移动，当年「容器不进格子」的前提已消失）⇒ `report.skipped` **恒为 0**（字段为前后端契约稳定保留） |
+
+#### 1.26.4 改动清单
+
+| 文件 | 改动 |
+| --- | --- |
+| `src-tauri/src/commands/grid.rs` | 接管：`takeover_icons` 状态真变化才落盘（含 `desktop_icon_view()` 句柄）、`OVERLAY_AWAY_SINCE` / `OVERLAY_AWAY_GRACE_SECS`、轮询里「宽限 + 回来立刻自检」、`grid_auto_arrange` 一律接管 + 可见性安全闸；尺寸与排布：`desired_box_width` / `standard_box_width` / `box_height_at`（`auto_box_size` 保留为「单格独立算」的薄包装）、`FlowPlacer::col_left` + 左起等距列、`is_content_kind` 纳入 `system`；扫描：`public_desktop_root` / `desktop_roots`、`auto_arrange_inner(roots)`、取消 `Handy整理*` 跳过 |
+| `AutoArrangeReport` | 语义更新：`scanned` = **两个桌面根**合计；`skipped` **恒为 0**；`boxesLaidOut` / `boxesResized` / `anchored` / `overflowed` 沿用 V39 |
+| `src-tauri/src/logging.rs` | `write_line` 在 `cfg!(test)` 下直接返回 —— `cargo test` 不再往用户真实 `handy.log` 里插假记录（那条日志是**故障复盘的事实源**，掺假会误导下一次排查） |
+| `GridOverlay.tsx` | 接管状态**每 30 秒复查**（一次性读取时那句「已隐藏」会一直骗人）；`toggleTakeover` 区分「偏好没开」与「偏好开了但图标被系统恢复」两种情形（后者点按钮 = 按我说的藏回去，而不是改偏好）；整理提示补「扫描 N 项」；过期文案「靠右」→「左起」 |
+| `GridManagerView.tsx` · `OrganizerView.tsx` | 过期文案清理：不再提「跳过 N 个历史收纳容器 / 快捷方式按设计跳过」，改为「扫描到 N 项（含公共桌面）· 重排 N 格 · 按内容调尺寸 N 格」 |
+| `scripts/audit/desktop-icon-probe.py`（新增） | 隔空探测桌面图标窗层级（`Progman` → `SHELLDLL_DefView` → `SysListView32` 的可见性 / Z 序），用于区分「图标没被藏住」与「藏住了又被还回来」 |
+
+#### 1.26.5 验证
+
+| 项 | 结果 |
+| --- | --- |
+| `cargo test --lib` | **37 → 43 条全绿**（新增 4 条排布断言 + **2 条端到端预演**） |
+| `tsc --noEmit` | EXIT=0（0 错误） |
+| 回归 17 套 | 17/17 PASS |
+| `tool-audit` | **325 PASS / 0 FAIL / 0 WARN** |
+| `sample-smoke`（真实 dist） | **29 PASS / 0 FAIL** |
+
+**新增的 6 条断言（两条端到端预演是本轮的压舱石）**：
+
+- 排布层（4 条）：`first_box_lands_in_the_top_left_corner`（首格必须钉在左上角 —— 左起，不回退到「靠右」）、
+  `one_standard_width_for_the_whole_batch`（全批**同一个宽度**）、`every_column_sits_on_the_same_pitch`（列位置必须落在等距网格上）、
+  `height_grows_with_item_count_at_a_fixed_width`（固定列宽下高度必须随条目数长）、
+  `system_box_counts_as_a_content_box_not_a_widget`（系统格必须参与排布、不再自成一档宽度）、
+  `standard_width_never_exceeds_the_work_area`（窄桌面不许把格子顶出边界）。
+- 端到端预演（2 条，`layout_pipeline_tests`）：把**用户库里当时的 11 个格子**（真实名称 / kind / 条目数 /
+  V39 遗留的 160·228·300 参差宽度 + 散落坐标）灌进**临时库**（跑完整迁移、跑完即删，**不碰真实库、不依赖 Windows API**），
+  跑一遍真实的 `layout_all_boxes`，断言「整理之后长什么样」：
+  `real_desktop_data_lays_out_in_aligned_columns`（列宽只有一种 = 300 · 列位置在等距网格上 · 9 个收纳格两两不重叠 ·
+  高度随条目数单调递增 · 挂件仍钉在锚点 · **再排一次 `moved=0` / `resized=0` 幂等**）、
+  `columns_fill_from_the_left_and_stay_clear_of_the_calendar`（格子全部在日历左侧、且不压到它）。
+
+> 这两条预演测试写砸过一次，值得记下来：`read_boxes` 返回的元组**第一列是 `kind`**，
+> 断言却当成 `name` 用 —— `"快捷方式"` 与 `"folder"` 都是 `String`，**编译器一声不吭**，
+> 只在运行期炸出「找不到格子」。现已把返回类型换成具名字段结构体 `BoxRow`，
+> 这类错误从类型上不可能再发生；另外「按 kind 还是按 name 找挂件」也踩了一次
+> （库里名字是用户改过的中文「日历 · 今日计划」），已全部改成按 `kind` 找并写明原因。
+
+#### 1.26.6 产物与取证
+
+| 项 | 值 |
+| --- | --- |
+| 一键流水线 | `bash scripts/build-release.sh --no-deploy`（PortableGit 全路径 bash + 显式 PATH），**5 分 29 秒**（21:59:25 → 22:04:54），`EXIT=0`，日志 `.build-logs/20260917-215925` |
+| tsc / 回归 | 21:59:26 → 21:59:33（tsc 0 错误；17/17 套通过） |
+| vite build | 21:59:42 → 21:59:52（`built in 7.97s`） |
+| tauri build | 21:59:52 → 22:04:53 |
+| 取证（mtime） | `handy.exe` **22:04:53** 晚于 `dist/index.html` **21:59:52** ✔ |
+| 取证（哈希，强取证） | 安装后的 `%LOCALAPPDATA%\Handy\handy.exe` 与 `target/release/handy.exe` **逐字节只差 3 个字节**（偏移 10174516–10174518：安装端 `116 123 123` = `N S S`，构建端 `125 116 113` = `U N K`）⇒ **装上去的就是本次 V40 构建产物**（明细 `.build-logs/v40-exe-diff.txt`） |
+| 产物 | `handy.exe` **11,225,088 B**（V39 为 11,222,528 B，+2,560 B）· NSIS **4,337,035 B** · MSI **5,582,848 B** |
+| 静默安装 | 停掉运行中的 V39 实例（PID 9464）→ NSIS `/S`（`Start-Process -Wait`）→ `%LOCALAPPDATA%\Handy\handy.exe` **22:04**、11,225,088 B → `cmp -l` 取证 ✔ |
+| ⚠️ 未启动 | 按 V34 起的规矩**装完即止**，请用户自己双击启动 |
+
+> ⚠️ 本轮踩了一个流程坑：在 Git Bash 里用 `...setup.exe //S &` 起安装器 ——
+> ① MSYS 不会把 `//S` 折成 `/S`（`taskkill //IM` 也报同样的错），② 沙箱**在本条命令结束时回收后台进程**。
+> 结果安装器既没拿到正确参数又被杀掉，`handy.exe` 一个字节没变。改走 PowerShell
+> `Start-Process -ArgumentList "/S" -Wait` 一次成功。**以后装机只用这一条路。**
+
+#### 1.26.7 验收要点（请重点确认这四条）
+
+1. **点「整理桌面」后原生图标必须消失**（这条是 V38/V39 两轮都没做到的：以前要求「本次真登记了新条目」
+   才接管，而你的桌面早就登记满了）。如果它还在，请把 `%LOCALAPPDATA%\Handy\handy.log` 发我 ——
+   里面有「接管桌面图标：已隐藏系统桌面图标视图（view=…）」或失败原因，能一句话定性；
+2. **按一次 Win+D / 点「显示桌面」再切回来**：图标应当在 30 秒内自动重新隐掉（且这期间不会再出现
+   「还回去又收回来」的闪烁）。若一直不隐，说明这台机器上有第三方桌面工具在抢图标层，日志里会写明；
+3. **格子应当左起一列列排、宽度全一样、高度按内容高矮不同、彼此不重叠、不越出屏幕**；
+   便签 / 日历仍自动归位（**日历右上角、便签左下角**）；
+   ⚠️ 这条同样意味着**你手动拖过的挂件位置会在整理时被归位**，如果你更希望「我摆过的地方别动我」，告诉我；
+4. **公共桌面的那批快捷方式（微信 / QQ / Chrome / PyCharm / ToDesk …）现在应当也进了格子**
+   （整理提示里的「扫描 N 项」会比以前明显变大）。桌面上若仍有 `Handy整理*` 之类的历史目录，
+   它们现在按普通文件夹进「文件夹」格；要收回/清理请走「诊断与修复」卡片（先干跑预览，**只移动不删除**）。
+
+---
+
 ## 2. 剩余任务与已知风险
 
 ### 2.1 🔴 唯一阻塞项：装机 GUI 验收（用户执行）

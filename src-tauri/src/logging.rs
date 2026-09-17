@@ -37,6 +37,12 @@ pub fn timestamp() -> String {
 ///
 /// 一律不返回错误、不 panic —— 日志写不进去也绝不能影响主流程。
 pub fn write_line(category: &str, message: &str) {
+    // 单测里不落盘（V40）：`cargo test` 会跑到用户真实目录的 handy.log 里插进一堆
+    // 测试行，而这条日志是**故障复盘的事实源** —— 掺进假的「整理布局 / 接管图标」记录，
+    // 下次排查真问题时就会被误导。测试只关心返回值，不关心日志。
+    if cfg!(test) {
+        return;
+    }
     let line = format!("[{}][{}] {}\n", timestamp(), category, message);
     if let Some(dir) = log_dir() {
         let _ = std::fs::create_dir_all(&dir);

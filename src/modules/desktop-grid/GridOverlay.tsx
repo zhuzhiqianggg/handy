@@ -438,17 +438,32 @@ export function GridOverlay(): React.JSX.Element {
     if (!isTauri()) {
       return;
     }
-    void ipc
-      .gridTakeoverGet()
-      .then((state) => {
-        setTakeover(state);
-        if (state.enabled && state.iconsVisible) {
-          showHint('桌面图标没能自动隐藏（多由第三方桌面工具引起），格子与原图标会同时显示');
-        } else if (state.enabled) {
-          showHint('桌面已由格子接管：原生图标已隐藏，收起挂件即恢复');
-        }
-      })
-      .catch(() => undefined);
+    // V40：这个状态必须**说实话**，所以不再只在挂载时读一次 —— 接管态随时会被系统 /
+    // 第三方桌面工具改掉（后端的自愈会在 3 秒内纠正，而界面上那句「已隐藏」如果不复查
+    // 就会一直骗人）。提示只在第一次读到时给，免得每 30 秒刷一句。
+    let announced = false;
+    const sync = (): void => {
+      void ipc
+        .gridTakeoverGet()
+        .then((state) => {
+          setTakeover(state);
+          if (announced) {
+            return;
+          }
+          announced = true;
+          if (state.enabled && state.iconsVisible) {
+            showHint('桌面图标没能自动隐藏（多由第三方桌面工具引起），格子与原图标会同时显示');
+          } else if (state.enabled) {
+            showHint('桌面已由格子接管：原生图标已隐藏，收起挂件即恢复');
+          }
+        })
+        .catch(() => undefined);
+    };
+    sync();
+    const timer = window.setInterval(sync, 30_000);
+    return () => {
+      window.clearInterval(timer);
+    };
   }, [showHint]);
 
   // —— 健康监控（V32）：心跳 + 故障自捕获 ——
@@ -692,7 +707,7 @@ export function GridOverlay(): React.JSX.Element {
   /**
    * 把被操作的格子提到最上层。
    *
-   * 格子是绝对定位、可以互相叠的（靠右自动流 + 手动拖动），叠起来之后**下面那个
+   * 格子是绝对定位、可以互相叠的（左起流布局 + 手动拖动），叠起来之后**下面那个
    * 就点不到了** —— 所以每次开始拖 / 拉之前先把它抬起来（`sort` 取全表最大值 + 1）。
    * 只在「交互开始」时抬，不做成「点一下就抬」：后者会让每次单击都写一次数据库。
    */
@@ -1065,8 +1080,13 @@ export function GridOverlay(): React.JSX.Element {
    *      参与（V34 曾跳过它，那是因为当时原生图标还在；现在接管了呈现，跳过的话
    *      用户桌上的程序快捷方式会当场没有入口可点）；
    *   2. **全量重排** —— 不只摆新建的格子，`boxesLaidOut` 是所有参与排布的格子，
-   *      排序规则是「靠右、自上而下、碰到便签 / 日历就让开」的流布局；
+   *      排序规则是「左起、自上而下、**列宽统一**、碰到便签 / 日历就让开」的流布局；
    *   3. **接管桌面呈现** —— 隐藏原生桌面图标，桌面上只留格子这一份。
+   *      ⚠️ V40：以前只有「本次真的登记了新条目」才接管，而桌面早就被登记满时
+   *      点整理拿到的是「登记 0 项」⇒ **压根没隐藏图标** —— 用户反馈的
+   *      「桌面原图标还存在呢？」就出在这里。现在点整理一律按接管偏好执行；
+   *   4. **两个桌面根都扫**（V40）—— 用户桌面 + 公共桌面（`%PUBLIC%\Desktop`，
+   *      那批「所有用户」快捷方式以前从来没进过格子）。
    *
    * 全程 **不移动任何文件**（V37 呈现层定下的规矩）。
    */
@@ -1078,6 +1098,7 @@ export function GridOverlay(): React.JSX.Element {
       .then((report) => {
         setTakeover({ enabled: true, iconsVisible: !report.iconsHidden });
         const parts = [
+          `扫描 ${report.scanned} 项`,
           `登记 ${report.itemsAdded} 项`,
           `新建 ${report.boxesCreated} 格`,
           `重排 ${report.boxesLaidOut} 格`,
@@ -1115,15 +1136,25 @@ export function GridOverlay(): React.JSX.Element {
    *
    * 为什么要给用户这个开关：隐藏桌面图标是接管别人的地盘，万一第三方桌面工具抢着
    * 管，用户得有一键退回到「原桌面原样」的出口 —— 否则桌上一个文件都点不到。
+   *
+   * V40 补一种情形：偏好明明是「接管」、图标却露在外面（被系统或第三方工具恢复了）。
+   * 这时点按钮的意图显然是**按我说的藏回去**，而不是「改偏好成不接管」——
+   * 所以这里先修状态，只有状态本来就一致时才真的切偏好。
    */
   const toggleTakeover = useCallback((): void => {
-    const next = !(takeover?.enabled ?? false);
+    const wanted = takeover?.enabled ?? false;
+    const mismatch = wanted && (takeover?.iconsVisible ?? false);
+    const next = mismatch ? true : !wanted;
     void ipc
       .gridTakeoverSet(next)
       .then((hidden) => {
         setTakeover({ enabled: next, iconsVisible: !hidden });
         if (next && hidden) {
-          showHint('桌面已交由格子接管：原生图标收起，格子就是桌面');
+          showHint(
+            mismatch
+              ? '已重新接管：原生图标再次收起（刚才它被系统或桌面工具显示回来了）'
+              : '桌面已交由格子接管：原生图标收起，格子就是桌面',
+          );
         } else if (next) {
           showHint('没能自动隐藏桌面图标，格子与原生图标会同时显示');
         } else {
@@ -1142,7 +1173,7 @@ export function GridOverlay(): React.JSX.Element {
       .gridBoxUpsert({
         name: `新格子 ${count + 1}`,
         kind: 'folder',
-        // 不指定落点 → 由 Rust 用同一套「靠右流布局」算出一块**不与任何已有格子
+        // 不指定落点 → 由 Rust 用同一套「左起流布局」算出一块**不与任何已有格子
         // （含便签 / 日历）重叠**的空位，且不会跑出桌面之外
         width: 320,
         height: 220,
@@ -1843,7 +1874,7 @@ export function GridOverlay(): React.JSX.Element {
         <button
           type="button"
           onClick={arrangeDesktop}
-          title="整理桌面：按类型登记进格子 + 靠右流布局重排 + 接管原生图标（不移动任何文件）"
+          title="整理桌面：按类型登记进格子 + 左起流布局重排（列宽统一）+ 接管原生图标（不移动任何文件）"
           className="rounded-full p-1.5 text-neutral-200 transition hover:bg-white/10"
         >
           <Sparkles className="h-4 w-4" />
@@ -1852,12 +1883,18 @@ export function GridOverlay(): React.JSX.Element {
           type="button"
           onClick={toggleTakeover}
           title={
-            takeover?.enabled
-              ? '桌面已由格子接管（原生图标隐藏）—— 点这里恢复原生图标'
-              : '由格子接管桌面呈现：隐藏原生桌面图标，避免桌面上出现两份相同内容'
+            takeover?.enabled && takeover.iconsVisible
+              ? '桌面接管失效：偏好仍是接管，但原生图标此刻露在外面（系统或桌面工具恢复了它）—— 点这里立刻重新隐藏'
+              : takeover?.enabled
+                ? '桌面已由格子接管（原生图标隐藏）—— 点这里恢复原生图标'
+                : '由格子接管桌面呈现：隐藏原生桌面图标，避免桌面上出现两份相同内容'
           }
           className={`rounded-full p-1.5 transition hover:bg-white/10 ${
-            takeover?.enabled ? 'text-emerald-300' : 'text-neutral-200'
+            takeover?.enabled && takeover.iconsVisible
+              ? 'text-amber-300'
+              : takeover?.enabled
+                ? 'text-emerald-300'
+                : 'text-neutral-200'
           }`}
         >
           {takeover?.enabled ? <MonitorOff className="h-4 w-4" /> : <Monitor className="h-4 w-4" />}
