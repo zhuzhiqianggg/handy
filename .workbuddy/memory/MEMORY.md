@@ -21,46 +21,45 @@
 | --- | --- |
 | 项目根 | `D:\_Projects\ops\handy` |
 | 文档 | `docs/{01-planning,02-architecture,03-development}`（权威版 = 无后缀） |
-| 前端 | `src/{core,modules,components,platform,lib,stores,hooks}`；纯逻辑全在 `src/lib/` |
-| Rust | `src-tauri/src/{platform,db,commands}` |
+| 前端 / Rust | `src/{core,modules,components,platform,lib,stores,hooks}` / `src-tauri/src/{platform,db,commands}` |
 | 参考项目 | `D:\_Projects\ops\ops-tools`——**只读借鉴，禁止修改** |
-| 构建 | `scripts/rust-env.sh`（注入 MSVC，**Rust 命令必先 source**）、`scripts/dev-static.cjs` |
-| 自检 | `scripts/audit/tool-audit.mjs` / `layout-audit.mjs` / `sample-smoke.mjs` / `window-probe.py` |
-| 回归 | `scripts/regression/run.mjs` + `test-*.mjs`；脚手架 `scripts/new-tool.mjs` |
+| 构建与自检 | `scripts/rust-env.sh`（注入 MSVC，**Rust 命令必先 source**）；`scripts/audit/` 四个探针；`scripts/regression/run.mjs`；脚手架 `scripts/new-tool.mjs`；一键打包 `scripts/build-release.sh` |
 
-- **前端**：`node node_modules/typescript/bin/tsc --noEmit -p tsconfig.json`；
-  `node node_modules/vite/bin/vite.js build`
+- **前端**：`node node_modules/typescript/bin/tsc --noEmit -p tsconfig.json`；`node node_modules/vite/bin/vite.js build`
 - **Rust**：`source scripts/rust-env.sh && cargo check --manifest-path D:/_Projects/ops/handy/src-tauri/Cargo.toml`
   （`os error 5` → `CARGO_INCREMENTAL=0`）
 - **打包**：`bash scripts/build-release.sh [--no-deploy] [--skip-tsc] [--skip-regression]`，
   必须用 **PortableGit 全路径 bash** 并显式构造 PATH（见 CONVENTIONS §坑4）
 - 真实库 `%APPDATA%\com.handy.desktop\handy.db`；日志 `%LOCALAPPDATA%\Handy\handy.log`（2MB 轮转留 3 份）
 
-## 3. 状态快照（2026-09-17 · V38）
+## 3. 状态快照（2026-09-17 · V39）
 
-- **最近交付 V38**（用户 3 张截图反馈）：① 新格子**不再默认锁定**、新建即解锁并高亮 2.4s；
-  ② **格子常驻不消失**（空的一律显示，取消「空格子占位」的过滤）；③ 「整理桌面」= 分类登记 + **全量靠右流布局重排**
-  + **接管桌面呈现**（隐藏原生图标，消除「桌面两份相同内容」）。
-- ★ **桌面格子 = 呈现层**（V37 立，V38 补完）：条目只是桌面上文件的**引用登记**，
-  拖入/移出/一键归类**一律不动文件**（对标腾讯桌面整理）。V33–V36 的「真实收纳」
-  （`fs::rename` 进 `桌面/Handy整理/<格名>/`）**已被用户否决作废**，别再按它推理。
-- **DB 迁移链** v1→…→v9；已由 `cargo test --lib` **26 条**断言守住（V38 新增 7 条 `flow_placer_tests`）。
-- **批次明细与提交号** → PROJECT_STATUS §1。最近：V37 `1df5cb2`；V36 `97a164a`；V35 `7d57ee2`。
-- ⚠️ **agent 会话启动不了本 GUI**（新旧版本一律挂死启动早期，与代码无关，见 §1.19.2）
+- **最近交付 V39**（用户截图反馈）：① **接管自愈** —— 修「源图标还在」（归还图标是单向的，
+  挂件窗被 Win+D 弄成瞬时不可见就把图标还回去且再也不收回；现在按 3 秒自检、带保险丝与限流日志）；
+  ② **排不下不再保持原位**（V38 日志实证 `4 个没地方放（保持原位）` 就是「桌面很乱」的来源）
+  → 首次适配 + 空洞复用 + 缩到最小重试 + `place_loose` 兜底并上报；③ **格子按内容量自动定尺寸**
+  （`auto_box_size`，与前端条目网格度量严格对齐）；④ **挂件锚点表**（`widget_corner`：
+  日历右上角 / 便签左下角 / 其余兜底左下角，新增挂件只加一行）。
+- ★ **桌面格子 = 呈现层**（V37 立）：条目只是桌面上文件的**引用登记**，拖入/移出/一键归类
+  **一律不动文件**（对标腾讯桌面整理）。V33–V36 的「真实收纳」（`fs::rename` 进
+  `桌面/Handy整理/<格名>/`）**已被用户否决作废**，别再按它推理。整理后由格子**接管桌面呈现**
+  （隐藏原生图标），否则同一批文件会显示两遍 —— 这是用户反复投诉的点。
+- **DB 迁移链** v1→…→v9；由 `cargo test --lib` **37 条**断言守住（其中排布/尺寸/锚点 17 条）。
+- **批次明细与提交号** → PROJECT_STATUS §1。最近：V38 `4237af6`；V37 `1df5cb2`；V36 `97a164a`。
+- ⚠️ **agent 会话启动不了本 GUI**（新旧版本一律挂死启动早期，与代码无关，见 PROJECT_STATUS §1.19.2）
   ⇒ **打包 + `/S` 静默装到 `%LOCALAPPDATA%\Handy\handy.exe` 即止，不代启动**，请用户自己启动。
   **唯一阻塞项 = 用户装机 GUI 验收**。
 
-### 3.1 桌面格子这轮的费点（一句话版，正文见 CONVENTIONS §13–§17）
+### 3.1 桌面格子这轮的费点（一句话版，正文见 CONVENTIONS §13–§19）
 
 | 版本 | 关键教训 |
 | --- | --- |
-| V32 | 撤自动藏图标（会残留），改白屏自愈 + 故障取证 |
-| V33 | 模型换「真实收纳」——后被用户否决 |
-| V34 | `apply_attach`/`show()` 顺序写反会把窗口顶到 Z 序顶层 |
+| V33–V34 | 模型换「真实收纳」（后被否决）；`apply_attach`/`show()` 顺序写反会把窗口顶到 Z 序顶层 |
 | V35 | Win+D 丢格子用 `IsIconic`+`SW_SHOWNOACTIVATE`（**不走 `SetParent`**）；**提速会连带改掉自愈节奏** |
 | V36 | ★ 「闪一下就没」根因 = Z 序自检判据**永远不成立**（桌面正上方是公共地段）⇒ 每秒重排 |
-| V37 | 撤销真实收纳；⚠️ **事故**：`copy_dir_recursive` 先建目标再遍历源 ⇒ 目标在源内部时无限自复制，用户桌面炸出 5 目录 / 296 GB / 1001 层 |
-| V38 | 「合并跳过 `.lnk`」只在图标仍显示时成立；接管呈现后必须让快捷方式进「快捷方式」格，否则用户没入口可点 |
+| V37 | 撤销真实收纳；⚠️ **事故**：`copy_dir_recursive` 先建目标再遍历源 ⇒ 目标在源内时无限自复制，用户桌面炸出 5 目录 / 296 GB / 1001 层 |
+| V38 | 「跳过 `.lnk`」只在原生图标仍显示时成立；接管呈现后必须让快捷方式进「快捷方式」格 |
+| V39 | **单向兜底 = 没有兜底**；**静默降级 = 伪装成功**；排布游标只增不减 ⇒ 空隙永远用不上 |
 
 ## 4. 协作与操作约定
 
@@ -77,14 +76,15 @@
   4. Bash shim 时好时坏（整条命令可能只写 16 字节日志就「完成」）→ 降级 PowerShell / node，
      **输出落盘再 Read**；跑构建用 PortableGit 全路径 bash + 显式 PATH；**构建后必核对产物 mtime**。
   5. 源码里的中文文案**不要带反引号和 markdown 星号**（模板字符串会被搞崩，报错位置离真问题很远）。
-  6. Bash 里 `powershell -Command` 会被安全层拒 → 用内置 PowerShell 工具；Git Bash 里 taskkill 要写
-     `MSYS_NO_PATHCONV=1 taskkill /IM x /F`。
+  6. Bash 里 `powershell -Command` 会被安全层拒 → 用内置 PowerShell；Git Bash 里 taskkill 要写
+     `MSYS_NO_PATHCONV=1 taskkill /IM x /F`（`//IM` 反而不认）。**别用 `handy.exe --version` 探测版本 ——
+     它会把应用真的启动起来**。
 
 ## 5. 验证纪律（血泪教训）
 
 - **agent 自报的 "exit 0" 不可信**（曾两次虚报）→ 一律**独立复跑**，**输出与 exit code 分文件落盘后再 Read**。
 - 过期日志甄别：核对 **mtime 与被检文件的先后**，否则误判「编不过」。
-- 三层验证：实现者自验（落盘取证）→ 独立 QA → 主理人终验。
 - **回归里算错的期望值比产品代码更危险**；写完断言逐条反问「它在失败场景下会不会也成立」。
 - **GUI 类问题先用已知 good 的旧产物做对照**，一步分开「代码回归」与「环境坏了」。
 - 浮层窗「不见了」的追问顺序：**先读应用日志数行数** → `window-probe.py zlist` 看层级 → `render` 看画没画。
+- 排布 / 布局类问题**先看日志里的量化数字**（如「挪动 4 个 / 4 个没地方放」），比读代码快得多。

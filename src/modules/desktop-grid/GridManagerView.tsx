@@ -269,9 +269,22 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
         }
         const created = report.boxesCreated > 0 ? `新建 ${report.boxesCreated} 个格子、` : '';
         const folders = report.foldersMoved > 0 ? `（含 ${report.foldersMoved} 个文件夹）` : '';
+        // V39：整理顺手做完的三件事都报出来 —— 按内容调尺寸 / 挂件归位 / 全量重排
+        const tidied = [
+          report.boxesLaidOut > 0 ? `重排 ${report.boxesLaidOut} 格` : '',
+          report.boxesResized > 0 ? `按内容调尺寸 ${report.boxesResized} 格` : '',
+          report.widgetsAnchored > 0 ? `挂件归位 ${report.widgetsAnchored} 个` : '',
+        ]
+          .filter(Boolean)
+          .join('、');
         toast.success(`已归类 ${report.itemsAdded} 个条目${folders}`, {
-          description: `${created}文件全部留在桌面原位，没有移动`,
+          description: `${created}文件全部留在桌面原位，没有移动${tidied ? `；${tidied}` : ''}`,
         });
+        if (report.boxesOverflowed > 0) {
+          toast.warning(`桌面空间不够，${report.boxesOverflowed} 个格子没能排开`, {
+            description: '建议减少格子数量，或在系统设置里把桌面图标调小一些再整理',
+          });
+        }
         if (report.failures.length > 0) {
           toast.warning(`${report.failures.length} 个文件没能归类`, {
             description: report.failures.slice(0, 3).join('；'),

@@ -1894,6 +1894,9 @@ fn ensure_poller(app: AppHandle) {
                 if last_reassert.elapsed() >= std::time::Duration::from_secs(REASSERT_INTERVAL_SECS) {
                     last_reassert = std::time::Instant::now();
                     reassert_attach(&win);
+                    // V39：接管也要自检 —— 图标被系统恢复（Win+D / 显示桌面 / Explorer 重建）
+                    // 之后必须重新藏起来，否则桌面就永久变成「格子 + 原图标」两份内容。
+                    reassert_takeover(&app);
                 }
                 // 白屏自愈（V33 收窄）：**只在冷启动后从未收到过心跳**时才判定前端没起来。
                 // 稳态心跳可能被 WebView2 后台节流拉长到几分钟，绝不能据此销毁重建 ——
@@ -1985,7 +1988,57 @@ fn release_icons_if_taken(app: &AppHandle) {
     if ICONS_TAKEN.swap(false, Ordering::Relaxed) {
         let _ = desktop_icons_apply(false);
         let _ = write_icons_hidden(app, false);
-        println!("[Handy] 检测到挂件层已不可见，自动恢复系统桌面图标");
+        // ⚠️ V39 起走 grid_log 落盘：V38 这里是 println!，**只进控制台、不写 handy.log**，
+        // 于是「图标被谁还回去了」在复盘时完全看不见 —— 用户反馈「源图标还在」时，
+        // 这个盲区让排查多绕了一大圈。
+        grid_log("挂件层已不可见，把系统桌面图标还给系统");
+    }
+}
+
+/// **接管自检**（V39）：偏好要求接管、图标却露出来了 → 重新隐藏。
+///
+/// # 为什么必须有这一步（用户反馈「源图标还在」的真根因）
+///
+/// 轮询线程里有一条兜底：挂件窗一旦不可见就 [`release_icons_if_taken`]（把图标还给系统）。
+/// 这是 V30.1 的教训（最小化 Handy 后桌面空着没人管），本身没错 —— **错在还回去之后
+/// 没有任何路径再收回来**：用户按一次 Win+D（或点「显示桌面」、Explorer 重建、Z 序纠正
+/// 的瞬间），挂件窗短暂不可见 → 图标归还 → 此后永远是「格子 + 原图标」两份内容，
+/// 正是用户截图里那句「源图标还在」。
+///
+/// 所以这里补上对称的另一半：只要偏好还是「接管」，就周期性确认图标确实被藏住了，
+/// 没藏住就重新藏。与 Z 序自检同节奏（[`REASSERT_INTERVAL_SECS`]）、同样带保险丝。
+fn reassert_takeover(app: &AppHandle) {
+    if !read_takeover(app) {
+        // 用户没选接管：清零计数，下次开启接管时从干净状态开始
+        TAKEOVER_FIXES.store(0, Ordering::Relaxed);
+        return;
+    }
+    if ICONS_TAKEN.load(Ordering::Relaxed) && !desktop_icons_visible() {
+        // 已经藏好了：正常态
+        TAKEOVER_FIXES.store(0, Ordering::Relaxed);
+        return;
+    }
+    // 保险丝：连续失败到顶了 → 退避期内不再尝试（避免与第三方桌面工具互相打架）
+    let now = unix_secs();
+    if TAKEOVER_RETRY_AT.load(Ordering::Relaxed) > now {
+        return;
+    }
+    if takeover_icons(app, true) {
+        TAKEOVER_FIXES.store(0, Ordering::Relaxed);
+        // 限流写日志：正常态不刷屏，但保留「确实被系统恢复过」这条证据
+        if now.saturating_sub(LAST_TAKEOVER_LOG_AT.load(Ordering::Relaxed))
+            >= TAKEOVER_LOG_INTERVAL_SECS
+        {
+            LAST_TAKEOVER_LOG_AT.store(now, Ordering::Relaxed);
+            grid_log("桌面图标曾被系统恢复（多为 Win+D / 显示桌面 / Explorer 重建），已重新接管");
+        }
+        return;
+    }
+    let fixes = TAKEOVER_FIXES.fetch_add(1, Ordering::Relaxed) + 1;
+    if fixes >= TAKEOVER_MAX_FIXES {
+        TAKEOVER_RETRY_AT.store(now + TAKEOVER_BACKOFF_SECS, Ordering::Relaxed);
+        TAKEOVER_FIXES.store(0, Ordering::Relaxed);
+        grid_log("连续多次无法隐藏系统桌面图标（多半被第三方桌面工具接管），暂停自动接管 5 分钟");
     }
 }
 
@@ -2203,6 +2256,24 @@ static REASSERT_GAVE_UP: AtomicBool = AtomicBool::new(false);
 /// 上次自动重建的时刻（unix 秒；用于冷却 [`HEARTBEAT_REBUILD_COOLDOWN_SECS`]）。
 static LAST_REBUILD_AT: AtomicU64 = AtomicU64::new(0);
 
+// —— V39：接管自检（桌面图标被系统恢复后自动重新隐藏）——
+
+/// 接管自检连续失败次数（到 [`TAKEOVER_MAX_FIXES`] 就退避，防与第三方桌面工具互相打架）。
+static TAKEOVER_FIXES: AtomicU32 = AtomicU32::new(0);
+
+/// 接管自检退避截止时刻（unix 秒，0 = 不在退避）。
+static TAKEOVER_RETRY_AT: AtomicU64 = AtomicU64::new(0);
+
+/// 上次「重新接管」写日志的时刻（unix 秒）—— 限流用，免得反复 Win+D 把日志刷爆。
+static LAST_TAKEOVER_LOG_AT: AtomicU64 = AtomicU64::new(0);
+
+/// 接管自检失败几次后退避（够覆盖「第三方工具抢着管」的持续失败，又不至于一两次抖动就放弃）。
+const TAKEOVER_MAX_FIXES: u32 = 5;
+/// 接管自检失败后的退避时长（秒）。
+const TAKEOVER_BACKOFF_SECS: u64 = 300;
+/// 「重新接管」日志的最小间隔（秒）。
+const TAKEOVER_LOG_INTERVAL_SECS: u64 = 60;
+
 /// `grid_meta` 中「挂件最近一次前端故障」的键名（管理页展示，供用户截图反馈）。
 const META_KEY_OVERLAY_FAULT: &str = "overlay_last_fault";
 
@@ -2407,17 +2478,65 @@ pub async fn grid_open_path(app: AppHandle, path: String) -> Result<(), String> 
 
 /// 一键整理的格子排布：**靠右自动流**（详见 [`FlowPlacer`]）。
 const ARRANGE_MARGIN: i64 = 32;
-/// 相邻两列的右边界间距（列宽 320 + 24 间隙）
-const ARRANGE_STEP_X: i64 = 344;
+/// 相邻两列的**最小**间距（真实列宽随格子尺寸走，见 [`FlowPlacer::next`]）
+const ARRANGE_GAP_X: i64 = 24;
 /// 同一列内相邻两个格子的纵向间隙
 const ARRANGE_GAP_Y: i64 = 24;
-const ARRANGE_BOX_W: i64 = 320;
-const ARRANGE_BOX_H: i64 = 244;
 /// 格子最小尺寸（与前端 `MIN_BOX_W/H` 一致，布局时不得再小）
 const MIN_BOX_W: i64 = 160;
 const MIN_BOX_H: i64 = 120;
-/// 单行最多摆几列（超宽屏也别一路排到左边缘之外）
-const ARRANGE_MAX_COLUMNS: i64 = 8;
+/// 单列最多放几个格子（防病态数据把一列排到无穷）
+const ARRANGE_COLUMN_CAP: i64 = 40;
+
+/// —— 内容驱动尺寸：格子内条目网格的度量（**必须与前端 `GridOverlay.tsx` 严格对齐**）——
+///
+/// 前端那一处（收纳格条目网格）是：
+///   `grid gap-1 p-2` + `gridTemplateColumns: repeat(auto-fill, minmax(iconSize + 36px, 1fr))`，
+///   单元格是 `flex flex-col items-center gap-1 p-1.5` + 图标 `iconSize` + 一行 11px 文字。
+/// 所以单元格是 `(iconSize + 36) × (iconSize + 30)`（30 = 上下 padding 12 + 间距 4 + 一行文字 14）。
+/// **改前端任何一个类名都要回来改这里**，否则算出来的尺寸会与实际渲染错位。
+const CELL_EXTRA_W: i64 = 36;
+const CELL_EXTRA_H: i64 = 30;
+/// 网格 gap-1 / p-2
+const GRID_GAP: i64 = 4;
+const GRID_PAD: i64 = 8;
+/// 格子标题栏 h-8 / 上下边框
+const BOX_HEADER_H: i64 = 32;
+const BOX_BORDER_H: i64 = 2;
+/// 自动尺寸时单行最多几个条目单元格（再宽就不像「格子」而像面板了）
+const AUTO_MAX_COLS: i64 = 4;
+/// 自动尺寸的宽度上限
+const AUTO_MAX_W: i64 = 520;
+
+/// 新建格子 / 兜底排布时的默认尺寸（内容为空时的观感尺寸）。
+const ARRANGE_BOX_W: i64 = 320;
+const ARRANGE_BOX_H: i64 = 244;
+
+/// 按**条目数量**算一个收纳格该多大（用户 V39 原话：「应该根据每个格子里面内容多少自动调整大小」）。
+///
+/// 规则：单元格按图标尺寸定死 → 用「尽量接近正方形」的方式挑列数（上限 [`AUTO_MAX_COLS`]）→
+/// 行数 = ceil(n / 列数) → 反推外框。空格子给最小尺寸（它要显示「把文件拖到这里」的引导）。
+///
+/// 高度上限交由调用方给（`max_h`）：一个装了 60 个条目的格子如果照实高到 1200px，
+/// 它会顶穿整个桌面；超过上限时**宁可让它内部滚动**（前端条目网格本来就是 `overflow-y-auto`），
+/// 也不能让一个格子把桌面占满。
+fn auto_box_size(items: usize, icon: i64, max_h: i64) -> (i64, i64) {
+    let icon = icon.clamp(16, 256);
+    let cell_w = icon + CELL_EXTRA_W;
+    let cell_h = icon + CELL_EXTRA_H;
+    let n = items.max(1) as i64;
+    // 尽量方形：列数 ≈ sqrt(条目数 × 单元格高宽比)
+    let cols = (((n as f64) * (cell_h as f64) / (cell_w as f64)).sqrt().ceil() as i64)
+        .clamp(1, AUTO_MAX_COLS);
+    let rows = (n + cols - 1) / cols;
+    let w = cols * cell_w + (cols - 1) * GRID_GAP + 2 * GRID_PAD;
+    let h = BOX_HEADER_H + BOX_BORDER_H + rows * cell_h + (rows - 1) * GRID_GAP + 2 * GRID_PAD;
+    let max_h = max_h.max(MIN_BOX_H);
+    (
+        w.clamp(MIN_BOX_W, AUTO_MAX_W),
+        h.clamp(MIN_BOX_H, max_h),
+    )
+}
 
 /// 一个矩形（逻辑像素）—— 排布时的占位 / 禁区。
 #[derive(Debug, Clone, Copy)]
@@ -2438,104 +2557,142 @@ impl SlotRect {
     }
 }
 
-/// **靠右自动流排布器**（V38 抽出，统一「一键整理」与「新建格子」两处落点计算）。
+/// **靠右自动流排布器**（V38 抽出、V39 换成首次适配，统一「一键整理」与「新建格子」两处落点）。
 ///
-/// 规则（对应用户那句「没有计算桌面合理的规划格子位置、流布局结构」）：
-///   1. 从工作区**右边缘**开始；
-///   2. 一列之内**自上而下**摆满，装不下再往左推一列（不是先横着一行行铺）；
-///   3. 每个格子用**自己的宽高**算占位，不再假定所有格子一样大；
-///   4. `blocked` 里的矩形是禁区 —— 便签 / 日历挂件的位置、以及本列刚摆下的格子，
-///      候选点撞上禁区就往下让开（而不是硬叠上去）。
+/// 规则（对应用户那两句「没有计算桌面合理的规划格子位置、流布局结构」、
+/// 「格子自动流式布局，防止位置（重叠）」）：
+///   1. 从工作区**右边缘**开始，一列之内自上而下摆，装不下再往左推一列；
+///   2. 列宽统一（取本批格子里最宽的那个）—— 列若宽窄不一，右侧边缘就会参差，看着还是乱；
+///   3. 每个格子用**自己的宽高**算占位，不假定所有格子一样大；
+///   4. **首次适配**：每列都从顶部开始找第一个放得下的空洞（V38 用的是「游标只增不减」，
+///      一列里被大格子切出来的空隙再也用不上，格子尺寸一不统一就浪费大片空间）；
+///   5. `blocked` 里的矩形是禁区 —— 挂件锚点位置 + 已摆下的格子，撞上就往下让开。
 ///
 /// 为什么是「自上而下的一列列」而不是「一行行」：桌面上图标本来就是左侧竖排，
 /// 格子贴着右边缘竖向堆叠时视觉上像另一条「图标列」，横向铺开反而会横穿整个桌面。
 struct FlowPlacer {
     margin: i64,
+    work_w: i64,
     work_h: i64,
-    /// 当前列的右边界（逻辑像素）
-    col_right: i64,
-    /// 当前列的纵向游标
-    cursor_y: i64,
+    /// 列宽（本批格子里最宽的；决定相邻两列右边界之间的距离）
+    col_w: i64,
+    /// 最多摆几列（由工作区宽度与列宽推导，不再写死 8）
+    max_columns: i64,
     /// 已占用的矩形（禁区 + 已摆下的格子）
     blocked: Vec<SlotRect>,
 }
 
 impl FlowPlacer {
-    fn new(work_w: i64, work_h: i64, blocked: Vec<SlotRect>) -> Self {
+    fn new(work_w: i64, work_h: i64, col_w: i64, blocked: Vec<SlotRect>) -> Self {
         // 工作区尺寸拿不到时退回 1280×720，宁可摆得挤一点也不能算出负坐标
         let work_w = if work_w > 0 { work_w } else { 1280 };
         let work_h = if work_h > 0 { work_h } else { 720 };
+        let col_w = col_w.clamp(MIN_BOX_W, AUTO_MAX_W);
+        let usable = work_w - 2 * ARRANGE_MARGIN + ARRANGE_GAP_X;
+        let max_columns = (usable / (col_w + ARRANGE_GAP_X)).clamp(1, ARRANGE_COLUMN_CAP);
         Self {
             margin: ARRANGE_MARGIN,
+            work_w,
             work_h,
-            col_right: work_w - ARRANGE_MARGIN,
-            cursor_y: ARRANGE_MARGIN,
+            col_w,
+            max_columns,
             blocked,
         }
     }
 
+    /// 第 `k` 列（0 = 最右）的右边界。
+    fn col_right(&self, k: i64) -> i64 {
+        self.work_w - self.margin - k * (self.col_w + ARRANGE_GAP_X)
+    }
+
     /// 给一个 `w×h` 的格子找下一个落点。`None` = 桌面已经排不下了。
     fn next(&mut self, w: i64, h: i64) -> Option<(i64, i64)> {
-        let w = w.max(MIN_BOX_W);
         let h = h.max(MIN_BOX_H);
-        // 最多往左推 ARRANGE_MAX_COLUMNS 列，推不动就放弃（返回 None）
-        for _ in 0..ARRANGE_MAX_COLUMNS + 1 {
-            if self.col_right - w < self.margin {
+        for k in 0..self.max_columns {
+            let x = self.col_right(k) - w;
+            if x < self.margin {
                 // 这一列连宽度都不够 → 再往左只会更糟
-                return None;
+                break;
             }
-            let x = self.col_right - w;
             if let Some(y) = self.find_row(x, w, h) {
-                let rect = SlotRect { x, y, w, h };
-                self.blocked.push(rect);
-                self.cursor_y = y + h + ARRANGE_GAP_Y;
+                self.blocked.push(SlotRect { x, y, w, h });
                 return Some((x, y));
             }
-            // 本列排到底 → 换左边一列，游标回到顶部
-            self.col_right -= ARRANGE_STEP_X;
-            self.cursor_y = self.margin;
         }
         None
     }
 
-    /// 在列内（x 固定）自上而下找第一个「不与禁区相交、且不越出下边界」的 y。
+    /// 在列内（x 固定）**首次适配**：返回第一个「不与任何已占矩形相交、且不越出下边界」的 y。
+    ///
+    /// 候选 y 只有两类：顶部 margin，以及每个「横向与我们重叠」的已占矩形的下沿 + 间隙 ——
+    /// 最优解必在这两类点上，所以逐个升序试即可，不用按像素扫描。
     fn find_row(&self, x: i64, w: i64, h: i64) -> Option<i64> {
-        let mut y = self.cursor_y;
-        // 每撞一次禁区就跳到它的下沿；上限兜住病态数据（避免死循环）
-        for _ in 0..64 {
+        let mut candidates: Vec<i64> = vec![self.margin];
+        for r in &self.blocked {
+            if r.x < x + w && x < r.x + r.w {
+                candidates.push(r.y + r.h + ARRANGE_GAP_Y);
+            }
+        }
+        candidates.sort_unstable();
+        candidates.dedup();
+        for y in candidates {
+            if y < self.margin {
+                continue;
+            }
             if y + h > self.work_h - self.margin {
+                // 候选是升序的：这个都越界了，后面的更越界
                 return None;
             }
             let rect = SlotRect { x, y, w, h };
-            match self.blocked.iter().find(|other| rect.intersects(other)) {
-                Some(hit) => y = hit.y + hit.h + ARRANGE_GAP_Y,
-                None => return Some(y),
+            if !self.blocked.iter().any(|other| rect.intersects(other)) {
+                return Some(y);
             }
         }
         None
+    }
+
+    /// 最后手段：桌面真的排不下时，**至少不要留在旧坐标上**（那正是用户看到「乱七八糟」的根因）。
+    ///
+    /// 做法：放到最左一列，位置取「所有横向相交的已占矩形下沿之下」，忽略下边界 ——
+    /// 它可能压在别的格子上，但仍在同一个格子区域里、顺序也还在。调用方会把它计入
+    /// `overflowed` 并在界面上如实告诉用户「桌面空间不足」。
+    fn place_loose(&mut self, w: i64, h: i64) -> (i64, i64) {
+        let k = self.max_columns - 1;
+        let x = (self.col_right(k) - w).max(self.margin);
+        let mut y = self.margin;
+        for r in &self.blocked {
+            if r.x < x + w && x < r.x + r.w {
+                y = y.max(r.y + r.h + ARRANGE_GAP_Y);
+            }
+        }
+        self.blocked.push(SlotRect { x, y, w, h });
+        (x, y)
     }
 }
 
 /// 读出全部格子的几何（含挂件），按 `sort, id` 顺序。
-fn load_box_rects(conn: &Connection) -> Result<Vec<(GridBoxRect, bool)>, String> {
+///
+/// 一并带出 `kind` 与**条目数**：V39 起「按内容量自动定尺寸」和「挂件归位到锚点」
+/// 都要在排布阶段用到它们，没必要再为每个格子单独发一条 COUNT 查询。
+fn load_box_rects(conn: &Connection) -> Result<Vec<GridBoxRect>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, kind, pos_x, pos_y, width, height FROM grid_boxes \
-             ORDER BY sort ASC, id ASC",
+            "SELECT b.id, b.kind, b.pos_x, b.pos_y, b.width, b.height, \
+                    (SELECT COUNT(*) FROM grid_items i WHERE i.box_id = b.id) \
+             FROM grid_boxes b ORDER BY b.sort ASC, b.id ASC",
         )
         .map_err(|err| format!("读取格子几何失败：{err}"))?;
     let rows = stmt
         .query_map([], |row| {
-            Ok((
-                GridBoxRect {
-                    id: row.get(0)?,
-                    x: row.get(2)?,
-                    y: row.get(3)?,
-                    w: row.get::<_, i64>(4)?.max(MIN_BOX_W),
-                    h: row.get::<_, i64>(5)?.max(MIN_BOX_H),
-                },
-                row.get::<_, String>(1)? != "folder",
-            ))
+            Ok(GridBoxRect {
+                id: row.get(0)?,
+                kind: row.get(1)?,
+                x: row.get(2)?,
+                y: row.get(3)?,
+                w: row.get::<_, i64>(4)?.max(MIN_BOX_W),
+                h: row.get::<_, i64>(5)?.max(MIN_BOX_H),
+                items: row.get::<_, i64>(6)?.max(0) as usize,
+            })
         })
         .map_err(|err| format!("读取格子几何失败：{err}"))?
         .collect::<Result<Vec<_>, _>>()
@@ -2543,13 +2700,16 @@ fn load_box_rects(conn: &Connection) -> Result<Vec<(GridBoxRect, bool)>, String>
     Ok(rows)
 }
 
-/// 排布用的格子几何（`is_widget` = 便签 / 日历这类不参与自动排布的挂件）。
+/// 排布用的格子几何（`kind != "folder"` = 便签 / 日历这类不参与自动排布的挂件）。
 struct GridBoxRect {
     id: i64,
+    kind: String,
     x: i64,
     y: i64,
     w: i64,
     h: i64,
+    /// 已登记条目数（V39：按内容量自动定尺寸）
+    items: usize,
 }
 
 impl GridBoxRect {
@@ -2561,51 +2721,240 @@ impl GridBoxRect {
             h: self.h,
         }
     }
+
+    /// 挂件（便签 / 日历）：位置由锚点决定，不参与格子流布。
+    fn is_widget(&self) -> bool {
+        self.kind != "folder"
+    }
 }
 
-/// **重排桌面上所有收纳格**，返回真正被挪动的格子数。
+/// 挂件锚点：**声明式**的默认归属角落。
+///
+/// 用户 V39 原话：「日历默认放在右上角等，当然以后我们可能还会增加更多小挂件都可以固定位置」。
+/// 所以这里不做特判散落在各处，而是一张表 —— **新增挂件只要加一行**。
+///
+/// 约定：`folder` 之外的 kind 都算挂件，位置由本表决定，且**不参与格子流布**（它们本身
+/// 在流布局里是禁区，格子会绕开）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // 表驱动：TopLeft / BottomRight 预留给后续新挂件（见 [`widget_corner`]）
+enum WidgetCorner {
+    TopRight,
+    TopLeft,
+    BottomLeft,
+    BottomRight,
+}
+
+/// 挂件 kind → 默认角落。表里没有的 kind 一律 `BottomLeft`（左侧竖排，不抢右侧的格子区）。
+fn widget_corner(kind: &str) -> WidgetCorner {
+    match kind {
+        // 日历是桌面上一眼要看的东西，放右上角（用户点名的位置）
+        "calendar" => WidgetCorner::TopRight,
+        // 便签放左下角：右侧整片留给收纳格，便签也不至于挡住常用的右上角
+        "note" => WidgetCorner::BottomLeft,
+        _ => WidgetCorner::BottomLeft,
+    }
+}
+
+/// 把挂件按锚点摆到该角落，返回它最终的矩形（供格子流布当禁区）。
+///
+/// `taken` 是**同角落已经摆下的挂件**：同类挂件可以有好几个（便签允许添加多个），
+/// 不能让它们叠在同一处，所以同角落内按顺序竖排。
+fn anchor_widget(
+    corner: WidgetCorner,
+    taken: &[SlotRect],
+    work_w: i64,
+    work_h: i64,
+    w: i64,
+    h: i64,
+) -> SlotRect {
+    let inner_w = work_w - 2 * ARRANGE_MARGIN;
+    let inner_h = work_h - 2 * ARRANGE_MARGIN;
+    let w = w.clamp(MIN_BOX_W, inner_w.max(MIN_BOX_W));
+    let h = h.clamp(MIN_BOX_H, inner_h.max(MIN_BOX_H));
+    // 堆太多时形如 5 个便签会把 y 推成负数（左上角之外，用户以为挂件丢了）——
+    // 一律把 y 夹回可视区间：宁可与前一个重叠，也不能跑到屏幕外面去。
+    let clamp_y = |y: i64| y.clamp(ARRANGE_MARGIN, (work_h - ARRANGE_MARGIN - h).max(ARRANGE_MARGIN));
+    match corner {
+        WidgetCorner::TopRight => {
+            let x = work_w - ARRANGE_MARGIN - w;
+            let y = taken
+                .iter()
+                .filter(|r| r.x + r.w >= x)
+                .map(|r| r.y + r.h + ARRANGE_GAP_Y)
+                .fold(ARRANGE_MARGIN, |acc, v| acc.max(v));
+            SlotRect {
+                x,
+                y: clamp_y(y),
+                w,
+                h,
+            }
+        }
+        WidgetCorner::TopLeft => {
+            let x = ARRANGE_MARGIN;
+            let y = taken
+                .iter()
+                .filter(|r| r.x <= x)
+                .map(|r| r.y + r.h + ARRANGE_GAP_Y)
+                .fold(ARRANGE_MARGIN, |acc, v| acc.max(v));
+            SlotRect {
+                x,
+                y: clamp_y(y),
+                w,
+                h,
+            }
+        }
+        WidgetCorner::BottomLeft => {
+            let x = ARRANGE_MARGIN;
+            let y = taken
+                .iter()
+                .filter(|r| r.x <= x)
+                .map(|r| r.y - ARRANGE_GAP_Y - h)
+                .fold(work_h - ARRANGE_MARGIN - h, |acc, v| acc.min(v));
+            SlotRect {
+                x,
+                y: clamp_y(y),
+                w,
+                h,
+            }
+        }
+        WidgetCorner::BottomRight => {
+            let x = work_w - ARRANGE_MARGIN - w;
+            let y = taken
+                .iter()
+                .filter(|r| r.x + r.w >= x)
+                .map(|r| r.y - ARRANGE_GAP_Y - h)
+                .fold(work_h - ARRANGE_MARGIN - h, |acc, v| acc.min(v));
+            SlotRect {
+                x,
+                y: clamp_y(y),
+                w,
+                h,
+            }
+        }
+    }
+}
+
+/// 一次「整理桌面」对布局做了什么（数值回报给前端，用户能看出工具干了什么）。
+#[derive(Debug, Clone, Copy, Default)]
+struct LayoutOutcome {
+    /// 真正被挪动的格子数
+    moved: usize,
+    /// 按内容量调整过尺寸的格子数
+    resized: usize,
+    /// 被归位到锚点的挂件数
+    anchored: usize,
+    /// 桌面空间不足、只能压在别人身上的格子数（正常情况恒为 0）
+    overflowed: usize,
+}
+
+/// **整理桌面布局**：挂件归位到锚点 → 收纳格按内容量定尺寸 → 靠右首次适配流布。
 ///
 /// 为什么要「全量重排」而不是「只摆新格子」：用户实测（V38）点完整理后抱怨
 /// 「格子是自动创建了但是很乱，没有计算桌面合理的规划格子位置」—— 根因是新建的格子
 /// 按「已有格子个数」取槽位、而复用的旧格子**保留着自己当年的坐标**，两拨坐标凑在一起
-/// 就是一团乱麻。所以整理这一步直接把所有收纳格重新流布一遍。
+/// 就是一团乱麻。所以整理这一步直接把所有格子重新排一遍。
 ///
-/// 挂件（便签 / 日历）**位置不动** —— 那是用户自己摆的，但它们的矩形会作为禁区，
-/// 免得新排的格子压在上面。
-fn layout_all_boxes(conn: &Connection, work_w: i64, work_h: i64) -> Result<usize, String> {
+/// V39 又补了三件（用户看着截图说「桌面很乱、格子该按内容量调整大小」）：
+///   ① 格子**按条目数**算尺寸（`auto_box_size`）—— 装了 21 个快捷方式的格子和装了 2 个
+///      文档的格子不该一样大；
+///   ② 挂件**归位到锚点**（日历右上角、便签左下角），当禁区给格子绕；
+///   ③ 排不下时**先缩到最小尺寸重试**，实在不行 `place_loose` 也要把它放进格子区 ——
+///      V38 会「保持原位」，于是没排上的格子散落在桌面各处，正是用户看到的乱象
+///      （日志实证：`重排格子：挪动 4 个……4 个没地方放（保持原位）`）。
+fn layout_all_boxes(
+    conn: &Connection,
+    work_w: i64,
+    work_h: i64,
+    icon: i64,
+) -> Result<LayoutOutcome, String> {
     let rows = load_box_rects(conn)?;
-    let blocked: Vec<SlotRect> = rows
-        .iter()
-        .filter(|(_, is_widget)| *is_widget)
-        .map(|(rect, _)| rect.rect())
-        .collect();
-    let mut placer = FlowPlacer::new(work_w, work_h, blocked);
-    let mut moved = 0usize;
-    let mut stuck = 0usize;
-    for (rect, is_widget) in &rows {
-        if *is_widget {
-            continue;
+    let mut outcome = LayoutOutcome::default();
+    // 单格高度上限：不超过可用高度（超出部分交给格子内部滚动）
+    let max_h = (work_h - 2 * ARRANGE_MARGIN).max(MIN_BOX_H);
+
+    // —— ① 收纳格按内容量定尺寸（先定尺寸，才能算出列宽） ——
+    let mut sizes: std::collections::HashMap<i64, (i64, i64)> = std::collections::HashMap::new();
+    for box_rect in rows.iter().filter(|r| !r.is_widget()) {
+        let (w, h) = auto_box_size(box_rect.items, icon, max_h);
+        if w != box_rect.w || h != box_rect.h {
+            conn.execute(
+                "UPDATE grid_boxes SET width = ?1, height = ?2, updated_at = ?3 WHERE id = ?4",
+                params![w, h, now_iso(), box_rect.id],
+            )
+            .map_err(|err| format!("调整格子尺寸失败：{err}"))?;
+            outcome.resized += 1;
         }
-        let Some((x, y)) = placer.next(rect.w, rect.h) else {
-            stuck += 1;
-            continue;
+        sizes.insert(box_rect.id, (w, h));
+    }
+
+    // —— ② 挂件归位到锚点，并作为格子流布的禁区 ——
+    let mut blocked: Vec<SlotRect> = Vec::new();
+    for widget in rows.iter().filter(|r| r.is_widget()) {
+        let corner = widget_corner(&widget.kind);
+        let rect = anchor_widget(corner, &blocked, work_w, work_h, widget.w, widget.h);
+        if rect.x != widget.x || rect.y != widget.y {
+            conn.execute(
+                "UPDATE grid_boxes SET pos_x = ?1, pos_y = ?2, updated_at = ?3 WHERE id = ?4",
+                params![rect.x, rect.y, now_iso(), widget.id],
+            )
+            .map_err(|err| format!("摆放挂件失败：{err}"))?;
+            outcome.anchored += 1;
+        }
+        blocked.push(rect);
+    }
+
+    // —— ③ 收纳格：统一列宽 + 靠右首次适配 ——
+    let col_w = rows
+        .iter()
+        .filter(|r| !r.is_widget())
+        .map(|r| sizes.get(&r.id).map(|(w, _)| *w).unwrap_or(r.w))
+        .max()
+        .unwrap_or(ARRANGE_BOX_W);
+    let mut placer = FlowPlacer::new(work_w, work_h, col_w, blocked);
+    for box_rect in rows.iter().filter(|r| !r.is_widget()) {
+        let (w, h) = sizes
+            .get(&box_rect.id)
+            .copied()
+            .unwrap_or((box_rect.w, box_rect.h));
+        let placed = match placer.next(w, h) {
+            Some(pos) => pos,
+            None => {
+                // 缩到最小尺寸再试一次（至少让它落在格子区里，而不是散在桌面上）
+                let (x, y) = match placer.next(MIN_BOX_W, MIN_BOX_H) {
+                    Some(pos) => {
+                        conn.execute(
+                            "UPDATE grid_boxes SET width = ?1, height = ?2 WHERE id = ?3",
+                            params![MIN_BOX_W, MIN_BOX_H, box_rect.id],
+                        )
+                        .map_err(|err| format!("压缩格子失败：{err}"))?;
+                        outcome.resized += 1;
+                        pos
+                    }
+                    None => {
+                        outcome.overflowed += 1;
+                        placer.place_loose(w, h)
+                    }
+                };
+                (x, y)
+            }
         };
-        if x == rect.x && y == rect.y {
+        if placed.0 == box_rect.x && placed.1 == box_rect.y {
             continue;
         }
         conn.execute(
             "UPDATE grid_boxes SET pos_x = ?1, pos_y = ?2, updated_at = ?3 WHERE id = ?4",
-            params![x, y, now_iso(), rect.id],
+            params![placed.0, placed.1, now_iso(), box_rect.id],
         )
         .map_err(|err| format!("排布格子失败：{err}"))?;
-        moved += 1;
+        outcome.moved += 1;
     }
-    if moved > 0 || stuck > 0 {
-        grid_log(&format!(
-            "重排格子：挪动 {moved} 个（工作区 {work_w}×{work_h}），{stuck} 个没地方放（保持原位）"
-        ));
-    }
-    Ok(moved)
+
+    grid_log(&format!(
+        "整理布局：工作区 {work_w}×{work_h}，列宽 {col_w}，挪动 {} 个 / 按内容调整 {} 个尺寸 / \
+         挂件归位 {} 个 / 空间不足 {} 个",
+        outcome.moved, outcome.resized, outcome.anchored, outcome.overflowed
+    ));
+    Ok(outcome)
 }
 
 /// 给一个**即将新建**的格子算落点：不挪动任何已有格子，只找一块空位。
@@ -2613,9 +2962,9 @@ fn layout_all_boxes(conn: &Connection, work_w: i64, work_h: i64) -> Result<usize
 /// 全部已有格子（含挂件）都当禁区 —— 新建的格子永远不该叠在别人身上。
 fn free_slot_for(conn: &Connection, work_w: i64, work_h: i64, w: i64, h: i64) -> (i64, i64) {
     let blocked: Vec<SlotRect> = load_box_rects(conn)
-        .map(|rows| rows.iter().map(|(rect, _)| rect.rect()).collect())
+        .map(|rows| rows.iter().map(GridBoxRect::rect).collect())
         .unwrap_or_default();
-    let mut placer = FlowPlacer::new(work_w, work_h, blocked);
+    let mut placer = FlowPlacer::new(work_w, work_h, w, blocked);
     placer.next(w, h).unwrap_or_else(|| {
         // 排不下了（桌面已满）：退回右上角，至少保证落在可见区域里
         (ARRANGE_MARGIN, ARRANGE_MARGIN)
@@ -2642,6 +2991,12 @@ pub struct AutoArrangeReport {
     pub skipped: usize,
     /// 本次被重新排布的格子数（V38：整理会**全量重排**，不只摆新格子）
     pub boxes_laid_out: usize,
+    /// 按内容量调整过尺寸的格子数（V39）
+    pub boxes_resized: usize,
+    /// 被归位到锚点的挂件数（V39：日历 → 右上角，便签 → 左下角）
+    pub widgets_anchored: usize,
+    /// 桌面空间不足、只能压在别人身上的格子数（正常恒为 0；非 0 时前端要如实提示）
+    pub boxes_overflowed: usize,
     /// 整理后系统桌面图标是否已由格子层接管（true = 原生图标已隐藏）
     pub icons_hidden: bool,
     /// 单条目失败原因（不中断整批，前端原样展示给用户）
@@ -2800,6 +3155,9 @@ fn auto_arrange_inner(
         boxes_reused: 0,
         skipped,
         boxes_laid_out: 0,
+        boxes_resized: 0,
+        widgets_anchored: 0,
+        boxes_overflowed: 0,
         icons_hidden: false,
         failures: Vec::new(),
     };
@@ -2874,12 +3232,17 @@ fn auto_arrange_inner(
         ensure_system_box(conn)?;
     }
 
-    // 全量重排（含复用与新建设立的格子）
-    report.boxes_laid_out = layout_all_boxes(conn, work_width, work_height)?;
+    // 全量重排（含复用与新建设立的格子）：挂件归位 → 按内容量定尺寸 → 靠右首次适配流布
+    let outcome = layout_all_boxes(conn, work_width, work_height, layout_icon_size())?;
+    report.boxes_laid_out = outcome.moved;
+    report.boxes_resized = outcome.resized;
+    report.widgets_anchored = outcome.anchored;
+    report.boxes_overflowed = outcome.overflowed;
 
     grid_log(&format!(
         "一键整理：扫到 {} 项，登记 {} 项（文件全部原地未动，含快捷方式 {}、文件夹 {}），\
-         跳过 {} 个历史收纳容器，格子新建 {} / 复用 {} / 重排 {}，失败 {}",
+         跳过 {} 个历史收纳容器，格子新建 {} / 复用 {} / 重排 {} / 按内容调尺寸 {} / \
+         挂件归位 {} / 空间不足 {}，失败 {}",
         report.scanned,
         report.items_added,
         report.lnk_added,
@@ -2888,9 +3251,27 @@ fn auto_arrange_inner(
         report.boxes_created,
         report.boxes_reused,
         report.boxes_laid_out,
+        report.boxes_resized,
+        report.widgets_anchored,
+        report.boxes_overflowed,
         report.failures.len()
     ));
     Ok(report)
+}
+
+/// 排布用的桌面图标尺寸（逻辑像素）。
+///
+/// 单独包一层是为了**让纯逻辑的单测可以在任何平台跑**：`desktop_icon_size_cached()`
+/// 只在 Windows 上有实现（要读注册表），非 Windows 给一个默认值即可 ——
+/// 尺寸算法本身与平台无关，不该因为平台门锁而没法测。
+#[cfg(target_os = "windows")]
+fn layout_icon_size() -> i64 {
+    desktop_icon_size_cached()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn layout_icon_size() -> i64 {
+    32
 }
 
 /// 布局可用的逻辑尺寸 `(宽, 高)`。
@@ -4250,58 +4631,104 @@ mod z_verdict_tests {
     }
 }
 
-/// `FlowPlacer` 的排布规则。
+/// 排布规则（`FlowPlacer` / 内容驱动尺寸 / 挂件锚点）。
 ///
 /// 用户 V38 原话：「点击整理桌面后格子是自动创建了 但是很乱，没有计算桌面合理的
-/// 规划格子位置 流布局结构」。这些断言把「合理」钉成可复算的东西 —— 否则下次改排布参数，
-/// 「很乱」又会悄悄回来。
+/// 规划格子位置 流布局结构」；V39 又说：「应该根据每个格子里面内容多少自动调整大小，
+/// 格子自动流式布局，防止位置，日历默认放在右上角」。
 ///
-/// 刻意**不依赖 Windows API**（只用到 `SlotRect` / `FlowPlacer`），所以在任何平台上跑。
+/// 这些断言把「整齐」钉成**可复算**的东西 —— 否则下次改任何一个排布参数，
+/// 「很乱」都会悄悄回来。
+///
+/// 刻意**不依赖 Windows API**（只用到纯几何与尺寸函数），所以在任何平台上都能跑。
 #[cfg(test)]
 mod flow_placer_tests {
-    use super::{SlotRect, ARRANGE_BOX_H, ARRANGE_BOX_W, ARRANGE_GAP_Y, MIN_BOX_H, MIN_BOX_W};
-    use super::{FlowPlacer, ARRANGE_MARGIN};
+    use super::{
+        anchor_widget, auto_box_size, widget_corner, FlowPlacer, SlotRect, WidgetCorner,
+        ARRANGE_GAP_X, ARRANGE_GAP_Y, ARRANGE_MARGIN, AUTO_MAX_W, BOX_BORDER_H, BOX_HEADER_H,
+        CELL_EXTRA_H, CELL_EXTRA_W, GRID_GAP, GRID_PAD, MIN_BOX_H, MIN_BOX_W,
+    };
 
     fn overlap(a: &SlotRect, b: &SlotRect) -> bool {
         a.intersects(b)
     }
 
+    /// 排布测试统一用「1920×1080 工作区 + 320 列宽 + 图标 32px」这套现实参数。
+    const WORK_W: i64 = 1920;
+    const WORK_H: i64 = 1080;
+    const COL_W: i64 = 320;
+    /// 单格高度上限 —— 与 [`layout_all_boxes`] 传给 `auto_box_size` 的完全是同一个量，
+    /// 测试若自己另写一个数，就会出现「函数按调用方给的上限夹、测试按另一个数断言」的假失败。
+    const MAX_H: i64 = WORK_H - 2 * ARRANGE_MARGIN;
+
+    fn placer(blocked: Vec<SlotRect>) -> FlowPlacer {
+        FlowPlacer::new(WORK_W, WORK_H, COL_W, blocked)
+    }
+
+    // —————————————— 靠右流布局 ——————————————
+
     #[test]
     fn first_box_lands_in_the_top_right_corner() {
-        let mut p = FlowPlacer::new(1920, 1080, Vec::new());
-        let (x, y) = p.next(ARRANGE_BOX_W, ARRANGE_BOX_H).expect("首块必有位置");
+        let mut p = placer(Vec::new());
+        let (x, y) = p.next(COL_W, 244).expect("首块必有位置");
         assert_eq!(y, ARRANGE_MARGIN, "首扎根在顶部");
         assert_eq!(
             x,
-            1920 - ARRANGE_MARGIN - ARRANGE_BOX_W,
+            WORK_W - ARRANGE_MARGIN - COL_W,
             "右边缘对齐（贴右边但不是贴死屏幕边缘）"
         );
     }
 
     #[test]
     fn stacks_down_before_flowing_left() {
-        let mut p = FlowPlacer::new(1920, 1080, Vec::new());
-        let first = p.next(ARRANGE_BOX_W, ARRANGE_BOX_H).unwrap();
-        let second = p.next(ARRANGE_BOX_W, ARRANGE_BOX_H).unwrap();
+        let mut p = placer(Vec::new());
+        let first = p.next(COL_W, 244).unwrap();
+        let second = p.next(COL_W, 244).unwrap();
         // 同一列：x 不动，y 往下退一格
         assert_eq!(second.0, first.0);
-        assert_eq!(second.1, first.1 + ARRANGE_BOX_H + ARRANGE_GAP_Y);
+        assert_eq!(second.1, first.1 + 244 + ARRANGE_GAP_Y);
 
         // 一路摆到列尾，下一个必须换到左边一列，且回到顶部
-        let mut last_col = second.0;
+        let mut saw_left_column = false;
         for _ in 0..16 {
-            match p.next(ARRANGE_BOX_W, ARRANGE_BOX_H) {
-                Some((x, _)) => last_col = x,
+            match p.next(COL_W, 244) {
+                Some((x, y)) => {
+                    if x < second.0 {
+                        assert_eq!(y, ARRANGE_MARGIN, "换列后要回到顶部，而不是接着往下排");
+                        saw_left_column = true;
+                        break;
+                    }
+                }
                 None => break,
             }
         }
-        assert!(last_col < second.0, "排不下时应该往左推一列");
+        assert!(saw_left_column, "本列排满后必须往左推一列");
+    }
+
+    #[test]
+    fn columns_are_derived_from_the_work_area_width_not_hardcoded() {
+        // 窄桌面（900 宽）只放得下 2 列等宽列；列位置必须落在这个网格上，而不是硬编码的 8 列
+        let first_col = 900 - ARRANGE_MARGIN - COL_W;
+        let second_col = first_col - (COL_W + ARRANGE_GAP_X);
+        let mut narrow = FlowPlacer::new(900, 600, COL_W, Vec::new());
+        let mut count = 0;
+        while let Some((x, _)) = narrow.next(COL_W, MIN_BOX_H) {
+            assert!(
+                x == first_col || x == second_col,
+                "列位置必须落在等宽列网格上（{x} 既不是 {first_col} 也不是 {second_col}）"
+            );
+            count += 1;
+            if count > 20 {
+                panic!("窄桌面不该摆下这么多格子（列数推导错了？）");
+            }
+        }
+        assert!(count > 1, "窄桌面至少还能竖着摞几个");
     }
 
     #[test]
     fn respects_widget_no_go_zones() {
         // 便签 / 日历是用户自己摆的，新排的格子不许压上去。
-        // 禁区刻意挡住「右上角」这个首选项位置 —— 否则 new walker 一开始就走 top-right，
+        // 禁区刻意挡住「右上角」这个首选项位置 —— 否则排布一开始走的就是 top-right，
         // 根本不会经过「让开」那条分支，这条测试就成了摆设。
         let widget = SlotRect {
             x: 1500,
@@ -4309,13 +4736,13 @@ mod flow_placer_tests {
             w: 300,
             h: 200,
         };
-        let mut p = FlowPlacer::new(1920, 1080, vec![widget]);
-        let (x, y) = p.next(ARRANGE_BOX_W, ARRANGE_BOX_H).expect("禁区之外还有地方");
+        let mut p = placer(vec![widget]);
+        let (x, y) = p.next(COL_W, 244).expect("禁区之外还有地方");
         let placed = SlotRect {
             x,
             y,
-            w: ARRANGE_BOX_W,
-            h: ARRANGE_BOX_H,
+            w: COL_W,
+            h: 244,
         };
         assert!(!overlap(&placed, &widget), "挂件位置必须让开");
         assert!(
@@ -4325,45 +4752,74 @@ mod flow_placer_tests {
     }
 
     #[test]
+    fn reuses_holes_instead_of_only_moving_down() {
+        // V38 排布器的游标**只增不减**：一列里被大格子 / 挂件切出来的空隙再也用不上。
+        // 格子尺寸一按内容量变得参差，这个缺陷立刻变成大片浪费 + 后面的格子排不下。
+        let widget = SlotRect {
+            x: 1568,
+            y: 500,
+            w: COL_W,
+            h: 200,
+        };
+        let mut p = placer(vec![widget]);
+        let a = p.next(COL_W, 244).expect("第一个格子");
+        assert_eq!(a.1, ARRANGE_MARGIN);
+        // 第二个（同样高）撞上挂件 → 让到挂件下面
+        let b = p.next(COL_W, 244).expect("第二个格子");
+        assert!(b.1 >= widget.y + widget.h, "撞上挂件要往下让开");
+
+        // 第三个是矮格子：它应该回头塞进 a 与挂件之间那道空隙，而不是跟着 b 继续往下
+        let c = p.next(COL_W, MIN_BOX_H).expect("矮格子");
+        assert_eq!(
+            c.1,
+            a.1 + 244 + ARRANGE_GAP_Y,
+            "留出来的空洞必须能被后面的小格子复用"
+        );
+        assert!(c.1 < b.1, "复用空洞的位置必然在 b 之上");
+    }
+
+    #[test]
     fn never_runs_off_the_bottom_nor_off_the_left() {
-        let mut p = FlowPlacer::new(900, 500, Vec::new());
+        let mut p = FlowPlacer::new(900, 500, COL_W, Vec::new());
         let mut placed = Vec::new();
-        while let Some((x, y)) = p.next(ARRANGE_BOX_W, ARRANGE_BOX_H) {
-            assert!(y + ARRANGE_BOX_H <= 500 - ARRANGE_MARGIN, "不许排到桌面之外");
+        while let Some((x, y)) = p.next(COL_W, 244) {
+            assert!(y + 244 <= 500 - ARRANGE_MARGIN, "不许排到桌面之外");
             assert!(x >= ARRANGE_MARGIN, "不许排到左边界之外");
             placed.push(SlotRect {
                 x,
                 y,
-                w: ARRANGE_BOX_W,
-                h: ARRANGE_BOX_H,
+                w: COL_W,
+                h: 244,
             });
         }
-        // 小桌面确实塞得下几个（否则这条测试等于什么都没验）
         assert!(!placed.is_empty(), "900×500 至少要摆得下一个格子");
     }
 
     #[test]
     fn reports_exhaustion_instead_of_piling_up() {
         // 极窄桌面：连一列都放不下 → 明确放弃，而不是返回负坐标或互相叠压
-        let mut p = FlowPlacer::new(200, 400, Vec::new());
-        assert_eq!(p.next(ARRANGE_BOX_W, ARRANGE_BOX_H), None);
+        let mut p = FlowPlacer::new(200, 400, COL_W, Vec::new());
+        assert_eq!(p.next(COL_W, 244), None);
     }
 
     #[test]
     fn a_full_pass_never_overlaps() {
-        let mut p = FlowPlacer::new(1920, 1080, Vec::new());
+        // 尺寸参差（自动尺寸的真实形态）也要保证两两不重叠
+        let sizes = [244i64, 120, 442, 178, 300, 120, 244, 442, 178, 244, 120, 300];
+        let mut p = placer(Vec::new());
         let mut placed = Vec::new();
-        for _ in 0..12 {
-            match p.next(ARRANGE_BOX_W, ARRANGE_BOX_H) {
+        for h in sizes {
+            match p.next(COL_W, h) {
                 Some((x, y)) => placed.push(SlotRect {
                     x,
                     y,
-                    w: ARRANGE_BOX_W,
-                    h: ARRANGE_BOX_H,
+                    w: COL_W,
+                    h,
                 }),
                 None => break,
             }
         }
+        assert!(placed.len() >= 8, "1920×1080 至少要摆得下 8 个格子");
         for i in 0..placed.len() {
             for j in (i + 1)..placed.len() {
                 assert!(
@@ -4379,13 +4835,142 @@ mod flow_placer_tests {
     #[test]
     fn honours_each_boxs_own_size_and_a_minimum() {
         // 尺寸不统一才是常态（用户把某个格子拉宽 / 拉高过），不能按固定步进假定
-        let mut p = FlowPlacer::new(1920, 1080, Vec::new());
+        let mut p = placer(Vec::new());
         let (x, y) = p.next(8, 8).expect("极小尺寸也要有位置");
-        // 内部分别被夹到 MIN_BOX_W / MIN_BOX_H：x 是右边界减宽度
-        assert_eq!(x, 1920 - ARRANGE_MARGIN - MIN_BOX_W);
+        // 高度被夹到 MIN_BOX_H；宽度由调用方保证（整理时会先按内容量定好尺寸）
+        assert_eq!(x, WORK_W - ARRANGE_MARGIN - 8);
         assert_eq!(y, ARRANGE_MARGIN);
-        let second = p.next(ARRANGE_BOX_W, ARRANGE_BOX_H).unwrap();
+        let second = p.next(COL_W, 244).unwrap();
         assert_eq!(second.1, ARRANGE_MARGIN + MIN_BOX_H + ARRANGE_GAP_Y);
     }
-}
 
+    #[test]
+    fn place_loose_never_leaves_a_box_outside_the_layout_band() {
+        // 最后的兜底（桌面真的排不下）：宁可压在别人身上，也不能留在旧坐标散落桌面
+        let mut p = FlowPlacer::new(900, 500, COL_W, Vec::new());
+        while p.next(COL_W, 244).is_some() {}
+        let (x, y) = p.place_loose(COL_W, 244);
+        assert!(x >= ARRANGE_MARGIN && x <= WORK_W, "兜底也不能排到左边界之外");
+        assert!(y >= ARRANGE_MARGIN);
+    }
+
+    // —————————————— 内容驱动尺寸 ——————————————
+
+    /// 前端单元格度量：`(iconSize + 36) × (iconSize + 30)`（见 `CELL_EXTRA_W/H` 的说明）。
+    fn cell(icon: i64) -> (i64, i64) {
+        (icon + CELL_EXTRA_W, icon + CELL_EXTRA_H)
+    }
+
+    #[test]
+    fn box_size_follows_item_count() {
+        let icon = 32;
+        let (cell_w, cell_h) = cell(icon);
+
+        // 空格子：给最小尺寸（它要显示「把文件拖到这里」的引导）
+        assert_eq!(auto_box_size(0, icon, MAX_H), (MIN_BOX_W, MIN_BOX_H));
+
+        // 4 个条目：2 列 × 2 行（宽度低于最小尺寸时被夹到 MIN_BOX_W）
+        let (w4, h4) = auto_box_size(4, icon, MAX_H);
+        assert_eq!(
+            w4,
+            (2 * cell_w + GRID_GAP + 2 * GRID_PAD).max(MIN_BOX_W),
+            "2 列的宽度"
+        );
+        assert_eq!(h4, BOX_HEADER_H + BOX_BORDER_H + 2 * cell_h + GRID_GAP + 2 * GRID_PAD);
+
+        // 条目越多，格子越大（单调）—— 这正是用户那句「按内容多少自动调整大小」
+        let (w21, h21) = auto_box_size(21, icon, MAX_H);
+        assert!(h21 > h4, "21 个条目的格子必须比 4 个的高");
+        assert!(w21 >= w4, "列数不会更少");
+
+        // 列数有上限，不会排成一条长带
+        let (w100, h100) = auto_box_size(100, icon, MAX_H);
+        assert!(w100 <= AUTO_MAX_W, "宽度必须有上限");
+        assert!(h100 <= MAX_H, "高度不得超过可用高度（超出交给格子内滚动）");
+    }
+
+    #[test]
+    fn bigger_desktop_icons_make_bigger_boxes() {
+        // V37 起格子图标跟着系统桌面图标尺寸走；尺寸算法必须同步跟着变，
+        // 否则用户把桌面图标调大之后，格子里就会挤成一团。
+        let (w32, h32) = auto_box_size(6, 32, MAX_H);
+        let (w48, h48) = auto_box_size(6, 48, MAX_H);
+        assert!(w48 >= w32 && h48 > h32);
+    }
+
+    #[test]
+    fn size_is_clamped_into_the_legal_range() {
+        for items in [0usize, 1, 7, 40, 500] {
+            for icon in [16i64, 32, 48, 96, 256] {
+                let (w, h) = auto_box_size(items, icon, MAX_H);
+                assert!(w >= MIN_BOX_W && w <= AUTO_MAX_W, "{items}/{icon} 宽度越界：{w}");
+                assert!(
+                    h >= MIN_BOX_H && h <= MAX_H,
+                    "{items}/{icon} 高度越界：{h}"
+                );
+            }
+        }
+        // 可用高度很小时也不能算出小于最小高度的格子
+        let (_, h) = auto_box_size(30, 32, 100);
+        assert_eq!(h, MIN_BOX_H);
+    }
+
+    // —————————————— 挂件锚点 ——————————————
+
+    #[test]
+    fn calendar_defaults_to_the_top_right_corner() {
+        // 用户点名的位置：「日历默认放在右上角等」
+        assert_eq!(widget_corner("calendar"), WidgetCorner::TopRight);
+        let rect = anchor_widget(WidgetCorner::TopRight, &[], WORK_W, WORK_H, 360, 430);
+        assert_eq!(rect.x + rect.w, WORK_W - ARRANGE_MARGIN, "贴右边界");
+        assert_eq!(rect.y, ARRANGE_MARGIN, "贴顶");
+    }
+
+    #[test]
+    fn note_defaults_to_the_bottom_left_corner() {
+        assert_eq!(widget_corner("note"), WidgetCorner::BottomLeft);
+        let rect = anchor_widget(WidgetCorner::BottomLeft, &[], WORK_W, WORK_H, 260, 220);
+        assert_eq!(rect.x, ARRANGE_MARGIN, "贴左边界");
+        assert_eq!(rect.y + rect.h, WORK_H - ARRANGE_MARGIN, "贴下边界");
+    }
+
+    #[test]
+    fn same_corner_widgets_stack_without_overlapping() {
+        // 便签允许添加多个（V35）：同角落的多个挂件必须竖排，不能叠在一起
+        let first = anchor_widget(WidgetCorner::BottomLeft, &[], WORK_W, WORK_H, 260, 220);
+        let second = anchor_widget(WidgetCorner::BottomLeft, &[first], WORK_W, WORK_H, 260, 220);
+        assert!(!overlap(&first, &second), "同类挂件不得重叠");
+        assert!(second.y < first.y, "后加的往上摞");
+
+        let cal1 = anchor_widget(WidgetCorner::TopRight, &[], WORK_W, WORK_H, 360, 430);
+        let cal2 = anchor_widget(WidgetCorner::TopRight, &[cal1], WORK_W, WORK_H, 360, 430);
+        assert!(!overlap(&cal1, &cal2) && cal2.y > cal1.y, "右上角挂件往下摞");
+    }
+
+    #[test]
+    fn unknown_widget_kinds_still_get_a_fixed_corner() {
+        // 「以后我们可能还会增加更多小挂件都可以固定位置」——
+        // 没登记过的 kind 也必须落在确定的角落，不能留在旧坐标上乱飘。
+        let corner = widget_corner("weather");
+        let rect = anchor_widget(corner, &[], WORK_W, WORK_H, 200, 160);
+        assert!(rect.x >= ARRANGE_MARGIN && rect.y >= ARRANGE_MARGIN);
+        assert!(rect.x + rect.w <= WORK_W - ARRANGE_MARGIN);
+        assert!(rect.y + rect.h <= WORK_H - ARRANGE_MARGIN);
+    }
+
+    #[test]
+    fn too_many_widgets_in_one_corner_never_leave_the_screen() {
+        // 同角落堆到装不下时，y 会被推成负数（挂件跑到屏幕外，用户以为「挂件丢了」）。
+        // 宁可重叠也必须留在可视区里。
+        let mut taken: Vec<SlotRect> = Vec::new();
+        for _ in 0..8 {
+            let rect = anchor_widget(WidgetCorner::BottomLeft, &taken, WORK_W, WORK_H, 260, 300);
+            assert!(
+                rect.y >= ARRANGE_MARGIN && rect.y + rect.h <= WORK_H - ARRANGE_MARGIN,
+                "第 {} 个便签被摆到了可视区之外：{rect:?}",
+                taken.len() + 1
+            );
+            taken.push(rect);
+        }
+    }
+}

@@ -1085,6 +1085,19 @@ export function GridOverlay(): React.JSX.Element {
         if (report.lnkAdded > 0) {
           parts.push(`快捷方式 ${report.lnkAdded} 个`);
         }
+        // V39：让用户看得出「按内容调过大小」和「挂件归位」这两件事真的发生了
+        if (report.boxesResized > 0) {
+          parts.push(`按内容调尺寸 ${report.boxesResized} 格`);
+        }
+        if (report.widgetsAnchored > 0) {
+          parts.push(`挂件归位 ${report.widgetsAnchored} 个`);
+        }
+        if (report.boxesOverflowed > 0) {
+          showHint(
+            `桌面空间不够，有 ${report.boxesOverflowed} 个格子没排开（建议减少格子或调小桌面图标）`,
+          );
+          return;
+        }
         showHint(
           report.iconsHidden
             ? `整理完成：${parts.join('、')}；桌面图标已交由格子接管`
