@@ -106,6 +106,7 @@ pub fn run() {
             commands::grid::grid_geometry_set,
             commands::grid::grid_open_path,
             commands::grid::desktop_open_view,
+            commands::grid::shell_context_menu,
             commands::grid::grid_reveal_path,
             commands::grid::grid_loose_list,
             // —— 接口测试（api-tester，V28）：Rust 直发 HTTP，绕开 webview CORS ——
@@ -184,7 +185,15 @@ pub fn run() {
             // 主窗口启动显示（V16 修复）：`visible:false` 交给逻辑控制显隐，
             // 首启必须显式 show —— 否则窗口一直隐藏、需手动点托盘才出现（"退出再开不显示"）。
             // 置于托盘 / 快捷键 / DB 之后，确保托盘兜底与数据层就绪再亮窗。
-            if let Err(err) = window::show_main_palette(app.handle()) {
+            //
+            // V44（桌面优先）：**桌面接管生效时，桌面就是主界面**——不再自动弹主窗口，
+            // 避免「一启动就多一个窗口」违背「我们就是桌面工具」的定位。主窗口退化为
+            // 「按需出现的工具宿主」：只有从桌面打开工具/页面时（桌面抽屉 `desktop_open_view`）
+            // 才被 show。未接管（首次安装 / 关掉桌面整理）时回退弹主窗口，作为兜底入口。
+            let desktop_is_home = commands::grid::read_overlay_visible(app.handle());
+            if desktop_is_home {
+                println!("[Handy] 桌面接管生效：桌面即主界面，启动不弹主窗口（工具从桌面抽屉打开）");
+            } else if let Err(err) = window::show_main_palette(app.handle()) {
                 eprintln!("[Handy] 启动显示主窗口失败：{err}");
             }
             // 无头测试通道：HANDY_AUTOTOOL=<commandId> 或 module:<moduleId>，

@@ -265,10 +265,19 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
           toast.warning('桌面已经很干净了', { description: '没有扫描到可整理的条目' });
           return;
         }
+        // V43：把「放开了几个此前被移出的路径」如实说出来。
+        // 这条名单以前只增不减，用户手动挪出去过的目录/文件会**永远**不再被整理，
+        // 表现就是「我重新整理了为什么还是没有重新整理」——现在每次整理都会放开它。
+        const released = report.released > 0 ? `放开此前移出的 ${report.released} 个 · ` : '';
+        const loose =
+          report.leftOver > 0 ? `；${report.leftOver} 项（快捷方式 / 系统图标）留在左侧竖条` : '';
         if (report.itemsAdded === 0) {
-          toast.info('没有需要归类的条目', {
-            description: `扫描到 ${report.scanned} 项（含公共桌面），格子布局已按内容重排`,
-          });
+          toast.info(
+            report.released > 0 ? '已重新整理（没有新增需要归类的条目）' : '没有需要归类的条目',
+            {
+              description: `扫描到 ${report.scanned} 项（含公共桌面）；${released}格子布局已按内容重排${loose}`,
+            },
+          );
           return;
         }
         const created = report.boxesCreated > 0 ? `新建 ${report.boxesCreated} 个格子、` : '';
@@ -282,7 +291,9 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
           .filter(Boolean)
           .join('、');
         toast.success(`已归类 ${report.itemsAdded} 个条目${folders}`, {
-          description: `${created}文件全部留在桌面原位，没有移动${tidied ? `；${tidied}` : ''}`,
+          description: `${created}${released}文件全部留在桌面原位，没有移动${
+            tidied ? `；${tidied}` : ''
+          }${loose}`,
         });
         if (report.boxesOverflowed > 0) {
           toast.warning(`桌面空间不够，${report.boxesOverflowed} 个格子没能排开`, {

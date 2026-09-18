@@ -86,8 +86,14 @@ import type { SysAction } from '@/types/sys';
  * （`src-tauri/src/commands/sys.rs`），不存在命令注入面。
  */
 
-/** 动作 id → 图标（未列出的回退扳手） */
-const ACTION_ICONS: Record<string, LucideIcon> = {
+/**
+ * 动作 id → 图标（未列出的回退扳手）。
+ *
+ * V43 起导出：桌面**快捷条 Dock** 也要画同一批系统入口（用户原话「原工作台我们不是
+ * 添加了各种快捷入口吗（如 hosts 文件编辑等都没有了呢）」），两处必须用同一套图标，
+ * 否则同一个动作在工作台和桌面上长得不一样。
+ */
+export const ACTION_ICONS: Record<string, LucideIcon> = {
   'powershell-admin': ShieldCheck,
   'cmd-admin': Terminal,
   powershell: SquareTerminal,

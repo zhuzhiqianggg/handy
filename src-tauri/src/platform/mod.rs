@@ -9,6 +9,10 @@ use tauri::AppHandle;
 #[cfg(target_os = "windows")]
 mod windows;
 
+/// Windows 原生 Shell 右键菜单（V43）。macOS 走 Finder 的菜单，另行适配。
+#[cfg(target_os = "windows")]
+pub mod shell_menu;
+
 #[cfg(target_os = "macos")]
 mod macos;
 

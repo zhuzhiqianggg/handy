@@ -21,6 +21,8 @@ import {
   StickyNote,
   Trash2,
   Wand2,
+  Wrench,
+  Zap,
 } from 'lucide-react';
 import { registry } from '@/core/moduleRegistry';
 import { searchCommands } from '@/lib/search';
@@ -32,6 +34,11 @@ import {
   saveQuickLinks,
   type QuickLink,
 } from '@/modules/workstation/quicklinks';
+// 系统快捷入口（管理员终端 / 编辑 hosts / 任务管理器…）——与工作台共用同一份图标表，
+// 见 `ACTION_ICONS` 的注释：用户抱怨「那些快捷入口都没有了呢」。
+import { ACTION_ICONS } from '@/modules/workstation/QuickActionsRail';
+import { useAppStore } from '@/stores/useAppStore';
+import type { SysAction } from '@/types/sys';
 import { ipc } from '@/lib/ipc';
 import { reportOperation } from '@/lib/errorSink';
 import { isTauri } from '@/platform/detect';
@@ -45,6 +52,8 @@ import type {
   TakeoverState,
 } from '@/types/grid';
 import { ACCENT_ORDER, CalendarWidget, NOTE_ACCENTS, NoteWidget } from './DesktopWidgets';
+import { DesktopToolPanel, type PanelEntry } from './DesktopToolPanel';
+import { DesktopQuickActions } from './DesktopQuickActions';
 
 /**
  * 桌面网格挂件 · 透明覆盖窗（`grid-overlay`）。
@@ -79,9 +88,14 @@ import { ACCENT_ORDER, CalendarWidget, NOTE_ACCENTS, NoteWidget } from './Deskto
  *    （`quicklinks.ts`，localStorage 同源），把桌面图标 / 格子条目拖上去即可加进去、
  *    点一下就打开 —— 用户原话「工作台里面的快捷方式可以放在桌面上的例如 mac 电脑的
  *    快捷条一样方便快速打开……把桌面图标拖进来归纳到里面」。
- * 3. **桌面搜索**（工具栏「搜索」）：搜工具 / 命令 / 模块，选中即唤出主窗口打开
- *    （Rust `desktop_open_view` → `handy:navigate`）—— 用户原话「在桌面上我能快速
- *    搜索并一键打开工具，一键打开密码存储箱」。
+ * 3. **桌面搜索 + 桌面工具箱抽屉**（工具栏「搜索」/「工具箱」）：搜工具 / 命令 / 模块，
+ *    选中后**直接在桌面上的抽屉里打开**（`DesktopToolPanel`，复用各工具自己的组件）——
+ *    不唤主窗口、不切窗口。用户原话「在桌面上我能快速搜索并一键打开工具，一键打开
+ *    密码存储箱」「我在桌面上就能完成所有的操作 不需要调出一个窗口去找工具等」。
+ * 4. **条目右键 = 系统原生菜单**（V43）：接管桌面后原生图标被隐藏，右键落到了我们窗口上，
+ *    所以必须替 Shell 把它的菜单原样弹出来（`ipc.shellContextMenu` → `IContextMenu`），
+ *    打开 / 打开方式 / 复制 / 删除 / 重命名 / 属性 + 第三方扩展项全都在。
+ *    按住 Shift 才弹我们自己的精简菜单（含 Shell 给不了的「移出格子」）。
  *
  * # V38 两条硬规矩（都是用户实测反馈推出来的）
  *
@@ -455,11 +469,34 @@ export function GridOverlay(): React.JSX.Element {
   const [dockLinks, setDockLinks] = useState<QuickLink[]>(() => loadQuickLinks());
   /** 光标正停在快捷条上（拖拽经过时的视觉反馈） */
   const [dockHot, setDockHot] = useState(false);
-  /** 快捷条条目的右键菜单（V42）：打开 / 从快捷条移除 */
-  const [menuDock, setMenuDock] = useState<{ link: QuickLink; x: number; y: number } | null>(null);
+  /** 快捷条条目的右键菜单（V42/V43）：打开 / 从快捷条移除（自定义链接或系统入口） */
+  const [menuDock, setMenuDock] = useState<
+    { kind: 'link'; link: QuickLink; x: number; y: number } | { kind: 'action'; action: SysAction; x: number; y: number } | null
+  >(null);
+  /**
+   * 系统快捷入口（V43）—— Dock 的左半部分。
+   *
+   * 用户原话：「原工作台我们不是添加了各种快捷入口吗（如 hosts 文件编辑等都没有了呢）」
+   * 「快捷入口的快捷方式我说了直接在桌面上做成快捷入口像快捷导航入口那样」。
+   * 这些是**系统动作**（Rust 白名单表里的 `sys_action_list`），和工作台的快捷入口栏
+   * 是同一批 id、同一份选中状态（`settings.quickActionIds`），只是换到桌面上来点。
+   */
+  const [dockActions, setDockActions] = useState<SysAction[]>([]);
+  const quickActionIds = useAppStore((state) => state.settings.quickActionIds);
+  const updateSettings = useAppStore((state) => state.updateSettings);
   /** 桌面搜索面板（V42）：是否展开 */
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  /**
+   * 桌面工具箱抽屉（V43）：是否展开 + 是否要直接打开某一项。
+   *
+   * 用户原话：「我在桌面上就能完成所有的操作 不需要调出一个窗口去找工具等」——
+   * 于是「搜索到工具 → 直接在桌面抽屉里打开它」，不再唤出主窗口。
+   */
+  const [toolPanelOpen, setToolPanelOpen] = useState(false);
+  const [pendingEntry, setPendingEntry] = useState<PanelEntry | null>(null);
+  /** 桌面「快捷操作」浮层（V44）：工作台窗口退场，它的系统入口 / 我的快捷方式 / 应用入口都搬上桌面 */
+  const [quickActionsOpen, setQuickActionsOpen] = useState(false);
   /** 是否正处于「条目被拖着走」的状态（拖出格子 = 移出，落在根画布上要接住 drop） */
   const [itemDragging, setItemDragging] = useState(false);
   /**
@@ -507,6 +544,8 @@ export function GridOverlay(): React.JSX.Element {
   const searchRef = useRef<HTMLDivElement | null>(null);
   /** 搜索输入框（展开时自动聚焦） */
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  /** 桌面工具箱抽屉的外框（V43）：纳入命中区域 */
+  const toolPanelRef = useRef<HTMLDivElement | null>(null);
   /** 正在拖拽的未归类竖条条目（拖进格子 = 登记进去） */
   const looseDragRef = useRef<LooseEntry | null>(null);
   /** 空态卡片的 DOM 引用：它也要纳入命中区域，否则「创建第一个盒子」按钮点不到 */
@@ -729,6 +768,38 @@ export function GridOverlay(): React.JSX.Element {
     };
   }, []);
 
+  // —— 系统快捷入口加载（V43）：Dock 的左半部分 ——
+  //
+  // 可执行目标全部在 Rust 白名单表里（`sys_action_list`），前端只拿 id / 名称 / 图标，
+  // 不硬编码任何命令；勾选状态与工作台的快捷入口栏**共用** `settings.quickActionIds`，
+  // 在一处增删另一处立刻同步。
+  useEffect(() => {
+    if (!isTauri()) {
+      return;
+    }
+    let cancelled = false;
+    void ipc
+      .sysActionList()
+      .then((list) => {
+        if (!cancelled) {
+          setDockActions(list);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  /** Dock 上要画的系统入口（按用户勾选顺序） */
+  const dockActionList = React.useMemo(
+    () =>
+      quickActionIds
+        .map((id) => dockActions.find((action) => action.id === id))
+        .filter((action): action is SysAction => action !== undefined),
+    [quickActionIds, dockActions],
+  );
+
   // —— 命中区域上报：Rust 光标轮询据此切换「穿透 ↔ 可交互」 ——
 
   /**
@@ -753,7 +824,9 @@ export function GridOverlay(): React.JSX.Element {
     .map((b) => `${b.id}:${b.posX},${b.posY},${b.width},${b.height}`)
     .join('|')}|sf=${scaleFactor}|loose=${
     loose ? `${loose.x},${loose.y},${loose.width},${loose.height}` : ''
-  }|dock=${dockLinks.length}|search=${searchOpen ? 1 : 0}`;
+  }|dock=${dockLinks.length + dockActionList.length}|search=${searchOpen ? 1 : 0}|tools=${
+    toolPanelOpen ? 1 : 0
+  }|qa=${quickActionsOpen ? 1 : 0}`;
 
   useEffect(() => {
     if (!isTauri()) {
@@ -773,6 +846,7 @@ export function GridOverlay(): React.JSX.Element {
       looseRef.current,
       dockRef.current,
       searchRef.current,
+      toolPanelRef.current,
     ]) {
       if (!node) {
         continue;
@@ -1076,10 +1150,11 @@ export function GridOverlay(): React.JSX.Element {
   );
 
   /** 从快捷条移除一条（只删快捷方式，不碰文件） */
-  const removeDockLink = useCallback((id: string): void => {
+    const removeDockLink = useCallback((id: string): void => {
     setDockLinks((prev) => {
       const next = prev.filter((link) => link.id !== id);
       saveQuickLinks(next);
+      window.dispatchEvent(new Event('handy:quicklinks'));
       return next;
     });
   }, []);
@@ -1124,9 +1199,44 @@ export function GridOverlay(): React.JSX.Element {
    * 视图状态是每窗口一份的（挂件窗改不了主窗口的 store），所以走 Rust
    * `desktop_open_view` → `show 主窗 + handy:navigate`。
    */
+  /**
+   * 打开一个目标（V42 起由桌面搜索面板调用，V43 改走桌面抽屉）。
+   *
+   * 用户原话：「我在桌面上就能完成所有的操作 不需要调出一个窗口去找工具等」——
+   * 所以搜到的工具 / 模块**直接在桌面抽屉里打开**，不再唤出主窗口。
+   * 只有抽屉开不了的目标（动作式命令，没有界面）才退回主窗口那条老路。
+   */
   const openTarget = useCallback(
     (target: string): void => {
       closeSearch();
+      const moduleId = target.startsWith('module:') ? target.slice('module:'.length) : null;
+      if (moduleId !== null) {
+        const mod = registry.enabled().find((item) => item.id === moduleId);
+        if (mod?.loadView !== undefined) {
+          setPendingEntry({
+            id: target,
+            name: mod.name,
+            description: mod.description,
+            kind: 'module',
+            load: mod.loadView as PanelEntry['load'],
+          });
+          setToolPanelOpen(true);
+          return;
+        }
+      } else {
+        const command = registry.findCommand(target);
+        if (command?.load !== undefined) {
+          setPendingEntry({
+            id: command.id,
+            name: command.name,
+            description: command.description,
+            kind: 'tool',
+            load: command.load as PanelEntry['load'],
+          });
+          setToolPanelOpen(true);
+          return;
+        }
+      }
       void ipc.desktopOpenView(target).catch((error: Error) => showHint(error.message));
     },
     [closeSearch, showHint],
@@ -1190,7 +1300,11 @@ export function GridOverlay(): React.JSX.Element {
   const startItemDrag = useCallback((item: GridItem, event: React.DragEvent): void => {
     itemDragRef.current = { item, itemId: item.id, fromBoxId: item.boxId };
     setItemDragging(true);
-    event.dataTransfer.effectAllowed = 'move';
+    // **`copyMove` 而不是 `move`**（V43 关键修复）：拖进格子是「移动」（换归属），
+    // 拖到快捷条 Dock 是「复制」（收成一条快捷方式，原文件不动）。
+    // 只声明 `move` 时，Dock 那边设的 `dropEffect='copy'` 与它不兼容，
+    // 浏览器直接判定「禁止放置」—— 用户看到的就是「拖进来根本拖不了」。
+    event.dataTransfer.effectAllowed = 'copyMove';
     // 同窗口 HTML5 拖拽也会走 WebView2 的系统拖放事件，标记一下供其忽略
     event.dataTransfer.setData('application/x-handy-item', String(item.id));
     // 拖拽期保持整窗可交互（光标会频繁跨越盒子边界）
@@ -1200,7 +1314,8 @@ export function GridOverlay(): React.JSX.Element {
   /** 未归类竖条条目开始拖拽（V41）：拖进哪个格子就登记进哪个格子 */
   const startLooseDrag = useCallback((entry: LooseEntry, event: React.DragEvent): void => {
     looseDragRef.current = entry;
-    event.dataTransfer.effectAllowed = 'move';
+    // 同上：要能拖进格子（move），也要能拖到快捷条（copy）
+    event.dataTransfer.effectAllowed = 'copyMove';
     event.dataTransfer.setData('application/x-handy-loose', entry.path);
     void ipc.gridSetInteractive(true).catch(() => undefined);
   }, []);
@@ -1438,6 +1553,10 @@ export function GridOverlay(): React.JSX.Element {
         ];
         if (report.lnkAdded > 0) {
           parts.push(`快捷方式 ${report.lnkAdded} 个`);
+        }
+        // V43：说清「放开了几个此前被移出的条目」—— 否则用户会以为整理没生效
+        if (report.released > 0) {
+          parts.push(`放开此前移出 ${report.released} 项`);
         }
         // V39：让用户看得出「按内容调过大小」和「挂件归位」这两件事真的发生了
         if (report.boxesResized > 0) {
@@ -2028,12 +2147,26 @@ export function GridOverlay(): React.JSX.Element {
                   onDragEnd={endItemDrag}
                   onDoubleClick={() => openItem(item)}
                   onContextMenu={(event) => {
-                    // V41：条目的右键还给条目自己（打开 / 打开文件位置 / 移出格子），
-                    // 不再弹格子菜单 —— 用户原话：「文件目录我自带右键功能怎么办」。
+                    // V43：**普通右键 = 系统原生菜单**。
+                    //
+                    // 用户原话：「你的格子把我图标原始的右键功能全部覆盖了，这个科学吗」——
+                    // 接管桌面后原生图标被隐藏，右键落到了挂件窗上，所以我们必须替 Shell
+                    // 把它的菜单原样弹出来（打开 / 打开方式 / 发送到 / 复制 / 删除 /
+                    // 重命名 / 属性 + 第三方扩展项），对标腾讯桌面整理。
+                    //
+                    // 按住 **Shift** 才弹我们自己的精简菜单：那是 Shell 给不了的操作
+                    // （「移出格子」—— 纯粹是我们呈现层的概念）。拖出格子同样能移出。
                     event.preventDefault();
                     event.stopPropagation();
                     setMenuBox(null);
                     setMenuLoose(null);
+                    if (!event.shiftKey) {
+                      setMenuItem(null);
+                      void ipc
+                        .shellContextMenu(item.filePath)
+                        .catch((error: Error) => showHint(error.message));
+                      return;
+                    }
                     setMenuItem({ item, x: event.clientX, y: event.clientY });
                   }}
                   className="group relative flex cursor-pointer flex-col items-center gap-1 rounded-lg p-1.5 transition hover:bg-white/15"
@@ -2136,10 +2269,18 @@ export function GridOverlay(): React.JSX.Element {
                 void ipc.gridOpenPath(entry.path).catch((error: Error) => showHint(error.message))
               }
               onContextMenu={(event) => {
+                // V43：左条条目同样「普通右键 = 系统原生菜单」（同格子里的条目）
                 event.preventDefault();
                 event.stopPropagation();
                 setMenuBox(null);
                 setMenuItem(null);
+                if (!event.shiftKey && !entry.isSystem) {
+                  setMenuLoose(null);
+                  void ipc
+                    .shellContextMenu(entry.path)
+                    .catch((error: Error) => showHint(error.message));
+                  return;
+                }
                 setMenuLoose({ entry, x: event.clientX, y: event.clientY });
               }}
               className="flex cursor-pointer flex-col items-center gap-1 rounded-lg p-1.5 transition hover:bg-white/15"
@@ -2383,6 +2524,39 @@ export function GridOverlay(): React.JSX.Element {
         </div>
       )}
 
+      {/* 桌面工具箱抽屉（V43）：在桌面上直接开任意工具 / 页面。
+          用户原话：「我在桌面上就能完成所有的操作 不需要调出一个窗口去找工具等」。
+          外框用 pointerEvents:none（只把抽屉那块矩形报成命中区），
+          这样抽屉开着的时候，桌面其余部分照样能点、能拖。 */}
+      {toolPanelOpen && (
+        <div
+          ref={toolPanelRef}
+          style={{ pointerEvents: 'none' }}
+          className="absolute right-4 top-14 z-40 h-[78vh] w-[min(1120px,90vw)]"
+        >
+          <DesktopToolPanel
+            initial={pendingEntry}
+            onClose={() => {
+              setToolPanelOpen(false);
+              setPendingEntry(null);
+            }}
+          />
+        </div>
+      )}
+
+      {/* 桌面「快捷操作」浮层（V44）：工作台窗口退场，系统入口 / 我的快捷方式 / 应用入口都在桌面直达 */}
+      {quickActionsOpen && (
+        <DesktopQuickActions
+          onClose={() => setQuickActionsOpen(false)}
+          onLaunch={(target) => {
+            setQuickActionsOpen(false);
+            openTarget(target);
+          }}
+          onOpenLink={(link) => openDockLink(link)}
+          onRemoveLink={(id) => removeDockLink(id)}
+        />
+      )}
+
       {/* 桌面快捷条 Dock（V42）：底部居中，像 mac 的 Dock —— 点一下就开；
           把桌面图标 / 格子条目 / 未归类条目拖上来即可收成一条快捷方式。
           数据就是工作台那份 `quicklinks`（localStorage 同源），两边实时一致。
@@ -2392,7 +2566,13 @@ export function GridOverlay(): React.JSX.Element {
           ref={dockRef}
           style={{ pointerEvents: 'auto' }}
           onDragOver={(event) => {
-            if (itemDragRef.current !== null || looseDragRef.current !== null) {
+            // 两路都认：① 我们在拖拽期记着对象（同窗口拖动）；② 只是带着我们的类型标记
+            // 路过（比如拖拽被中断过、ref 已经清了）—— 认出来就让光标显示「可放下」。
+            const types = Array.from(event.dataTransfer.types);
+            const ours =
+              types.includes('application/x-handy-item') ||
+              types.includes('application/x-handy-loose');
+            if (itemDragRef.current !== null || looseDragRef.current !== null || ours) {
               event.preventDefault();
               event.dataTransfer.dropEffect = 'copy';
               setDockHot(true);
@@ -2421,12 +2601,44 @@ export function GridOverlay(): React.JSX.Element {
             dockHot ? 'bg-sky-500/25 ring-sky-300/60' : 'bg-neutral-900/60 ring-white/15'
           }`}
         >
-          {dockLinks.length === 0 ? (
+          {dockActions.length === 0 && dockLinks.length === 0 ? (
             <span className="whitespace-nowrap px-3 text-[11px] text-neutral-300">
               把桌面图标拖到这里 → 收成快捷条上的一条
             </span>
           ) : (
-            dockLinks.map((link) => (
+            <>
+              {/* 左半：系统快捷入口（编辑 hosts / 任务管理器 / 管理员终端…） */}
+              {dockActionList.map((action) => {
+                const Icon = ACTION_ICONS[action.id] ?? Wrench;
+                return (
+                  <button
+                    key={`act-${action.id}`}
+                    type="button"
+                    onClick={() => {
+                      void ipc
+                        .sysActionRun(action.id)
+                        .catch((error: Error) => showHint(`执行失败：${error.message}`));
+                    }}
+                    onContextMenu={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      setMenuBox(null);
+                      setMenuItem(null);
+                      setMenuLoose(null);
+                      setMenuDock({ kind: 'action', action, x: event.clientX, y: event.clientY });
+                    }}
+                    title={`${action.name}\n${action.description}${action.elevated ? '\n（需要管理员权限）' : ''}\n单击打开 · 右键更多`}
+                    className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl transition hover:-translate-y-0.5 hover:bg-white/15"
+                  >
+                    <Icon className="h-6 w-6 text-neutral-100" />
+                  </button>
+                );
+              })}
+              {dockActionList.length > 0 && dockLinks.length > 0 && (
+                <span className="mx-1 h-8 w-px shrink-0 bg-white/20" />
+              )}
+              {/* 右半：自定义快捷方式（拖进来的桌面图标 / 工作台加的链接） */}
+              {dockLinks.map((link) => (
               <button
                 key={link.id}
                 type="button"
@@ -2437,7 +2649,7 @@ export function GridOverlay(): React.JSX.Element {
                   setMenuBox(null);
                   setMenuItem(null);
                   setMenuLoose(null);
-                  setMenuDock({ link, x: event.clientX, y: event.clientY });
+                  setMenuDock({ kind: 'link', link, x: event.clientX, y: event.clientY });
                 }}
                 title={`${link.name}\n${link.value}\n单击打开 · 右键更多`}
                 className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl transition hover:-translate-y-0.5 hover:bg-white/15"
@@ -2448,7 +2660,8 @@ export function GridOverlay(): React.JSX.Element {
                   <FileIcon path={link.value} size={32} />
                 )}
               </button>
-            ))
+              ))}
+            </>
           )}
         </div>
       )}
@@ -2534,15 +2747,23 @@ export function GridOverlay(): React.JSX.Element {
           className="absolute z-50 w-44 overflow-hidden rounded-lg bg-neutral-900/95 py-1 text-xs text-neutral-100 shadow-2xl ring-1 ring-white/15 backdrop-blur"
         >
           <div className="truncate px-2.5 pb-1 pt-0.5 text-[10px] text-neutral-400">
-            {menuDock.link.name}
+            {menuDock.kind === 'link' ? menuDock.link.name : menuDock.action.name}
           </div>
           <button
             type="button"
             className={menuItemRowClass}
             onClick={() => {
-              const link = menuDock.link;
-              setMenuDock(null);
-              openDockLink(link);
+              if (menuDock.kind === 'link') {
+                const link = menuDock.link;
+                setMenuDock(null);
+                openDockLink(link);
+              } else {
+                const action = menuDock.action;
+                setMenuDock(null);
+                void ipc
+                  .sysActionRun(action.id)
+                  .catch((error: Error) => showHint(`执行失败：${error.message}`));
+              }
             }}
           >
             打开
@@ -2551,16 +2772,29 @@ export function GridOverlay(): React.JSX.Element {
             type="button"
             className={`${menuItemRowClass} text-amber-200`}
             onClick={() => {
-              const id = menuDock.link.id;
-              setMenuDock(null);
-              removeDockLink(id);
-              showHint('已从快捷条移除（只是快捷方式，文件还在原处）');
+              if (menuDock.kind === 'link') {
+                const id = menuDock.link.id;
+                setMenuDock(null);
+                removeDockLink(id);
+                showHint('已从快捷条移除（只是快捷方式，文件还在原处）');
+              } else {
+                // 系统入口的「移除」= 取消勾选：改的是 settings.quickActionIds，
+                // 工作台的快捷入口栏同步少一个（同一份数据，永远不会两边不一致）
+                const id = menuDock.action.id;
+                setMenuDock(null);
+                void updateSettings({
+                  quickActionIds: quickActionIds.filter((item) => item !== id),
+                }).catch((error: Error) => showHint(error.message));
+                showHint('已从快捷条移除（可在工作台「快捷入口」里加回来）');
+              }
             }}
           >
             从快捷条移除
           </button>
           <p className="px-2.5 pb-1 pt-0.5 text-[10px] leading-relaxed text-neutral-500">
-            与工作台的「快捷入口」是同一份数据
+            {menuDock.kind === 'link'
+              ? '与工作台的「快捷方式」是同一份数据'
+              : '与工作台的「快捷入口」是同一份数据'}
           </p>
         </div>
       )}
@@ -2576,7 +2810,10 @@ export function GridOverlay(): React.JSX.Element {
         <div className="flex items-center gap-0.5">
           <button
             type="button"
-            onClick={openSearch}
+            onClick={() => {
+              setQuickActionsOpen(false);
+              openSearch();
+            }}
             title="搜索工具 / 命令 / 页面（密码存储器、工作台、桌面整理管理也在这里一键打开）"
             className={`flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[11px] font-medium transition hover:bg-white/10 ${
               searchOpen ? 'text-sky-300' : 'text-neutral-200'
@@ -2584,6 +2821,36 @@ export function GridOverlay(): React.JSX.Element {
           >
             <Search className="h-3.5 w-3.5" />
             搜索
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setQuickActionsOpen(false);
+              setPendingEntry(null);
+              setToolPanelOpen(true);
+            }}
+            title="工具箱：在桌面上直接打开任意工具或页面（不用开窗口）"
+            className={`flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[11px] font-medium transition hover:bg-white/10 ${
+              toolPanelOpen ? 'text-sky-300' : 'text-neutral-200'
+            }`}
+          >
+            <Wrench className="h-3.5 w-3.5" />
+            工具箱
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setSearchOpen(false);
+              setToolPanelOpen(false);
+              setQuickActionsOpen((prev) => !prev);
+            }}
+            title="快捷操作：系统入口（hosts 编辑等）/ 我的快捷方式 / 应用入口，全在桌面直达（工作台窗口已退场）"
+            className={`flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[11px] font-medium transition hover:bg-white/10 ${
+              quickActionsOpen ? 'text-sky-300' : 'text-neutral-200'
+            }`}
+          >
+            <Zap className="h-3.5 w-3.5" />
+            快捷
           </button>
         </div>
         {/* 组 1：布局 */}

@@ -1720,6 +1720,21 @@ fn write_dismissed(
     Ok(())
 }
 
+/// 清空「不要它」名单，返回放开的条数（V43）。
+///
+/// 只在**一键整理**时调用 —— 语义见 [`auto_arrange_inner`] 里的长注释：
+/// 用户显式点「整理桌面」= 要求按桌面**现状**重新算一遍，此时历史的手动移出不该再拦。
+/// 名单本身仍然保留给后台对账用（用户刚拖出去的东西不会立刻被塞回来）。
+fn release_dismissed(conn: &Connection) -> Result<usize, String> {
+    let set = read_dismissed(conn)?;
+    if set.is_empty() {
+        return Ok(0);
+    }
+    let count = set.len();
+    write_dismissed(conn, &std::collections::HashSet::new())?;
+    Ok(count)
+}
+
 /// 把某个路径从「不要它」名单里去掉。
 ///
 /// 用户把它重新拖进格子 = 改主意了；不清掉这一条，下次自动归类又会绕开它，
@@ -2235,8 +2250,8 @@ fn apply_takeover_pref(app: &AppHandle) {
     }
 }
 
-/// 读「挂件层是否应处于显示状态」。
-fn read_overlay_visible(app: &AppHandle) -> bool {
+/// 读「挂件层是否应处于显示状态」（pub：供 `lib.rs` 启动期判断「桌面是否即主界面」）。
+pub fn read_overlay_visible(app: &AppHandle) -> bool {
     let Ok(conn) = connect(app) else {
         return false;
     };
@@ -2520,6 +2535,47 @@ pub async fn grid_overlay_fault_get(app: AppHandle) -> Result<Option<String>, St
         )
         .ok();
     Ok(raw)
+}
+
+/// 弹出**系统原生右键菜单**（V43）。
+///
+/// 用户原话：「你的格子把我图标原始的右键功能全部覆盖了，这个科学吗」——
+/// 接管桌面之后原生图标被隐藏，右键事件落在我们的挂件窗上，所以**我们必须替它把
+/// 原生菜单弹出来**（对标腾讯桌面整理：格子里的图标右键就是系统菜单）。
+/// 实现见 [`crate::platform::shell_menu`]。
+///
+/// 坐标不传：菜单该出现在光标处，`GetCursorPos` 是最不会算错的做法。
+/// 菜单里点什么都由 Shell 自己执行完（删除 / 复制 / 属性面板），我们不回收结果。
+///
+/// `run_on_main_thread` 是必须的：`TrackPopupMenuEx` 自己跑模态消息循环，
+/// 在异步命令的执行线程上弹菜单会一闪就没。
+#[tauri::command]
+pub async fn shell_context_menu(app: AppHandle, path: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let handle = app.clone();
+        let target = path.clone();
+        app.run_on_main_thread(move || {
+            // 菜单挂在自己的挂件窗上（它就是盖在桌面上的那层）；窗口没了才退回主窗
+            let win = handle
+                .get_webview_window(GRID_LABEL)
+                .or_else(|| handle.get_webview_window("main"));
+            let hwnd = win
+                .and_then(|w| w.hwnd().ok())
+                .map(|h| HWND(h.0 as *mut std::ffi::c_void))
+                .unwrap_or_default();
+            if let Err(err) = crate::platform::shell_menu::show_context_menu(hwnd, &target) {
+                grid_log(&format!("原生右键菜单失败（{target}）：{err}"));
+            }
+        })
+        .map_err(|err| format!("投递右键菜单失败：{err}"))?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (app, path);
+        Err("当前平台暂未适配原生右键菜单".to_string())
+    }
 }
 
 /// 从**桌面层**（格子挂件窗 / 快捷条）唤出主窗口并跳到指定视图（V42）。
@@ -3505,7 +3561,16 @@ fn layout_all_boxes_with(
     // 格子（见 [`arrange_group_of`] 与 [`dissolve_auto_boxes`]）。
     let col_w = std_w;
     let mut placer = FlowPlacer::with_bounds(work_w, work_h, col_w, blocked, true, min_x);
-    for box_rect in content.iter().copied() {
+    // **摆放顺序：条目少的先摆**（V43）。
+    //
+    // 挂件占据右上角之后，最右那两列的可用顶端会被压到挂件下沿（只剩一小段高度），
+    // 大格子塞不进那段空间、只能挤到左边，右侧就留下「一列一格的碎片」。
+    // 让内容少的格子先去填这些碎片位、内容多的格子留给完整的列 ——
+    // 用户原话「经过整理后的桌面其实还是乱的 都没有对齐」，这是其中一条直接成因。
+    // （只影响**摆放次序**，不改 `sort` 字段，用户看到的格子顺序不变。）
+    let mut ordered: Vec<&GridBoxRect> = content.clone();
+    ordered.sort_by_key(|rect| (rect.items, rect.id));
+    for box_rect in ordered {
         let size = sizes
             .get(&box_rect.id)
             .copied()
@@ -3602,6 +3667,11 @@ pub struct AutoArrangeReport {
     pub lnk_added: usize,
     /// V42：本次扫描里**没进格子**、留在左侧竖条的条目数（快捷方式 + 系统入口 + 落单）
     pub left_over: usize,
+    /// V43：本次**放开**了多少个此前被「移出」拦下的路径
+    ///
+    /// 非 0 说明用户之前手动挪出去过一些东西，这次点整理把它们重新收回来了 ——
+    /// 前端要如实提示，否则用户会以为「怎么又自己跑回来了」（真机库里实测 13 条）。
+    pub released: usize,
     /// V42：本次解散掉的历史「系统」/「快捷方式」格数量
     pub dissolved_boxes: usize,
     /// V42：本次从各格子里摘掉的快捷方式 / 系统入口登记条数（只删登记，文件不动）
@@ -3770,6 +3840,21 @@ fn auto_arrange_inner(
     // 一直跳过，桌面上就永远有这么几个文件夹不在任何格子里 ——
     // 用户原话：「你看桌面上面那么多文件文件夹都没有整理好呢」。
     // 它们现在按普通文件夹进「文件夹」格；要收回/清理走「诊断与修复」（按前缀识别）。
+    //
+    // —— V43：**先释放「不要它」名单，再分组登记** ——
+    //
+    // 用户原话：「我重新整理了为什么还是没有重新把桌面上零散的目录和文件重新整理呢？」
+    // 根因就在这张名单上：`grid_item_delete`（拖出格子 / 移出）为了「别让下一次整理
+    // 又把它拉回来」，会把路径写进 `sync_dismissed`；而它是**只增不减**的 ——
+    // 用户手动挪出去过的 `_Work` / `software` / `测试` / `dify` / `1.log` /
+    // `skills.tar.gz` / `集合竞价.pdf` 等，此后无论点多少次「整理桌面」都不会再进格子，
+    // 只能永远堆在左侧竖条里（真机库里实测攒了 13 条）。
+    //
+    // 语义上「一键整理桌面」= 用户**显式要求把当前桌面重新算一遍**。此时该尊重的是
+    // *桌面现状*，而不是*历史的手动移出*。所以这里把名单整个清掉；名单本身保留给
+    // 后台对账用（刚拖出去的东西在下次「整理」之前不会被自动塞回来）。
+    let released = release_dismissed(conn)?;
+
     let mut grouped: Vec<(String, Vec<usize>)> = Vec::new();
     // V42：`arrange_group_of` 返回 `None` 的条目**不进格子**（快捷方式），它们会在
     // 左侧「未归类」竖条里按类型顺序排开 —— 数一下进回报，前端好如实告诉用户。
@@ -3792,6 +3877,7 @@ fn auto_arrange_inner(
         folders_moved: 0,
         lnk_added: 0,
         left_over: 0,
+        released: 0,
         dissolved_boxes: 0,
         dissolved_items: 0,
         boxes_created: 0,
@@ -3876,6 +3962,7 @@ fn auto_arrange_inner(
     report.dissolved_boxes = dissolved_boxes;
     report.dissolved_items = dissolved_items;
     report.left_over = left_over;
+    report.released = released;
 
     // 全量重排（含复用与新建设立的格子）：挂件归位 → 统一列宽 + 按内容定高度 →
     // 镜像（自右向左）首次适配流布 + 左侧「未归类」竖条占位
@@ -3887,13 +3974,14 @@ fn auto_arrange_inner(
 
     grid_log(&format!(
         "一键整理：扫到 {} 项（{} 个桌面根），登记 {} 项（文件全部原地未动，含文件夹 {}），\
-         未归类留在左侧竖条 {} 项；解散旧格 {} 个 / 摘除快捷方式与系统登记 {} 条；\
+         未归类留在左侧竖条 {} 项；放开此前移出的 {} 项 / 解散旧格 {} 个 / 摘除快捷方式与系统登记 {} 条；\
          格子新建 {} / 复用 {} / 重排 {} / 按内容调尺寸 {} / 挂件归位 {} / 空间不足 {}，失败 {}",
         report.scanned,
         roots.len(),
         report.items_added,
         report.folders_moved,
         report.left_over,
+        report.released,
         report.dissolved_boxes,
         report.dissolved_items,
         report.boxes_created,
@@ -5978,9 +6066,14 @@ mod layout_pipeline_tests {
             min_offset <= pitch,
             "至少一个分类格要紧贴最右可用列（挂件占掉的那两列之后），实际列偏移：{offsets:?}"
         );
+        // V43：**不再断言「`content` 的第一个格子必须在最右两列」** ——
+        // 摆放顺序已改成「条目少的先摆」（让矮格子去填挂件下方那道缝），
+        // 而 `content` 是按 `sort` 排的，两者不再对应。上面那条
+        // 「至少一个格子贴最右可用列」才是「自右向左」的实质断言，它仍然守着。
+        let max_offset = *offsets.iter().max().unwrap();
         assert!(
-            *offsets.first().unwrap() <= 2 * pitch,
-            "第一个分类格必须从右侧起排，实际列偏移：{offsets:?}"
+            max_offset < WORK_W,
+            "最靠左的格子也不能越过工作区（列网格 / 左边界由 ③ 与竖条测试一起守）：{offsets:?}"
         );
 
         // 硬条件 ③：全部落在工作区内，且两两不重叠（挂件也算进来）

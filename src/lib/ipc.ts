@@ -292,6 +292,15 @@ export const ipc = {
   gridOpenPath: (path: string): Promise<void> => call<void>('grid_open_path', { path }),
   /** 在资源管理器中定位该文件（V41 条目右键「打开文件位置」，explorer /select） */
   gridRevealPath: (path: string): Promise<void> => call<void>('grid_reveal_path', { path }),
+  /**
+   * 弹出**系统原生右键菜单**（V43）。
+   *
+   * 接管桌面之后原生图标被隐藏，右键落到了我们的挂件窗上 —— 这个方法把 Shell 的原生
+   * 菜单（打开 / 打开方式 / 发送到 / 复制 / 删除 / 重命名 / 属性 + 第三方扩展项）原样
+   * 弹出来，`path` 对应的对象由 Shell 自己操作。坐标不用传：菜单出现在光标处。
+   */
+  shellContextMenu: (path: string): Promise<void> =>
+    call<void>('shell_context_menu', { path }),
   /** 左侧「未归类」竖条当前状态（V42）：几何 + 分几列 + 条目；width=0 表示没有条目 */
   gridLooseList: (): Promise<LooseArea> => call<LooseArea>('grid_loose_list'),
   /** 提取文件/文件夹的系统真实图标（RGBA base64）；失败或不支持返回 null */
