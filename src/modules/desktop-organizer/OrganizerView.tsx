@@ -6,6 +6,7 @@ import {
   FolderOpen,
   ExternalLink,
   History,
+  Info,
   LayoutGrid,
   Loader2,
   Square,
@@ -14,6 +15,8 @@ import {
   X,
   CheckSquare,
   FolderInput,
+  Sparkles,
+  CheckCircle,
 } from 'lucide-react';
 import type { AutoArrangeReport } from '@/types/grid';
 import type { OrganizerApplyReport, OrganizerPlan, OrganizerRules } from '@/types/organizer';
@@ -29,6 +32,7 @@ import {
 } from '@/core/data/organizerService';
 import { reportOperation } from '@/lib/errorSink';
 import { ipc } from '@/lib/ipc';
+import { isTauri } from '@/platform/detect';
 import { cn } from '@/lib/utils';
 import { toast } from '@/components/ui/toast';
 
@@ -102,6 +106,11 @@ const MODE_LABELS: Record<OrganizerRules['mode'], string> = {
 function tailOf(path: string): string {
   const normalized = path.replace(/\\/g, '/');
   return normalized.slice(normalized.lastIndexOf('/') + 1);
+}
+
+/** 移动模式动作条提示（V42）：把「当前规则会怎么分」压缩成一行 */
+function groupedHint(): string {
+  return '按所选规则分组预览，可勾选排除后再应用；移动后可一键撤销恢复';
 }
 
 export interface OrganizerViewProps {
@@ -351,10 +360,15 @@ export default function OrganizerView(_props: OrganizerViewProps = {}): React.JS
           className="min-w-0 flex-1 truncate font-mono text-[11px] text-foreground"
           title={rootDir ?? undefined}
         >
-          {rootDir ?? (rootError !== null ? `读取失败：${rootError}` : '正在定位桌面目录…')}
+          {rootDir ??
+            (rootError !== null
+              ? isTauri()
+                ? `读取失败：${rootError}`
+                : '浏览器预览模式：请在 Handy 桌面版中查看桌面整理功能'
+              : '正在定位桌面目录…')}
         </code>
         {desktopCount !== null ? (
-          <span className="shrink-0 text-[11px] text-muted-foreground">
+          <span className="shrink-0 rounded-full bg-brand-muted px-2 py-0.5 text-[10px] font-medium text-brand">
             扫描到 {desktopCount} 个条目
           </span>
         ) : null}
@@ -381,43 +395,93 @@ export default function OrganizerView(_props: OrganizerViewProps = {}): React.JS
         ) : null}
       </div>
 
-      {/* 工具栏：处理方式（V37） + 规则选择 + 生成预览 */}
-      <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-3">
-        {/* 处理方式：默认「归拢」不动文件；「移动」必须被显式选中 */}
-        <div className="flex items-center gap-1" role="group" aria-label="处理方式">
-          <button
-            type="button"
-            onClick={() => setProcessMode('group')}
-            title="把桌面条目归拢进桌面格子，文件留在原位不动"
+      {/* 主操作区（V42 重做）：两种处理方式做成两张大卡，主操作按钮不再重复出现 */}
+      <div className="grid shrink-0 grid-cols-1 gap-2 border-b border-border px-4 py-3 sm:grid-cols-2">
+        {/* 归拢卡（默认）：不动文件 */}
+        <button
+          type="button"
+          onClick={() => setProcessMode('group')}
+          aria-pressed={processMode === 'group'}
+          className={cn(
+            'group flex items-start gap-3 rounded-xl border p-3 text-left transition',
+            processMode === 'group'
+              ? 'border-brand/60 bg-brand-muted/60 ring-1 ring-brand/30'
+              : 'border-border hover:border-brand/40 hover:bg-muted/40',
+          )}
+        >
+          <span
             className={cn(
-              'inline-flex h-8 items-center gap-1 rounded-md px-3 text-xs transition',
-              processMode === 'group'
-                ? 'bg-brand text-white'
-                : 'border text-muted-foreground hover:bg-accent hover:text-foreground',
+              'mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition',
+              processMode === 'group' ? 'bg-brand text-white' : 'bg-muted text-muted-foreground group-hover:text-foreground',
             )}
           >
-            <LayoutGrid className="h-3.5 w-3.5" />
-            归拢到桌面格子
-          </button>
-          <button
-            type="button"
-            onClick={() => setProcessMode('move')}
-            title="真的把文件移动到 桌面/Handy整理/ 下，可一键撤销"
+            <LayoutGrid className="h-4 w-4" />
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="flex items-center gap-1.5 text-sm font-medium text-foreground">
+              归拢到桌面格子
+              <span className="rounded-full bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-normal text-emerald-600 dark:text-emerald-400">
+                不动文件
+              </span>
+            </span>
+            <span className="mt-0.5 block text-[11px] leading-relaxed text-muted-foreground">
+              按类型登记进桌面格子（文件夹 / 图片 / 文档 / 压缩包 / 安装包 / 其他），
+              文件本体一个字节都不动，快捷方式留在桌面。
+            </span>
+          </span>
+          <span
             className={cn(
-              'inline-flex h-8 items-center gap-1 rounded-md px-3 text-xs transition',
-              processMode === 'move'
-                ? 'bg-brand text-white'
-                : 'border text-muted-foreground hover:bg-accent hover:text-foreground',
+              'mt-1 h-4 w-4 shrink-0 rounded-full border-2 transition',
+              processMode === 'group' ? 'border-brand bg-brand' : 'border-border bg-background',
             )}
-          >
-            <FolderInput className="h-3.5 w-3.5" />
-            移动到整理目录
-          </button>
-        </div>
+          />
+        </button>
 
+        {/* 移动卡：必须被显式选中，按钮上直说「移动」 */}
+        <button
+          type="button"
+          onClick={() => setProcessMode('move')}
+          aria-pressed={processMode === 'move'}
+          className={cn(
+            'group flex items-start gap-3 rounded-xl border p-3 text-left transition',
+            processMode === 'move'
+              ? 'border-amber-500/60 bg-amber-500/5 ring-1 ring-amber-500/30'
+              : 'border-border hover:border-amber-500/40 hover:bg-muted/40',
+          )}
+        >
+          <span
+            className={cn(
+              'mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition',
+              processMode === 'move' ? 'bg-amber-500 text-white' : 'bg-muted text-muted-foreground group-hover:text-foreground',
+            )}
+          >
+            <FolderInput className="h-4 w-4" />
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="flex items-center gap-1.5 text-sm font-medium text-foreground">
+              移动到整理目录
+              <span className="rounded-full bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-normal text-amber-600 dark:text-amber-400">
+                会移动文件
+              </span>
+            </span>
+            <span className="mt-0.5 block text-[11px] leading-relaxed text-muted-foreground">
+              真的搬到 <code className="font-mono">桌面/Handy整理/&lt;组名&gt;/</code>
+              ，桌面原位置会空出来；可预览、可勾选排除、可一键撤销。
+            </span>
+          </span>
+          <span
+            className={cn(
+              'mt-1 h-4 w-4 shrink-0 rounded-full border-2 transition',
+              processMode === 'move' ? 'border-amber-500 bg-amber-500' : 'border-border bg-background',
+            )}
+          />
+        </button>
+      </div>
+
+      {/* 动作条：规则选择（仅移动模式）+ 主操作按钮（单一入口，V42 消除重复） */}
+      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border px-4 py-2.5">
         {processMode === 'move' ? (
           <>
-            <span className="mx-1 h-5 w-px shrink-0 bg-border" />
             <div className="flex items-center gap-1">
               {(['by-type', 'by-date'] as const).map((m) => (
                 <button
@@ -425,7 +489,7 @@ export default function OrganizerView(_props: OrganizerViewProps = {}): React.JS
                   type="button"
                   onClick={() => setMode(m)}
                   className={cn(
-                    'inline-flex h-8 items-center gap-1 rounded-md px-3 text-xs transition',
+                    'inline-flex h-7 items-center gap-1 rounded-md px-2.5 text-xs transition',
                     mode === m
                       ? 'bg-brand text-white'
                       : 'border text-muted-foreground hover:bg-accent hover:text-foreground',
@@ -447,83 +511,93 @@ export default function OrganizerView(_props: OrganizerViewProps = {}): React.JS
                 整理文件夹
               </label>
             )}
+            <span className="mx-1 h-5 w-px shrink-0 bg-border" />
+            <span className="text-[11px] text-muted-foreground">
+              {groupedHint()}
+            </span>
           </>
-        ) : null}
+        ) : (
+          <span className="text-[11px] text-muted-foreground">
+            按类型把桌面条目登记进桌面格子；整理后桌面图标交由格子接管（原生图标收起，可随时恢复）。
+          </span>
+        )}
 
         <button
           type="button"
           onClick={() => void (processMode === 'group' ? handleGroup() : handlePreview())}
           disabled={busy !== null}
-          className="ml-auto inline-flex h-8 shrink-0 items-center gap-1 rounded-md bg-brand px-3 text-xs font-medium text-white transition hover:bg-brand/90 disabled:cursor-not-allowed disabled:opacity-50"
+          className="ml-auto inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md bg-brand px-3.5 text-xs font-medium text-white shadow-sm transition hover:bg-brand/90 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {busy === 'preview' ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
           ) : processMode === 'group' ? (
-            <LayoutGrid className="h-3.5 w-3.5" />
+            <Sparkles className="h-3.5 w-3.5" />
           ) : (
             <FolderInput className="h-3.5 w-3.5" />
           )}
-          {processMode === 'group' ? '归拢到桌面格子' : '生成预览'}
+          {busy === 'preview'
+            ? '正在生成预览…'
+            : processMode === 'group'
+              ? '开始归拢'
+              : '生成预览'}
+          {processMode === 'group' && groupReport === null && (
+            <ArrowRight className="h-3 w-3 opacity-70" />
+          )}
         </button>
       </div>
 
-      {/* 处理方式说明（V37）：把「会不会动我的文件」说在明面上 */}
-      <div
-        className={cn(
-          'flex items-start gap-2 border-b border-border px-4 py-2 text-[11px]',
-          processMode === 'group' ? 'bg-muted/20 text-muted-foreground' : 'bg-destructive/5 text-destructive',
-        )}
-      >
-        {processMode === 'group' ? (
-          <>
-            <LayoutGrid className="mt-0.5 h-3.5 w-3.5 shrink-0 text-brand" />
-            <span>
-              按类型把桌面条目
-              <span className="font-medium text-foreground">登记</span>
-              进桌面格子（文件夹 / 图片 / 文档 / 压缩包 / 安装包 / 其他），
-              文件本体一个字节都不动。快捷方式（.lnk）按设计留在桌面不动。
-            </span>
-          </>
-        ) : (
-          <>
-            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-            <span>
-              这一种会
-              <span className="font-medium">真的移动文件</span>
-              到 <code className="font-mono">桌面/Handy整理/&lt;组名&gt;/</code>
-              ，桌面上的原位置会空出来。移动后可以在下方历史计划里一键撤销恢复。
-            </span>
-          </>
-        )}
-      </div>
-
       {/* 错误态 */}
-      {error && (
-        <div className="mx-4 mb-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
-          {error}
-        </div>
-      )}
+      {error &&
+        (isTauri() ? (
+          <div className="mx-4 mt-2 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span className="min-w-0 flex-1">{error}</span>
+          </div>
+        ) : (
+          <div className="mx-4 mt-2 flex items-start gap-2 rounded-md border border-brand/15 bg-brand-muted/50 px-3 py-2 text-xs text-muted-foreground">
+            <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-brand" />
+            <span className="min-w-0 flex-1">浏览器预览模式：请在 Handy 桌面版中使用桌面整理功能。</span>
+          </div>
+        ))}
 
       <div className="min-h-0 flex-1 scrollbar-thin overflow-auto px-4 pb-4">
-        {/* 归拢结果摘要（V37 默认路径；一个文件都没动） */}
+        {/* 归拢结果摘要（V42 重做）：统计徽章 + 失败明细,一眼看懂做了什么 */}
         {groupReport && processMode === 'group' && (
-          <div className="mt-3 mb-3 rounded-lg border border-border bg-muted/30 p-3">
-            <div className="flex items-center gap-2">
-              <LayoutGrid className="h-4 w-4 text-brand" />
-              <p className="flex-1 text-sm font-medium text-foreground">
-                已归拢 {groupReport.itemsAdded} 个条目到桌面格子
-                <span className="ml-1 font-normal text-muted-foreground">
-                  （扫描 {groupReport.scanned} 项，文件全部原地未动）
-                </span>
-              </p>
+          <div className="mt-3 mb-3 overflow-hidden rounded-xl border border-border bg-muted/30">
+            <div className="flex items-center gap-2 px-4 py-3">
+              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
+                <CheckCircle className="h-4 w-4" />
+              </span>
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium text-foreground">
+                  已归拢 {groupReport.itemsAdded} 个条目到桌面格子
+                </p>
+                <p className="mt-0.5 text-[11px] text-muted-foreground">
+                  扫描 {groupReport.scanned} 项 · 文件全部原地未动 · 快捷方式留在桌面不参与
+                </p>
+              </div>
             </div>
-            <p className="mt-1.5 text-[11px] text-muted-foreground">
-              新建格子 {groupReport.boxesCreated} 个 · 复用 {groupReport.boxesReused} 个 ·
-              含文件夹 {groupReport.foldersMoved} 个 · 重排 {groupReport.boxesLaidOut} 格 ·
-              按内容调尺寸 {groupReport.boxesResized} 格
-            </p>
+            <div className="flex flex-wrap gap-1.5 border-t border-border/60 bg-background/60 px-4 py-2.5">
+              <span className="rounded-full bg-brand-muted px-2 py-0.5 text-[10px] font-medium text-brand">
+                新建格子 {groupReport.boxesCreated}
+              </span>
+              <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
+                复用 {groupReport.boxesReused}
+              </span>
+              <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
+                重排 {groupReport.boxesLaidOut} 格
+              </span>
+              <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
+                调尺寸 {groupReport.boxesResized} 格
+              </span>
+              {groupReport.foldersMoved > 0 && (
+                <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
+                  含文件夹 {groupReport.foldersMoved} 个
+                </span>
+              )}
+            </div>
             {groupReport.failures.length > 0 && (
-              <div className="mt-2 flex flex-col gap-1">
+              <div className="flex flex-col gap-1 border-t border-border/60 px-4 py-2">
                 {groupReport.failures.map((f) => (
                   <p key={f} className="flex items-start gap-1.5 text-[11px] text-destructive">
                     <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
@@ -537,10 +611,12 @@ export default function OrganizerView(_props: OrganizerViewProps = {}): React.JS
 
         {/* 应用结果摘要（移动模式） */}
         {report && processMode === 'move' && (
-          <div className="mb-3 rounded-lg border border-border bg-muted/30 p-3">
-            <div className="flex items-center gap-2">
-              <FolderOpen className="h-4 w-4 text-brand" />
-              <p className="flex-1 text-sm font-medium text-foreground">
+          <div className="mb-3 overflow-hidden rounded-xl border border-border bg-muted/30">
+            <div className="flex items-center gap-2 px-4 py-3">
+              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-brand-muted text-brand">
+                <FolderOpen className="h-4 w-4" />
+              </span>
+              <p className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">
                 已移动 {report.moved} 项
                 {lastApplied && (
                   <span className="ml-1 font-normal text-muted-foreground">
@@ -553,15 +629,26 @@ export default function OrganizerView(_props: OrganizerViewProps = {}): React.JS
                   type="button"
                   onClick={() => void handleUndo(lastApplied.id)}
                   disabled={busy !== null}
-                  className="inline-flex h-7 items-center gap-1 rounded-md border px-2.5 text-xs text-muted-foreground transition hover:bg-accent hover:text-foreground disabled:opacity-50"
+                  className="inline-flex h-7 shrink-0 items-center gap-1 rounded-md border border-border bg-background px-2.5 text-xs text-muted-foreground transition hover:bg-accent hover:text-foreground disabled:opacity-50"
                 >
                   <Undo2 className="h-3.5 w-3.5" />
                   一键撤销
                 </button>
               )}
             </div>
+            <div className="flex flex-wrap gap-1.5 border-t border-border/60 bg-background/60 px-4 py-2.5">
+              <span className="rounded-full bg-brand-muted px-2 py-0.5 text-[10px] font-medium text-brand">
+                移动 {report.moved} 项
+              </span>
+              <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
+                {MODE_LABELS[plan?.payload.rules.mode ?? 'by-type']}规则
+              </span>
+              <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
+                可在历史计划中撤销
+              </span>
+            </div>
             {report.failed.length > 0 && (
-              <div className="mt-2 flex flex-col gap-1">
+              <div className="flex flex-col gap-1 border-t border-border/60 px-4 py-2">
                 {report.failed.map((f) => (
                   <p key={`${f.source}-${f.dest}`} className="flex items-start gap-1.5 text-[11px] text-destructive">
                     <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
@@ -575,14 +662,20 @@ export default function OrganizerView(_props: OrganizerViewProps = {}): React.JS
           </div>
         )}
 
-        {/* 归拢模式空态：说清点一下会发生什么，别让用户不敢点 */}
+        {/* 归拢模式空态（V42）：把「点一下会发生什么」拆成三步,别让用户不敢点 */}
         {processMode === 'group' && groupReport === null && (
-          <div className="mt-3 rounded-lg border border-dashed border-border px-4 py-6 text-center">
-            <LayoutGrid className="mx-auto h-6 w-6 text-muted-foreground/60" />
-            <p className="mt-2 text-sm text-foreground">点右上角「归拢到桌面格子」</p>
-            <p className="mt-1 text-xs text-muted-foreground">
-              桌面上的文件会按类型分到几个格子里显示，
-              <span className="font-medium text-foreground">文件本身留在桌面原位，一个都不会被移动或删除</span>。
+          <div className="mt-3 rounded-xl border border-dashed border-border px-6 py-8 text-center">
+            <span className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-brand-muted text-brand">
+              <LayoutGrid className="h-6 w-6" />
+            </span>
+            <p className="mt-3 text-sm font-medium text-foreground">点「开始归拢」整理一次桌面</p>
+            <p className="mx-auto mt-1.5 max-w-md text-xs leading-relaxed text-muted-foreground">
+              只需三步：<span className="text-foreground">扫描桌面</span> →
+              <span className="text-foreground">按类型登记进格子</span> →
+              <span className="text-foreground">格子接管图标展示</span>。
+              <span className="mt-1 block font-medium text-emerald-600 dark:text-emerald-400">
+                文件本身留在桌面原位，一个都不会被移动或删除。
+              </span>
             </p>
           </div>
         )}

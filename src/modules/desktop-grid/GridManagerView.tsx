@@ -20,6 +20,7 @@ import { toast } from '@/components/ui/toast';
 import { reportOperation } from '@/lib/errorSink';
 import { confirmAction } from '@/lib/confirmAction';
 import { ipc } from '@/lib/ipc';
+import { isTauri } from '@/platform/detect';
 import { cn } from '@/lib/utils';
 import { ACCENT_ORDER } from './DesktopWidgets';
 import { LegacyRepairCard } from './LegacyRepairCard';
@@ -80,6 +81,8 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
   const [renameDraft, setRenameDraft] = useState('');
   /** 挂件前端最近一次故障（白屏/JS 崩溃取证；无记录为 null） */
   const [fault, setFault] = useState<string | null>(null);
+  /** V42：语义说明卡默认折叠成一行，需要时再展开（减少首屏信息过载） */
+  const [guideOpen, setGuideOpen] = useState(false);
 
   const refresh = useCallback(async (): Promise<void> => {
     setLoading(true);
@@ -409,33 +412,33 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
   /** 工具条按钮（自带头部与嵌入模式共用，避免两处抄一遍） */
   const toolbarActions = (
     <>
-      <Button variant="outline" size="sm" onClick={refresh} disabled={loading}>
+      <Button variant="outline" size="sm" onClick={refresh} disabled={loading} title="重新读取格子列表">
         <RefreshCw className={cn('h-3.5 w-3.5', loading && 'animate-spin')} />
         刷新
       </Button>
-      <Button variant="outline" size="sm" onClick={addBox} disabled={busy}>
+      <Button variant="outline" size="sm" onClick={addBox} disabled={busy} title="新建一个收纳格">
         <Plus className="h-3.5 w-3.5" />
         新建格子
       </Button>
-      <Button variant="secondary" size="sm" onClick={() => addWidget('note')} disabled={busy}>
+      <Button variant="secondary" size="sm" onClick={() => addWidget('note')} disabled={busy} title="加一个便签挂件（可多个）">
         <StickyNote className="h-3.5 w-3.5" />
         便签挂件
       </Button>
-      <Button variant="secondary" size="sm" onClick={() => addWidget('calendar')} disabled={busy}>
+      <Button variant="secondary" size="sm" onClick={() => addWidget('calendar')} disabled={busy} title="加日历挂件（只有一个）">
         <CalendarDays className="h-3.5 w-3.5" />
         日历挂件
       </Button>
-      <Button size="sm" onClick={autoArrange} disabled={arranging}>
+      <Button variant="secondary" size="sm" onClick={toggleOverlay} disabled={busy} title={overlayVisible ? '收起桌面上的格子层' : '把格子层显示到桌面上'}>
+        {overlayVisible ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+        {overlayVisible ? '隐藏格子' : '显示格子'}
+      </Button>
+      <Button size="sm" onClick={autoArrange} disabled={arranging} title="扫描桌面并按类型登记进格子（一个文件都不移动）">
         {arranging ? (
           <Loader2 className="h-3.5 w-3.5 animate-spin" />
         ) : (
           <Sparkles className="h-3.5 w-3.5" />
         )}
         一键归类桌面
-      </Button>
-      <Button variant="secondary" size="sm" onClick={toggleOverlay} disabled={busy}>
-        {overlayVisible ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-        {overlayVisible ? '隐藏格子' : '显示格子'}
       </Button>
     </>
   );
@@ -467,38 +470,53 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
       )}
 
       <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto px-6 py-5">
-        {/* 语义说明卡 */}
-        <div className="mb-5 flex gap-3 rounded-xl border border-border bg-muted/40 px-4 py-3">
-          <Info className="mt-0.5 h-4 w-4 shrink-0 text-brand" />
-          <div className="space-y-1 text-xs leading-relaxed text-muted-foreground">
-            <p>
-              <span className="font-medium text-foreground">格子只做呈现，不动你的文件</span>
-              ：拖进格子、拖去别的格子、点 × 移出 —— 都只是改格子的登记，文件一直待在
-              桌面原处（V37 起重定；腾讯桌面整理就是这个行为）。双击打开的还是原文件，
-              所以不存在「文件被搬进某个目录」这回事。
-            </p>
-            <p>
-              <span className="font-medium text-foreground">一键归类</span>
-              ：扫一遍桌面，把文件和文件夹按类型登记进对应的格子。快捷方式（.lnk）
-              按你的要求留在原位，一个文件都不会被移动。从格子里移出过的东西不会再被
-              自动归类塞回来。
-            </p>
-            <p>
-              格子条目：双击打开、拖到其他格子、右上角 × 从格子移出（文件不动）。
-              标题栏随时可拖动移位、双击重命名。
-              「备份布局」记下当前摆法，随时能「还原」回来。
-            </p>
-            <p className="text-foreground">
-              桌面挂件：便签支持 Markdown 边写边渲染（自动保存）、日历挂件带农历 · 节气 ·
-              节假日与每日计划（与工作台共用同一份待办数据，桌面勾完工作台同步）。
-              便签可添加多个（各自名字与配色可在桌面上直接改），日历挂件保留一个。
-            </p>
-            {fault && (
-              <p className="rounded bg-red-500/10 px-2 py-1 text-[11px] text-red-600 dark:text-red-400">
-                挂件最近一次故障（已自动恢复过）：{fault}
+        {/* 语义说明卡（V42：默认折叠成一行,锚点词保留） */}
+        <div className="mb-5 overflow-hidden rounded-xl border border-border bg-muted/40">
+          <button
+            type="button"
+            onClick={() => setGuideOpen((prev) => !prev)}
+            className="flex w-full items-center gap-3 px-4 py-3 text-left transition hover:bg-muted/20"
+            aria-expanded={guideOpen}
+          >
+            <Info className="h-4 w-4 shrink-0 text-brand" />
+            <span className="min-w-0 flex-1 truncate text-xs leading-relaxed text-muted-foreground">
+              <span className="font-medium text-foreground">格子是桌面的呈现层</span>
+              ：拖进 / 移出 / 换格子都只改登记，文件<span className="font-medium text-foreground">原地不动</span>；
+              一键归类按类型登记，快捷方式留在原位
+            </span>
+            <span className="shrink-0 text-[11px] text-muted-foreground">
+              {guideOpen ? '收起' : '展开'}
+            </span>
+          </button>
+          {guideOpen && (
+            <div className="space-y-1 border-t border-border/60 px-4 py-3 text-xs leading-relaxed text-muted-foreground">
+              <p>
+                <span className="font-medium text-foreground">格子只做呈现，不动你的文件</span>
+                ：拖进格子、拖去别的格子、点 × 移出 —— 都只是改格子的登记，文件一直待在
+                桌面原处（腾讯桌面整理就是这个行为）。双击打开的还是原文件。
               </p>
-            )}
-          </div>
+              <p>
+                <span className="font-medium text-foreground">一键归类</span>
+                ：扫一遍桌面，把文件和文件夹按类型登记进对应的格子。快捷方式（.lnk）
+                按你的要求留在原位，一个文件都不会被移动。从格子里移出过的东西不会再被
+                自动归类塞回来。
+              </p>
+              <p>
+                格子条目：双击打开、拖到其他格子、右上角 × 从格子移出（文件不动）。
+                标题栏随时可拖动移位、双击重命名。
+                「备份布局」记下当前摆法，随时能「还原」回来。
+              </p>
+              <p className="text-foreground">
+                桌面挂件：便签支持 Markdown 边写边渲染（自动保存）、日历挂件带农历 · 节气 ·
+                节假日与每日计划（与工作台共用同一份待办数据，桌面勾完工作台同步）。
+              </p>
+              {fault && (
+                <p className="rounded bg-red-500/10 px-2 py-1 text-[11px] text-red-600 dark:text-red-400">
+                  挂件最近一次故障（已自动恢复过）：{fault}
+                </p>
+              )}
+            </div>
+          )}
         </div>
 
         {/* 诊断与修复（V37）：历史收纳残留撤回/清理 + 日志入口 */}
@@ -572,9 +590,16 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
         </div>
 
         {error !== null ? (
-          <p className="mb-4 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-            {error}
-          </p>
+          isTauri() ? (
+            <p className="mb-4 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+              {error}
+            </p>
+          ) : (
+            <p className="mb-4 flex items-center gap-2 rounded-lg border border-brand/15 bg-brand-muted/50 px-3 py-2 text-xs text-muted-foreground">
+              <Info className="h-3.5 w-3.5 shrink-0 text-brand" />
+              浏览器预览模式：桌面格子功能需要在 Handy 桌面版中运行。
+            </p>
+          )
         ) : null}
 
         {/* 格子列表 */}

@@ -64,7 +64,7 @@ use windows::Win32::Foundation::HWND;
 
 use rusqlite::{params, Connection, Row};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 use crate::db;
 
@@ -2522,6 +2522,32 @@ pub async fn grid_overlay_fault_get(app: AppHandle) -> Result<Option<String>, St
     Ok(raw)
 }
 
+/// 从**桌面层**（格子挂件窗 / 快捷条）唤出主窗口并跳到指定视图（V42）。
+///
+/// 用户原话：「我们这个工具本来就是为了方便顺手使用，其他都可以直接在桌面上实现功能，
+/// 不需要一个独立的窗口打开才操作，在桌面上我能快速搜索并一键打开工具、一键打开密码存储箱」。
+///
+/// 视图状态是**每个窗口各持一份**的（ARCHITECTURE ADR-8）：挂件窗改不了主窗口的 store，
+/// 所以走「显示主窗口 + 发 `handy:navigate` 事件」，与 `bar_open_command` /
+/// `bar_open_workstation` 完全同一套机制（主窗口的 `main.tsx` 在监听）。
+///
+/// `target` 的语义与那个监听一致：
+///   - `module:<id>` → 打开模块视图（如 `module:vault` 打开密码存储器）；
+///   - 其余非空字符串 → 当作**工具 / 命令 id** 打开（如 `timestamp`、`json-format`）。
+#[tauri::command]
+pub async fn desktop_open_view(app: AppHandle, target: String) -> Result<(), String> {
+    let target = target.trim().to_string();
+    if target.is_empty() {
+        return Err("导航目标为空".to_string());
+    }
+    crate::window::show_main_palette(&app)?;
+    if let Some(win) = app.get_webview_window(crate::window::MAIN_LABEL) {
+        win.emit("handy:navigate", target)
+            .map_err(|err| format!("通知主窗口失败：{err}"))?;
+    }
+    Ok(())
+}
+
 /// 打开条目原文件（经 shell 插件 Rust API 唤起系统默认程序）。
 ///
 /// 说明：本地路径打开走 Rust 侧 `shell().open`，不经前端 `shell:allow-open` 的
@@ -2785,17 +2811,40 @@ struct FlowPlacer {
     col_w: i64,
     /// 最多摆几列（由工作区宽度与列宽推导，不再写死 8）
     max_columns: i64,
+    /// **镜像流布**（V42）：`true` = 第 0 列在**最右**，列号越大越往左。
+    ///
+    /// 用户 V42 原话：「右边是从挂件到其他整理，从右上角依次顺序排开」——
+    /// 左侧那条「未归类（快捷方式 + 系统 + 落单文件）」竖条占住左边之后，
+    /// 分类格该从右边起算才符合用户描述的方位。
+    mirror: bool,
+    /// 允许摆放的**左边界**（V42）：留给左侧那条竖条，格子不得越过去。
+    /// 普通（非镜像）流布下等于 `margin`。
+    min_x: i64,
     /// 已占用的矩形（禁区 + 已摆下的格子）
     blocked: Vec<SlotRect>,
 }
 
 impl FlowPlacer {
     fn new(work_w: i64, work_h: i64, col_w: i64, blocked: Vec<SlotRect>) -> Self {
+        Self::with_bounds(work_w, work_h, col_w, blocked, false, ARRANGE_MARGIN)
+    }
+
+    /// 带方向与左边界的构造（V42）。`mirror = true` 时列从右往左数，
+    /// `min_x` 是左侧竖条右沿（格子越过它就会盖住用户的快捷方式）。
+    fn with_bounds(
+        work_w: i64,
+        work_h: i64,
+        col_w: i64,
+        blocked: Vec<SlotRect>,
+        mirror: bool,
+        min_x: i64,
+    ) -> Self {
         // 工作区尺寸拿不到时退回 1280×720，宁可摆得挤一点也不能算出负坐标
         let work_w = if work_w > 0 { work_w } else { 1280 };
         let work_h = if work_h > 0 { work_h } else { 720 };
         let col_w = col_w.clamp(MIN_BOX_W, AUTO_MAX_W);
-        let usable = work_w - 2 * ARRANGE_MARGIN + ARRANGE_GAP_X;
+        let min_x = min_x.clamp(ARRANGE_MARGIN, (work_w - ARRANGE_MARGIN).max(ARRANGE_MARGIN));
+        let usable = (work_w - min_x - ARRANGE_MARGIN + ARRANGE_GAP_X).max(col_w);
         let max_columns = (usable / (col_w + ARRANGE_GAP_X)).clamp(1, ARRANGE_COLUMN_CAP);
         Self {
             margin: ARRANGE_MARGIN,
@@ -2803,14 +2852,31 @@ impl FlowPlacer {
             work_h,
             col_w,
             max_columns,
+            mirror,
+            min_x,
             blocked,
         }
     }
 
-    /// 第 `k` 列（0 = 最左）的左边界。**同一列的左边界永远相同** —— 格子宽度统一
+    /// 第 `k` 列的左边界。**同一列的左边界永远相同** —— 格子宽度统一
     /// （[`standard_box_width`]）之后，这一列里所有格子的左右边缘都对齐。
+    ///
+    /// `mirror = true` 时 `k = 0` 是**最右**那一列（V42：分类格从右上角起排）。
     fn col_left(&self, k: i64) -> i64 {
-        self.margin + k * (self.col_w + ARRANGE_GAP_X)
+        if self.mirror {
+            self.work_w - self.margin - self.col_w - k * (self.col_w + ARRANGE_GAP_X)
+        } else {
+            self.margin + k * (self.col_w + ARRANGE_GAP_X)
+        }
+    }
+
+    /// 这一列是否落在可用横向区间内（镜像时看左沿，普通时看右沿）。
+    fn column_fits(&self, x: i64, w: i64) -> bool {
+        if self.mirror {
+            x >= self.min_x
+        } else {
+            x + w <= self.work_w - self.margin
+        }
     }
 
     /// 给一个 `w×h` 的格子找下一个落点。`None` = 桌面已经排不下了。
@@ -2820,17 +2886,16 @@ impl FlowPlacer {
 
     /// 同 [`FlowPlacer::next`]，但**从第 `from_col` 列开始**找（V41）。
     ///
-    /// 中段分类格要让开左上角固定列（系统 / 快捷方式），所以从第 1 列起流布。
     /// `from_col` 会被夹进制合法列区间 —— 工作区只放得下一列时，这里自然退回第 0 列，
-    /// 于是固定列与分类格在同一列里**从上往下顺次排开**，而不是把分类格甩到屏幕外
+    /// 于是所有格子在同一列里**从上往下顺次排开**，而不是把格子甩到屏幕外
     /// （那正是 V38「4 个没地方放（保持原位）」的老毛病）。
     fn next_from(&mut self, from_col: i64, w: i64, h: i64) -> Option<(i64, i64)> {
         let h = h.max(MIN_BOX_H);
         let from = from_col.clamp(0, self.max_columns - 1);
         for k in from..self.max_columns {
             let x = self.col_left(k);
-            if x + w > self.work_w - self.margin {
-                // 这一列连宽度都不够 → 再往右只会更糟
+            if !self.column_fits(x, w) {
+                // 镜像时列号越大越靠左：越界说明后面只会更越界
                 break;
             }
             if let Some(y) = self.find_row(x, w, h) {
@@ -2839,18 +2904,6 @@ impl FlowPlacer {
             }
         }
         None
-    }
-
-    /// 把格子钉在**指定列**里往下找空位（V41：左上角固定列专用）。
-    ///
-    /// 与 [`FlowPlacer::next_from`] 的区别：它不会往右挪列 —— 固定列的格子必须一直待在
-    /// 第 0 列，装不下就交给调用方去压缩高度 / 让位。
-    fn place_in_column(&mut self, col: i64, w: i64, h: i64) -> Option<(i64, i64)> {
-        let h = h.max(MIN_BOX_H);
-        let x = self.col_left(col.clamp(0, self.max_columns - 1));
-        let y = self.find_row(x, w, h)?;
-        self.blocked.push(SlotRect { x, y, w, h });
-        Some((x, y))
     }
 
     /// 在列内（x 固定）**首次适配**：返回第一个「不与任何已占矩形相交、且不越出下边界」的 y。
@@ -2891,12 +2944,15 @@ impl FlowPlacer {
         self.place_loose_at(self.max_columns - 1, w, h)
     }
 
-    /// 同 [`FlowPlacer::place_loose`]，但落在**指定列**（V41：固定列装不下时用第 0 列兜底）。
+    /// 同 [`FlowPlacer::place_loose`]，但落在**指定列**（兜底：最后一列还放不下时用）。
     fn place_loose_at(&mut self, col: i64, w: i64, h: i64) -> (i64, i64) {
         let k = col.clamp(0, self.max_columns - 1);
-        let x = self
-            .col_left(k)
-            .min((self.work_w - self.margin - w).max(self.margin));
+        let right_limit = (self.work_w - self.margin - w).max(self.margin);
+        let x = if self.mirror {
+            self.col_left(k).max(self.min_x).min(right_limit)
+        } else {
+            self.col_left(k).min(right_limit)
+        };
         let mut y = self.margin;
         for r in &self.blocked {
             if r.x < x + w && x < r.x + r.w {
@@ -2915,7 +2971,7 @@ impl FlowPlacer {
 fn load_box_rects(conn: &Connection) -> Result<Vec<GridBoxRect>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT b.id, b.name, b.kind, b.category, b.pos_x, b.pos_y, b.width, b.height, \
+            "SELECT b.id, b.name, b.kind, b.pos_x, b.pos_y, b.width, b.height, \
                     (SELECT COUNT(*) FROM grid_items i WHERE i.box_id = b.id) \
              FROM grid_boxes b ORDER BY b.sort ASC, b.id ASC",
         )
@@ -2926,12 +2982,11 @@ fn load_box_rects(conn: &Connection) -> Result<Vec<GridBoxRect>, String> {
                 id: row.get(0)?,
                 name: row.get(1)?,
                 kind: row.get(2)?,
-                category: row.get(3)?,
-                x: row.get(4)?,
-                y: row.get(5)?,
-                w: row.get::<_, i64>(6)?.max(MIN_BOX_W),
-                h: row.get::<_, i64>(7)?.max(MIN_BOX_H),
-                items: row.get::<_, i64>(8)?.max(0) as usize,
+                x: row.get(3)?,
+                y: row.get(4)?,
+                w: row.get::<_, i64>(5)?.max(MIN_BOX_W),
+                h: row.get::<_, i64>(6)?.max(MIN_BOX_H),
+                items: row.get::<_, i64>(7)?.max(0) as usize,
             })
         })
         .map_err(|err| format!("读取格子几何失败：{err}"))?
@@ -2943,11 +2998,9 @@ fn load_box_rects(conn: &Connection) -> Result<Vec<GridBoxRect>, String> {
 /// 排布用的格子几何（`kind` 决定它是**收纳格**还是**挂件**）。
 struct GridBoxRect {
     id: i64,
-    /// 格子名（V41：用来认出「系统」/「快捷方式」这两个钉在左上角的格子）
+    /// 格子名（报错信息里用来指认是哪个格子摆不进去）
     name: String,
     kind: String,
-    /// 归类类别（V41：改名之后仍能认出「快捷方式」是自动分类出来的那一格）
-    category: String,
     x: i64,
     y: i64,
     w: i64,
@@ -2971,37 +3024,13 @@ impl GridBoxRect {
         !is_content_kind(&self.kind)
     }
 
-    /// 归入**左上角固定列**（V41）。
-    ///
-    /// 「系统」（此电脑 / 回收站 / 用户文件）与「快捷方式」这两格的位置被钉死 —— 用户
-    /// V41 原话：「快捷方式和系统暂时不做整理了，按照类型顺序排序从左上角依次排开就行了，
-    /// 用户如果想分格子，自己去弄即可」。
-    ///
-    /// 注意区分**位置**与**内容**：它们的内容照旧由归类结果决定（接管模式下原生图标
-    /// 不可见，这两类必须有个显示位置），钉死的只是它们不再跟着分类格一起流动。
-    /// 名字与类别都认：改名后 `category` 还在，用户自建同名格子也能认出来。
-    fn is_left_pinned(&self) -> bool {
-        if self.is_widget() {
-            return false;
-        }
-        self.kind == "system" || self.name == LEFT_PIN_SHORTCUT || self.category == LEFT_PIN_SHORTCUT
-    }
+    // V42 删掉了 V41 的 `is_left_pinned()`：那时是「把『系统』『快捷方式』两个**格子**
+    // 钉在左上角固定列」，用户随即否掉了这个思路 ——
+    // 「不整理的和快捷方式别整理到格子了，他们就是自动在桌面左上角从上往下排开即可，
+    // 不需要放到格子里面，没有必要」。
+    // 现在左上角归 [`loose_strip_rect`] 那条**纯图标竖条**（快捷方式 + 系统入口 +
+    // 落单文件），分类格一律从右侧起流布 —— 见 [`layout_all_boxes_with`]。
 }
-
-/// 左上角固定列里的「快捷方式」格名（与 [`arrange_group_of`] 的分组名一致）。
-const LEFT_PIN_SHORTCUT: &str = "快捷方式";
-
-/// 左上角固定列里的排序：**系统在前、快捷方式其次**（用户要求「按类型顺序排序」）。
-fn left_pin_rank(rect: &GridBoxRect) -> i64 {
-    if rect.kind == "system" {
-        0
-    } else {
-        1
-    }
-}
-
-/// 钉在左上角的那些格子独占的列数（后面的分类格从第 `LEFT_PIN_COLUMNS` 列起流布）。
-const LEFT_PIN_COLUMNS: i64 = 1;
 
 /// 这个 kind 是不是**收纳格**（参与自动排布、宽度统一、高度按内容）。
 ///
@@ -3127,32 +3156,63 @@ fn anchor_widget(
     }
 }
 
-/// **「不整理」区**的矩形（V41）。桌面条目里「没有被任何格子登记」的那些（用户从格子里
-/// 移出的、以及整理之后新出现在桌面的）都要有个看得见的地方 —— 否则接管模式下原生图标
-/// 已被隐藏，用户会觉得「文件被我弄丢了」。
+/// 左侧那条「未归类」竖条（V42）。
 ///
-/// 用户 V41 原话：「图标和文件等移除格子后并没有回到桌面上呢？」「用户直接从格子里面
-/// 移除自动规划到不整理的部分即可」。
+/// 装的是**不进格子**的三类东西：系统入口（此电脑 / 回收站 / 用户的文件）、快捷方式
+/// （`.lnk`）、以及没被任何格子登记的落单条目。用户 V42 原话：
+/// 「不整理的和快捷方式别整理到格子了，他们就是自动在桌面左上角从上往下排开即可，
+/// 不需要放到格子里面，没有必要」「左边部分是不需要分类的快捷方式依次展示」。
 ///
-/// 位置钉在工作区**左下角**：左上角是固定列（系统 + 快捷方式）、中段是分类格、
-/// 右上角是挂件 —— 剩下唯一不打架的角落就是左下。宽度沿用**整批统一列宽**
-/// （[`standard_box_width`]），高度按内容撑开（[`box_height_at`]），于是它看起来就是
-/// 这个格子系统里的一员，而不是半路插进来的面板。
+/// 与 V41「不整理」区的三个区别：
+///   ① 位置从**左下角**搬到**左上角**（用户点名的方位）；
+///   ② 不再是一整块「格子」—— 前端按**纯图标**画（无卡片外框、无标题栏），
+///      看起来就跟系统桌面自己那排图标一样；
+///   ③ 单元格度量与收纳格条目**同一套**（[`loose_cell_size`]），所以它和格子里的
+///      图标大小、间距一致，不是「另一种风格的东西」。
 ///
-/// `count == 0` 时返回 `None`：没有落单条目就什么都不占（也不会在布局里当禁区）。
-fn loose_area_rect(_work_w: i64, work_h: i64, count: usize, icon: i64, col_w: i64) -> Option<SlotRect> {
+/// `count == 0` 时返回 `None`：没有未归类条目就什么都不占（也不会在布局里当禁区）。
+#[derive(Debug, Clone, Copy)]
+struct LooseStrip {
+    rect: SlotRect,
+    /// 竖条分几列 —— 前端按它渲染等宽网格，差一列就会盖住旁边的分类格
+    columns: i64,
+}
+
+/// 竖条里一个格位的 `(宽, 高)`：与收纳格的条目单元格同一套度量
+/// （图标 + [`CELL_EXTRA_W`] / 图标 + [`CELL_EXTRA_H`]），改这里要同步改前端。
+fn loose_cell_size(icon: i64) -> (i64, i64) {
+    let icon = icon.clamp(16, 256);
+    (icon + CELL_EXTRA_W, icon + CELL_EXTRA_H)
+}
+
+/// 竖条最多几列 —— 再多就把桌面左半边吃掉了，分类格会没地方站。
+const LOOSE_MAX_COLUMNS: i64 = 4;
+
+fn loose_strip_rect(work_w: i64, work_h: i64, count: usize, icon: i64) -> Option<LooseStrip> {
     if count == 0 {
         return None;
     }
+    let work_w = if work_w > 0 { work_w } else { 1280 };
     let work_h = if work_h > 0 { work_h } else { 720 };
-    let w = col_w.clamp(MIN_BOX_W, AUTO_MAX_W);
-    let max_h = (work_h - 2 * ARRANGE_MARGIN).max(MIN_BOX_H);
-    let h = box_height_at(count, w, icon, max_h);
-    Some(SlotRect {
-        x: ARRANGE_MARGIN,
-        y: (work_h - ARRANGE_MARGIN - h).max(ARRANGE_MARGIN),
-        w,
-        h,
+    let (cell_w, cell_h) = loose_cell_size(icon);
+    // 纵向一格的完整占位（含行距）—— 用「能放下几行」反推需要几列
+    let pitch_y = cell_h + GRID_GAP;
+    let avail_h = (work_h - 2 * ARRANGE_MARGIN).max(cell_h);
+    let rows_per_col = (avail_h / pitch_y).max(1);
+    let n = count as i64;
+    let columns = ((n + rows_per_col - 1) / rows_per_col).clamp(1, LOOSE_MAX_COLUMNS);
+    let rows = (n + columns - 1) / columns;
+    let w = (columns * cell_w + (columns - 1) * GRID_GAP)
+        .min((work_w - 2 * ARRANGE_MARGIN).max(cell_w));
+    let h = (rows * pitch_y - GRID_GAP).min(avail_h).max(cell_h);
+    Some(LooseStrip {
+        rect: SlotRect {
+            x: ARRANGE_MARGIN,
+            y: ARRANGE_MARGIN,
+            w,
+            h,
+        },
+        columns,
     })
 }
 
@@ -3180,6 +3240,9 @@ pub struct LooseEntry {
     pub name: String,
     pub is_dir: bool,
     pub is_lnk: bool,
+    /// 系统入口（此电脑 / 回收站 / 用户的文件）：`path` 是 shell CLSID，
+    /// 前端据此画专用图标（`SHGetFileInfo` 对 `::{...}` 不可靠）
+    pub is_system: bool,
 }
 
 /// 「不整理」区的完整状态（`grid_loose_list` 返回值）：矩形 + 里面的条目。
@@ -3191,6 +3254,9 @@ pub struct LooseArea {
     pub y: i64,
     pub width: i64,
     pub height: i64,
+    /// 竖条分几列（V42）：前端用「等宽 × columns 列的网格」渲染，
+    /// 与后端的占位几何**严格一致** —— 差一列就会盖住旁边的分类格
+    pub columns: i64,
     /// 与格子同一档的图标尺寸（前端按它渲染条目图标）
     pub icon_size: i64,
     pub items: Vec<LooseEntry>,
@@ -3203,19 +3269,37 @@ impl LooseArea {
             y: 0,
             width: 0,
             height: 0,
+            columns: 0,
             icon_size: 0,
             items: Vec::new(),
         }
     }
 }
 
-/// 扫两个桌面根，挑出**没有被任何格子登记**的条目。
+/// 左侧竖条的内容：**系统入口 + 没被任何格子登记的桌面条目**。
 ///
-/// 排序刻意稳定（先文件夹、再快捷方式、其余按名字）：每次打开看到的顺序一样，
+/// V42 起快捷方式（`.lnk`）不再进格子（见 [`arrange_group_of`]），所以它们天然
+/// 「未登记」→ 自动出现在这里，无需特判。系统入口是虚拟条目（磁盘上没有对应文件），
+/// V42 起也不再进「系统」格，改为排在这条竖条的最前面。
+///
+/// 排序刻意稳定（系统 → 快捷方式 → 文件夹 → 其余按名字）：每次打开看到的顺序一样，
 /// 用户不会觉得「这堆东西自己在动」。
 fn loose_desktop_items(conn: &Connection) -> Result<Vec<LooseEntry>, String> {
     let registered = registered_paths(conn)?;
     let mut out: Vec<LooseEntry> = Vec::new();
+    // ① 系统入口（此电脑 / 回收站 / 用户的文件）
+    for (path, name) in SYSTEM_ENTRIES {
+        if !registered.contains(path) {
+            out.push(LooseEntry {
+                path: path.to_string(),
+                name: name.to_string(),
+                is_dir: false,
+                is_lnk: false,
+                is_system: true,
+            });
+        }
+    }
+    // ② 两个桌面根里没被登记过的条目（含全部快捷方式）
     for root in desktop_roots() {
         let Ok(items) = crate::commands::organizer::scan_items(&root) else {
             continue;
@@ -3229,6 +3313,7 @@ fn loose_desktop_items(conn: &Connection) -> Result<Vec<LooseEntry>, String> {
                 name: item.name,
                 is_dir: item.is_dir,
                 is_lnk: item.is_lnk,
+                is_system: false,
             });
         }
     }
@@ -3240,14 +3325,19 @@ fn loose_desktop_items(conn: &Connection) -> Result<Vec<LooseEntry>, String> {
     Ok(out)
 }
 
-/// 「不整理」区里的展示次序：文件夹 → 快捷方式 → 其他文件（与格子分区的心智一致）。
+/// 竖条里的展示次序：系统入口 → 快捷方式 → 文件夹 → 其他文件。
+///
+/// 用户 V42 原话「按照类型顺序排序从左上角依次排开」—— 系统与快捷方式是他点名要
+/// 摆在前面的两类（它们是「不需要分类」的那批）。
 fn loose_rank(entry: &LooseEntry) -> i64 {
-    if entry.is_dir {
+    if entry.is_system {
         0
     } else if entry.is_lnk {
         1
-    } else {
+    } else if entry.is_dir {
         2
+    } else {
+        3
     }
 }
 
@@ -3267,15 +3357,15 @@ pub async fn grid_loose_list(app: AppHandle) -> Result<LooseArea, String> {
     if items.is_empty() {
         return Ok(LooseArea::empty());
     }
-    let col_w = existing_standard_width(&conn, work_w);
-    let Some(rect) = loose_area_rect(work_w, work_h, items.len(), icon, col_w) else {
+    let Some(strip) = loose_strip_rect(work_w, work_h, items.len(), icon) else {
         return Ok(LooseArea::empty());
     };
     Ok(LooseArea {
-        x: rect.x,
-        y: rect.y,
-        width: rect.w,
-        height: rect.h,
+        x: strip.rect.x,
+        y: strip.rect.y,
+        width: strip.rect.w,
+        height: strip.rect.h,
+        columns: strip.columns,
         icon_size: icon,
         items,
     })
@@ -3386,97 +3476,70 @@ fn layout_all_boxes_with(
         blocked.push(rect);
     }
 
-    // —— ②′ 「不整理」区（V41）同样是禁区 ——
+    // —— ②′ 左侧「未归类」竖条（V42）同样是禁区 ——
     //
-    // 落单条目（没被任何格子登记的）会在**左下角**画一块 —— 分类格必须绕开它，
-    // 否则会盖住用户刚从格子里移出来的东西（那仍是「移除了却看不见」）。
-    // `loose_count` 由 [`layout_all_boxes`] 统一统计（测试可注入）。
-    if let Some(rect) = loose_area_rect(work_w, work_h, loose_count, icon, std_w) {
-        blocked.push(rect);
+    // 系统入口 + 快捷方式 + 落单条目都排在**左上角**那条竖条里，分类格必须整体绕开它，
+    // 否则会盖住用户点名要「依次展示」的快捷方式。`loose_count` 由 [`layout_all_boxes`]
+    // 统一统计（测试可注入），竖条几何由 [`loose_strip_rect`] 用**同一套度量**算出 ——
+    // 前端渲染的竖条与这里的占位因此严丝合缝。
+    let strip = loose_strip_rect(work_w, work_h, loose_count, icon);
+    if let Some(strip) = strip {
+        blocked.push(strip.rect);
     }
+    // 分类格的**左边界** = 竖条右沿 + 列间距；没有竖条时就是普通左边距
+    let min_x = match strip {
+        Some(s) => s.rect.x + s.rect.w + ARRANGE_GAP_X,
+        None => ARRANGE_MARGIN,
+    };
 
-    // —— ③ 三段排布（V41）——
+    // —— ③ 镜像流布（V42）——
     //
-    // 用户 V41 原话：「挂件默认从右上角开始布局，系统 + 快捷方式从左上布局，
-    // 中间剩余其他分类自动分类布局」。于是：
-    //   · 左上固定列（第 0 列）= 系统 + 快捷方式，按类型顺序自上而下；
-    //   · 中段（第 1 列起）= 其余分类格，左起首次适配流布；
-    //   · 右上角 = 挂件（② 已归位，且作为禁区让格子绕开）。
+    // 用户 V42 原话：「左边部分是不需要分类的快捷方式依次展示，右边是从挂件到其他整理，
+    // 从右上角依次顺序排开，自动计算高度展开所有格子高度」。于是：
+    //   · 左 = 竖条（②′ 已占位，纯图标，不是格子）；
+    //   · 右上角 = 挂件（② 已归位，同角落竖排）；
+    //   · 分类格 = **从最右一列起、自右向左**首次适配流布（`mirror = true`），
+    //     第一格自然落在挂件正下方 —— 正是「从挂件到其他整理」的顺序。
     //
-    // 固定列与流布**共用同一个 placer**：固定列先把第 0 列从上往下占掉，中段流布
-    // 从第 1 列开始 —— 两边互不知道对方，却因为共用 `blocked` 而不会撞在一起。
-    let mut pinned: Vec<&GridBoxRect> = content
-        .iter()
-        .copied()
-        .filter(|r| r.is_left_pinned())
-        .collect();
-    // 系统在前、快捷方式其次（用户要求「按类型顺序排序」）；同类多个时保持 sort 顺序
-    pinned.sort_by_key(|r| left_pin_rank(r));
-    // `content` 已按 `sort, id` 排过（`load_box_rects` 的 ORDER BY），filter 保序
-    let flowing: Vec<&GridBoxRect> = content
-        .iter()
-        .copied()
-        .filter(|r| !r.is_left_pinned())
-        .collect();
-
-    let left_count = pinned.len();
-    let flow_count = flowing.len();
+    // V41 的「左上角固定列（系统 / 快捷方式两格）」在这里整体作废：那两类现在根本不进
+    // 格子（见 [`arrange_group_of`] 与 [`dissolve_auto_boxes`]）。
     let col_w = std_w;
-    let mut placer = FlowPlacer::new(work_w, work_h, col_w, blocked);
-    for box_rect in pinned {
+    let mut placer = FlowPlacer::with_bounds(work_w, work_h, col_w, blocked, true, min_x);
+    for box_rect in content.iter().copied() {
         let size = sizes
             .get(&box_rect.id)
             .copied()
             .unwrap_or((box_rect.w, box_rect.h));
-        place_content_box(conn, &mut placer, box_rect, size, true, &mut outcome)?;
-    }
-    for box_rect in flowing {
-        let size = sizes
-            .get(&box_rect.id)
-            .copied()
-            .unwrap_or((box_rect.w, box_rect.h));
-        place_content_box(conn, &mut placer, box_rect, size, false, &mut outcome)?;
+        place_content_box(conn, &mut placer, box_rect, size, &mut outcome)?;
     }
 
     grid_log(&format!(
-        "整理布局：工作区 {work_w}×{work_h}，统一列宽 {col_w}（左上固定列 {left_count} 个 / \
-         中段流布 {flow_count} 个），挪动 {} 个 / 按内容调整 {} 个尺寸 / 挂件归位 {} 个 / \
-         空间不足 {} 个 / 落单 {loose_count} 个",
-        outcome.moved, outcome.resized, outcome.anchored, outcome.overflowed
+        "整理布局：工作区 {work_w}×{work_h}，统一列宽 {col_w}（镜像流布 {flow_count} 个格子，\
+         左界 {min_x}），挪动 {} 个 / 按内容调整 {} 个尺寸 / 挂件归位 {} 个 / \
+         空间不足 {} 个 / 未归类 {loose_count} 个",
+        outcome.moved,
+        outcome.resized,
+        outcome.anchored,
+        outcome.overflowed,
+        flow_count = content.len(),
     ));
     Ok(outcome)
 }
 
-/// 把一个收纳格按「固定列 / 中段流布」落位并写库（V41 三段排布的落子步骤）。
+/// 把一个收纳格按**镜像流布**落位并写库（V42 的落子步骤）。
 ///
-/// - `pinned = true`（系统 / 快捷方式）：必须留在第 0 列（[`FlowPlacer::place_in_column`]），
-///   真装不下也只在这一列里兜底（`place_loose_at(0)`）并计入 `overflowed` ——
-///   固定列的意义就是「永远在左上角」，挪去别的列等于没钉；
-/// - `pinned = false`（其余分类格）：从固定列之后一列起流布（[`FlowPlacer::next_from`]），
-///   右边全满再退回第 0 列试一次，仍不行才 `place_loose` 兜底并计入 `overflowed`。
-///
-/// 落位与旧坐标不同才写库、才计入 `moved` —— 对账式的写法让「位置没变的格子」
-/// 不会产生无谓的 UPDATE 与日志噪音。
+/// 从第 0 列（= 最右一列）起逐列向左首次适配（[`FlowPlacer::next_from`]）；整片都排不下
+/// 才 `place_loose` 兜底并计入 `overflowed`。落位与旧坐标不同才写库、才计入 `moved` ——
+/// 对账式的写法让「位置没变的格子」不会产生无谓的 UPDATE 与日志噪音。
 fn place_content_box(
     conn: &Connection,
     placer: &mut FlowPlacer,
     box_rect: &GridBoxRect,
     size: (i64, i64),
-    pinned: bool,
     outcome: &mut LayoutOutcome,
 ) -> Result<(), String> {
     let (w, h) = size;
-    let slot = if pinned {
-        match placer.place_in_column(0, w, h) {
-            Some(slot) => slot,
-            None => {
-                outcome.overflowed += 1;
-                placer.place_loose_at(0, w, h)
-            }
-        }
-    } else if let Some(slot) = placer.next_from(LEFT_PIN_COLUMNS, w, h) {
-        slot
-    } else if let Some(slot) = placer.next_from(0, w, h) {
+    let slot = if let Some(slot) = placer.next_from(0, w, h) {
         slot
     } else {
         outcome.overflowed += 1;
@@ -3534,8 +3597,15 @@ pub struct AutoArrangeReport {
     pub items_added: usize,
     /// 其中文件夹占的数量
     pub folders_moved: usize,
-    /// 其中快捷方式（`.lnk`）占的数量
+    /// 本次登记里快捷方式（`.lnk`）占的数量 —— V42 起**恒为 0**
+    /// （快捷方式不再进格子，改由左侧「未归类」竖条展示）
     pub lnk_added: usize,
+    /// V42：本次扫描里**没进格子**、留在左侧竖条的条目数（快捷方式 + 系统入口 + 落单）
+    pub left_over: usize,
+    /// V42：本次解散掉的历史「系统」/「快捷方式」格数量
+    pub dissolved_boxes: usize,
+    /// V42：本次从各格子里摘掉的快捷方式 / 系统入口登记条数（只删登记，文件不动）
+    pub dissolved_items: usize,
     /// 本次新建的格子数
     pub boxes_created: usize,
     /// 复用了同名已有格子的次数
@@ -3560,87 +3630,81 @@ pub struct AutoArrangeReport {
     pub failures: Vec<String>,
 }
 
-/// 把扫描结果归入「格子名」：快捷方式 / 文件夹各自单独一组，其余按扩展名类别分组。
+/// 把扫描结果归入「格子名」；`None` = **这一项不进格子**，留在左侧竖条里。
 ///
-/// ⚠️ `.lnk` 必须归类（V38 改）：V34 时用户说过「原生快捷方式不需要动态整理」，
-/// 那是在**图标仍显示在桌面**的前提下。V38 起整理会隐藏系统桌面图标、由格子代管
-/// 桌面呈现 —— 这时若还跳过 `.lnk`，用户桌面上那二十几个程序快捷方式会**当场消失**
-/// 且无处可点。归类（只登记、不移动）才是安全的做法。
-fn arrange_group_of(item: &crate::commands::organizer::OrganizerItem) -> String {
+/// V42 起 `.lnk` 一律不进格子（用户原话：「不整理的和快捷方式别整理到格子了，他们就是
+/// 自动在桌面左上角从上往下排开即可，不需要放到格子里面，没有必要」）。
+///
+/// 这里要和 V38 的决定对照着看，才知道为什么现在能这么改：
+/// V38 之所以反过来把 `.lnk` 塞进格子，是因为**整理会隐藏系统桌面图标，而当时没有任何
+/// 地方能显示它们** —— 不登记就等于快捷方式当场消失。V42 补上了左侧「未归类」竖条
+/// （[`loose_strip_rect`]，前端按纯图标渲染），快捷方式有了自己的展示位，前提再次成立：
+/// 不登记 → 出现在竖条里 → 看得见、点得开、还能随时拖进格子。
+fn arrange_group_of(item: &crate::commands::organizer::OrganizerItem) -> Option<String> {
     if item.is_lnk {
-        return "快捷方式".to_string();
+        return None;
     }
     if item.is_dir {
-        return "文件夹".to_string();
+        return Some("文件夹".to_string());
     }
     if item.category.is_empty() {
-        return "其他".to_string();
+        return Some("其他".to_string());
     }
-    item.category.clone()
+    Some(item.category.clone())
 }
 
-/// 分组展示顺序：文件夹最前，快捷方式其次（桌面上最常用），「其他」最后。
+/// 分组展示顺序：文件夹最前，「其他」最后，其余按扩展名类别居中。
 fn arrange_group_rank(name: &str) -> i64 {
     match name {
         "文件夹" => 0,
-        "快捷方式" => 1,
         "其他" => 3,
         _ => 2,
     }
 }
 
-/// 「系统」格里的虚拟条目：Explorer **恒定显示**、磁盘上没有对应文件的桌面入口。
+/// 清掉「不该进格子」的登记与格子（V42）—— 每次整理都跑一遍，幂等。
 ///
-/// 为什么 V38 又把它们请回来：V34 删掉「系统」格的依据是「此电脑 / 回收站本来就一直
-/// 显示在桌面上，格子里那份纯属重复」。而现在整理会**隐藏原生桌面图标**，那三个入口
-/// 若没人接管就彻底点不到了 —— 前提变了，结论就得跟着变。
+/// 两件事：
+///   ① **把快捷方式 / 系统入口的登记从所有格子里摘掉**（含用户手工拖进去的）——
+///      用户要的是「快捷方式别整理到格子」，留一两个在格子里就不算做到；
+///   ② **解散「系统」「快捷方式」这两个专用格**（V41 建的）—— 它们空了还占着位置，
+///      而且名字本身就在暗示「快捷方式该在格子里」，与 V42 的规则冲突。
+///
+/// 只删 `grid_items` 登记行与空的格子行 —— **文件本体一个字节都不动**（V37 呈现层模型）。
+/// 返回 `(解散的格子数, 摘掉的登记数)`，进日志。
+fn dissolve_auto_boxes(conn: &Connection) -> Result<(usize, usize), String> {
+    let removed_items = conn
+        .execute(
+            // `::` 开头 = shell 命名空间（此电脑 / 回收站 / 用户的文件）；`.lnk` 不区分大小写
+            "DELETE FROM grid_items \
+             WHERE file_path LIKE '::%' OR lower(file_path) LIKE '%.lnk'",
+            [],
+        )
+        .map_err(|err| format!("摘除快捷方式 / 系统登记失败：{err}"))?;
+    let removed_boxes = conn
+        .execute(
+            "DELETE FROM grid_boxes \
+             WHERE kind = 'system' OR name = '快捷方式' OR category = '快捷方式'",
+            [],
+        )
+        .map_err(|err| format!("解散「系统」/「快捷方式」格失败：{err}"))?;
+    Ok((removed_boxes, removed_items))
+}
+
+/// 系统入口：Explorer **恒定显示**、磁盘上没有对应文件的桌面入口。
 ///
 /// 路径是 shell 命名空间 CLSID，`grid_open_path` 用 `ShellExecuteW` 直接打开；
 /// `list_live_items` 对 `::` 开头显式豁免存在性校验（否则会被当成失效登记清掉）。
+///
+/// V42 起它们**不再进「系统」格**（用户原话：「我们系统图标如我的电脑等不主动整理」），
+/// 而是排在左侧「未归类」竖条的最前面（见 [`loose_desktop_items`]）。于是
+/// `grid_boxes` 里不再有 `kind = 'system'` 的格子，[`dissolve_auto_boxes`] 负责清掉
+/// 历史遗留的那些。
 const SYSTEM_ENTRIES: [(&str, &str); 3] = [
     ("::{20D04FE0-3AEA-1069-A2D8-08002B30309D}", "此电脑"),
     ("::{645FF040-5081-101B-9F08-00AA002F954E}", "回收站"),
     ("::{59031A47-3F72-44A7-89C5-5595FE6B30EE}", "用户的文件"),
 ];
-
-/// 确保存在「系统」格并补齐三个系统入口（幂等）。
-fn ensure_system_box(conn: &Connection) -> Result<i64, String> {
-    let existing: Option<i64> = conn
-        .query_row(
-            "SELECT id FROM grid_boxes WHERE name = ?1 AND kind = 'system' ORDER BY id LIMIT 1",
-            params!["系统"],
-            |row| row.get(0),
-        )
-        .ok();
-    let box_id = match existing {
-        Some(id) => id,
-        None => {
-            let now = now_iso();
-            let sort = next_sort(conn, "SELECT COALESCE(MAX(sort) + 1, 0) FROM grid_boxes", None)?;
-            conn.execute(
-                "INSERT INTO grid_boxes \
-                 (name, kind, category, pos_x, pos_y, width, height, sort, created_at, updated_at) \
-                 VALUES ('系统', 'system', '', ?1, ?2, ?3, ?4, ?5, ?6, ?6)",
-                params![
-                    ARRANGE_MARGIN,
-                    ARRANGE_MARGIN,
-                    ARRANGE_BOX_W,
-                    MIN_BOX_H + 80,
-                    sort,
-                    now,
-                ],
-            )
-            .map_err(|err| format!("创建「系统」格失败：{err}"))?;
-            conn.last_insert_rowid()
-        }
-    };
-    // 三个入口都是虚拟路径，register_item 会照常做「已存在 / 用户说过不要 / 已归属」
-    // 三重检查，所以这里重复调用是幂等的
-    for (path, name) in SYSTEM_ENTRIES {
-        let _ = register_item(conn, box_id, Path::new(path), name);
-    }
-    Ok(box_id)
-}
 
 /// 一键归类核心（连接与桌面根目录由调用方给定）。
 ///
@@ -3707,8 +3771,14 @@ fn auto_arrange_inner(
     // 用户原话：「你看桌面上面那么多文件文件夹都没有整理好呢」。
     // 它们现在按普通文件夹进「文件夹」格；要收回/清理走「诊断与修复」（按前缀识别）。
     let mut grouped: Vec<(String, Vec<usize>)> = Vec::new();
+    // V42：`arrange_group_of` 返回 `None` 的条目**不进格子**（快捷方式），它们会在
+    // 左侧「未归类」竖条里按类型顺序排开 —— 数一下进回报，前端好如实告诉用户。
+    let mut left_over = 0usize;
     for (index, item) in scanned.iter().enumerate() {
-        let key = arrange_group_of(item);
+        let Some(key) = arrange_group_of(item) else {
+            left_over += 1;
+            continue;
+        };
         match grouped.iter_mut().find(|(name, _)| *name == key) {
             Some((_, bucket)) => bucket.push(index),
             None => grouped.push((key, vec![index])),
@@ -3721,6 +3791,9 @@ fn auto_arrange_inner(
         items_added: 0,
         folders_moved: 0,
         lnk_added: 0,
+        left_over: 0,
+        dissolved_boxes: 0,
+        dissolved_items: 0,
         boxes_created: 0,
         boxes_reused: 0,
         skipped: 0,
@@ -3796,13 +3869,16 @@ fn auto_arrange_inner(
         }
     }
 
-    // 系统入口格（此电脑 / 回收站 / 用户文件夹）：整理后原生图标由格子接管，
-    // 这几个 Explorer 恒定显示的入口必须由格子补回来，否则用户就点不到它们了。
-    if report.items_added > 0 {
-        ensure_system_box(conn)?;
-    }
+    // 先摘掉「不该进格子」的登记并解散「系统」/「快捷方式」两个专用格（V42，幂等）。
+    // 放在登记之前：否则这一步会把本次刚登记进去的快捷方式又摘一遍（结果虽一样，
+    // 但 `items_added` 的语义会变成「登记了多少又摘了多少」，用户看着莫名其妙）。
+    let (dissolved_boxes, dissolved_items) = dissolve_auto_boxes(conn)?;
+    report.dissolved_boxes = dissolved_boxes;
+    report.dissolved_items = dissolved_items;
+    report.left_over = left_over;
 
-    // 全量重排（含复用与新建设立的格子）：挂件归位 → 统一列宽 + 按内容定高度 → 左起首次适配流布
+    // 全量重排（含复用与新建设立的格子）：挂件归位 → 统一列宽 + 按内容定高度 →
+    // 镜像（自右向左）首次适配流布 + 左侧「未归类」竖条占位
     let outcome = layout_all_boxes(conn, work_width, work_height, layout_icon_size())?;
     report.boxes_laid_out = outcome.moved;
     report.boxes_resized = outcome.resized;
@@ -3810,14 +3886,16 @@ fn auto_arrange_inner(
     report.boxes_overflowed = outcome.overflowed;
 
     grid_log(&format!(
-        "一键整理：扫到 {} 项（{} 个桌面根），登记 {} 项（文件全部原地未动，含快捷方式 {}、\
-         文件夹 {}），格子新建 {} / 复用 {} / 重排 {} / 按内容调尺寸 {} / \
-         挂件归位 {} / 空间不足 {}，失败 {}",
+        "一键整理：扫到 {} 项（{} 个桌面根），登记 {} 项（文件全部原地未动，含文件夹 {}），\
+         未归类留在左侧竖条 {} 项；解散旧格 {} 个 / 摘除快捷方式与系统登记 {} 条；\
+         格子新建 {} / 复用 {} / 重排 {} / 按内容调尺寸 {} / 挂件归位 {} / 空间不足 {}，失败 {}",
         report.scanned,
         roots.len(),
         report.items_added,
-        report.lnk_added,
         report.folders_moved,
+        report.left_over,
+        report.dissolved_boxes,
+        report.dissolved_items,
         report.boxes_created,
         report.boxes_reused,
         report.boxes_laid_out,
@@ -3878,15 +3956,19 @@ fn layout_work_size(app: &AppHandle) -> (i64, i64) {
 
 /// 一键整理桌面 —— 「桌面整理」模块的主入口（工具栏的整理按钮也走这里）。
 ///
-/// 一次点击做完五件事（用户原话：「我点击整理应该是自动整理规划桌面」）：
-///   ① 扫桌面 → 按类型（文件夹 / 快捷方式 / 图片 / 文档 / 压缩包 / 安装包 / 其他）分组；
-///   ② **只登记引用**：文件一个字节都不动（V37 呈现层模型）；
-///   ③ 每个类别一个格子，同名格子复用；
-///   ④ **全量重排**所有格子（左起流布局 + 统一列宽，避开便签 / 日历挂件）；
-///   ⑤ 补上「系统」格（此电脑 / 回收站 / 用户文件夹）并**隐藏系统桌面图标** ——
-///      桌面呈现此后完全由格子层负责，同一份内容不会再显示两遍。
-///      这一步的偏好记在 `grid_meta.desktop_takeover`，收起挂件 / 退出应用都会
-///      立刻把图标还给系统；工具栏的「原生桌面图标」开关可随时切回共存模式。
+/// 一次点击做完五件事（用户原话：「每次点击整理桌面，应该重新计算桌面所有的内容，
+/// 按照分类排开」）：
+///   ① **重新扫一遍桌面**（用户桌面 + 公共桌面，全量重算，不受上次结果影响）；
+///   ② 按类型分组的**只登记引用**：文件夹 / 图片 / 文档 / 压缩包 / 安装包 / 其他 ——
+///      文件一个字节都不动（V37 呈现层模型）；
+///   ③ **快捷方式与系统入口不进格子**（V42）：它们排在左侧「未归类」竖条里，
+///      按 系统 → 快捷方式 → 文件夹 → 其他 的顺序自上而下；同时**摘掉**历史遗留在
+///      各格子里的快捷方式 / 系统登记，并解散 V41 建的「系统」「快捷方式」两个专用格；
+///   ④ **全量重排**所有格子：统一列宽 + 高度按内容撑开（默认不出滚动条）+
+///      **镜像流布**（自最右一列向左，挂件先占右上角，分类格从它下面接着排）；
+///   ⑤ **隐藏系统桌面图标**（接管）—— 桌面呈现此后完全由格子层 + 左侧竖条负责，
+///      同一份内容不会再显示两遍。这一步的偏好记在 `grid_meta.desktop_takeover`，
+///      收起挂件 / 退出应用都会立刻把图标还给系统；工具栏的「接管图标」开关可随时切回共存。
 ///
 /// `dir` 仅供测试 / 自定义目录，缺省为用户桌面。
 #[tauri::command]
@@ -5227,10 +5309,11 @@ mod z_verdict_tests {
 mod flow_placer_tests {
     use super::{
         anchor_widget, auto_box_size, box_height_at, desired_box_width, is_content_kind,
-        item_columns_at, loose_area_rect, standard_box_width, widget_corner, FlowPlacer, SlotRect,
-        WidgetCorner,
+        item_columns_at, loose_cell_size, loose_strip_rect, standard_box_width, widget_corner,
+        FlowPlacer, SlotRect, WidgetCorner,
         ARRANGE_BOX_W, ARRANGE_GAP_X, ARRANGE_GAP_Y, ARRANGE_MARGIN, AUTO_MAX_W, BOX_BORDER_H,
-        BOX_HEADER_H, CELL_EXTRA_H, CELL_EXTRA_W, GRID_GAP, GRID_PAD, MIN_BOX_H, MIN_BOX_W,
+        BOX_HEADER_H, CELL_EXTRA_H, CELL_EXTRA_W, GRID_GAP, GRID_PAD, LOOSE_MAX_COLUMNS,
+        MIN_BOX_H, MIN_BOX_W,
     };
 
     fn overlap(a: &SlotRect, b: &SlotRect) -> bool {
@@ -5583,17 +5666,61 @@ mod flow_placer_tests {
     // —————————————— 挂件锚点 ——————————————
 
     #[test]
-    fn loose_area_sits_at_the_bottom_left_and_only_when_needed() {
-        // 「不整理」区（V41）：没有落单条目就什么都不占；有则钉在左下角 ——
-        // 左上是固定列、中段是分类格、右上是挂件，唯一不打架的角落就是左下
+    fn loose_strip_sits_at_the_top_left_and_only_when_needed() {
+        // 左侧「未归类」竖条（V42）：没有未归类条目就什么都不占；有则贴在**左上角**，
+        // 按「一列放得下几行」决定分几列 —— 用户原话「他们就是自动在桌面左上角
+        // 从上往下排开即可」。
         assert!(
-            loose_area_rect(WORK_W, WORK_H, 0, 32, 300).is_none(),
-            "没有落单条目不得占位"
+            loose_strip_rect(WORK_W, WORK_H, 0, 32).is_none(),
+            "没有未归类条目不得占位"
         );
-        let rect = loose_area_rect(WORK_W, WORK_H, 5, 32, 300).expect("有落单条目必须有区域");
-        assert_eq!(rect.x, ARRANGE_MARGIN, "贴左边界");
-        assert_eq!(rect.y + rect.h, WORK_H - ARRANGE_MARGIN, "贴下边界");
-        assert_eq!(rect.w, 300, "宽度 = 整批统一列宽");
+        let strip = loose_strip_rect(WORK_W, WORK_H, 5, 32).expect("有未归类条目必须有区域");
+        assert_eq!(strip.rect.x, ARRANGE_MARGIN, "贴左边界");
+        assert_eq!(strip.rect.y, ARRANGE_MARGIN, "贴上边界（V41 是贴下边界）");
+        assert_eq!(strip.columns, 1, "5 条在 1080 高的工作区里一列就放得下");
+
+        // 窄格位、单列：宽度 = 单元格宽（图标 + CELL_EXTRA_W），不是「整批统一列宽」——
+        // 竖条是纯图标条，不该跟收纳格一样宽，否则左半边白白被吃掉
+        let (cell_w, cell_h) = loose_cell_size(32);
+        assert_eq!(strip.rect.w, cell_w);
+        assert_eq!(strip.rect.h, 5 * cell_h + 4 * GRID_GAP);
+
+        // 条目多到一列放不下 → 往右铺成多列，且**不超过列数上限**
+        let many = loose_strip_rect(WORK_W, WORK_H, 400, 32).expect("必须有区域");
+        assert_eq!(many.columns, LOOSE_MAX_COLUMNS, "列数被上限夹住");
+        assert_eq!(many.rect.w, LOOSE_MAX_COLUMNS * cell_w + (LOOSE_MAX_COLUMNS - 1) * GRID_GAP);
+        assert!(
+            many.rect.y + many.rect.h <= WORK_H - ARRANGE_MARGIN,
+            "竖条不得越出下边界"
+        );
+    }
+
+    #[test]
+    fn mirrored_flow_starts_at_the_right_edge() {
+        // V42：分类格从**最右一列**起、自右向左流布（用户原话「右边是从挂件到其他整理，
+        // 从右上角依次顺序排开」）。
+        let col_w = 300;
+        let mut placer = FlowPlacer::with_bounds(WORK_W, WORK_H, col_w, Vec::new(), true, 240);
+        assert_eq!(
+            placer.col_left(0),
+            WORK_W - ARRANGE_MARGIN - col_w,
+            "第 0 列必须贴右边界"
+        );
+        assert_eq!(placer.col_left(1), WORK_W - ARRANGE_MARGIN - col_w - (col_w + ARRANGE_GAP_X));
+
+        // 第一个格子贴右上；第二个接在它下面（同列首次适配）
+        let first = placer.next_from(0, col_w, 200).expect("第一个格子放得下");
+        assert_eq!(first, (WORK_W - ARRANGE_MARGIN - col_w, ARRANGE_MARGIN));
+        let second = placer.next_from(0, col_w, 200).expect("第二个格子放得下");
+        assert_eq!(second.1, ARRANGE_MARGIN + 200 + ARRANGE_GAP_Y, "同列往下接");
+
+        // 左边界（留给左侧竖条）：列号够到 min_x 就必须停 —— 再往左就压到快捷方式上了
+        let wide = FlowPlacer::with_bounds(WORK_W, WORK_H, col_w, Vec::new(), true, WORK_W - 380);
+        assert_eq!(wide.max_columns, 1, "只容得下一列");
+        assert!(
+            wide.col_left(0) >= WORK_W - 380,
+            "唯一一列也必须落在左边界右侧"
+        );
     }
 
     #[test]
@@ -5680,11 +5807,12 @@ mod layout_pipeline_tests {
     ///
     /// 坐标不写死（第一遍会被排布覆盖），但宽度**照抄 V39 的真实值**：正是这堆
     /// 160 / 228 / 300 让桌面看着没对齐。
-    const REAL_BOXES: [(&str, &str, usize, i64, i64); 11] = [
+    /// **V42 起库里不再有「系统」「快捷方式」两格**：它们被 [`dissolve_auto_boxes`]
+    /// 解散了（那两类现在排在左侧竖条里，不进格子）。所以这份样本也照 V42 之后的
+    /// 真实形状来 —— 9 格：2 个挂件 + 7 个分类格。
+    const REAL_BOXES: [(&str, &str, usize, i64, i64); 9] = [
         ("便签", "note", 0, 260, 220),
         ("日历 · 今日计划", "calendar", 0, 460, 638),
-        ("系统", "system", 3, 320, 200),
-        ("快捷方式", "folder", 21, 300, 442),
         ("文档", "folder", 16, 300, 310),
         ("其他", "folder", 8, 228, 244),
         ("压缩包", "folder", 2, 160, 120),
@@ -5710,8 +5838,6 @@ mod layout_pipeline_tests {
         let stale = [
             (32i64, 660i64),
             (1215, 32),
-            (32, 436),
-            (41, 34),
             (403, 32),
             (799, 176),
             (867, 32),
@@ -5810,7 +5936,11 @@ mod layout_pipeline_tests {
         );
 
         let content: Vec<&BoxRow> = boxes.iter().filter(|b| is_content(&b.kind)).collect();
-        assert_eq!(content.len(), 9, "9 个收纳格（含系统格）");
+        assert_eq!(content.len(), 7, "7 个分类格（V42：系统 / 快捷方式不再建格）");
+        assert!(
+            boxes.iter().all(|b| b.kind != "system"),
+            "V42 起库里不该再有「系统」格"
+        );
 
         // 硬条件 ①：**列宽统一** —— 用户 V40「宽度对齐」的直接检验
         let widths: std::collections::BTreeSet<i64> = content.iter().map(|b| b.w).collect();
@@ -5820,48 +5950,38 @@ mod layout_pipeline_tests {
             "所有收纳格必须同一个宽度（V39 是 160/228/300 三种混着）：{widths:?}"
         );
         let std_w = *widths.iter().next().unwrap();
-        assert_eq!(std_w, 300, "本批最宽的需求是 300（21 个条目那个格子）");
+        assert_eq!(std_w, 300, "本批最宽的需求是 300（16 个条目那个格子）");
 
-        // 硬条件 ②：**列位置落在等距网格上** —— 左边缘对齐，不多一个像素
+        // 硬条件 ②：**列位置落在等距网格上，且从右往左数**（V42 镜像流布）——
+        // 用户原话「右边是从挂件到其他整理，从右上角依次顺序排开」
         let pitch = std_w + ARRANGE_GAP_X;
+        let right_edge = WORK_W - ARRANGE_MARGIN;
         for b in &content {
             assert_eq!(
-                (b.x - ARRANGE_MARGIN) % pitch,
+                (right_edge - (b.x + b.w)) % pitch,
                 0,
-                "「{}」的 x={} 不在等距列网格上",
+                "「{}」的右边缘 {}=x+w 不在等距列网格上",
                 b.name,
-                b.x
+                b.x + b.w
             );
         }
-        // 左起：第一个格子必须在左上角（不回退到「靠右」）
+        // 自右向左：至少有一个分类格紧贴**最右可用列**，第一个格子也在右侧起排
+        // （不再是 V41「从最左列起排」）。
+        //
+        // 注意**不要**再断言「列偏移随 sort 单调不减」：首次适配会把后来那个矮格子
+        // 回填进高格子留下的右侧空位（实测：16 项的「文档」高 310 放不进日历右侧那道
+        // 缝，8 项的「其他」高 178 放得进去）。回填正是流布局该有的打包行为，
+        // 断言单调只会逼它留洞。
+        let offsets: Vec<i64> = content.iter().map(|b| right_edge - (b.x + b.w)).collect();
+        let min_offset = *offsets.iter().min().unwrap();
         assert!(
-            content.iter().any(|b| b.x == ARRANGE_MARGIN),
-            "至少一个格子落在最左列"
+            min_offset <= pitch,
+            "至少一个分类格要紧贴最右可用列（挂件占掉的那两列之后），实际列偏移：{offsets:?}"
         );
-
-        // 硬条件 ⑤（V41 三段排布）：**系统 + 快捷方式钉在左上角固定列**，其余分类格
-        // 从第 1 列起流布 —— 用户原话：「系统+快捷方式从左上布局，中间剩余其他分类
-        // 自动分类布局」
-        for name in ["系统", "快捷方式"] {
-            let pinned = content
-                .iter()
-                .find(|b| b.name == name)
-                .unwrap_or_else(|| panic!("找不到「{name}」"));
-            assert_eq!(
-                pinned.x, ARRANGE_MARGIN,
-                "「{name}」必须钉在第 0 列（左上角固定列）"
-            );
-        }
-        for b in content
-            .iter()
-            .filter(|b| b.name != "系统" && b.name != "快捷方式")
-        {
-            assert!(
-                b.x >= ARRANGE_MARGIN + std_w + ARRANGE_GAP_X,
-                "「{}」不该挤进左上角固定列",
-                b.name
-            );
-        }
+        assert!(
+            *offsets.first().unwrap() <= 2 * pitch,
+            "第一个分类格必须从右侧起排，实际列偏移：{offsets:?}"
+        );
 
         // 硬条件 ③：全部落在工作区内，且两两不重叠（挂件也算进来）
         let rects: Vec<(&str, SlotRect)> = boxes
@@ -5914,10 +6034,6 @@ mod layout_pipeline_tests {
                 .unwrap_or_else(|| panic!("找不到格子「{name}」"))
                 .h
         };
-        assert!(
-            height_of("快捷方式") > height_of("文档"),
-            "21 项的格子必须比 16 项的高"
-        );
         assert!(
             height_of("文档") > height_of("其他"),
             "16 项的格子必须比 8 项的高"
@@ -5984,20 +6100,51 @@ mod layout_pipeline_tests {
                 h: b.h,
             };
             assert!(!r.intersects(&calendar_rect), "格子「{}」压到了日历上", b.name);
+            // 注意 V41 这里还断过「格子必须在日历左边或正下方」。V42 改镜像流布之后
+            // 不再成立、也不该成立：日历（460×638）钉在右上角、便签叠在它上方，
+            // 分类格自右向左首次适配时，日历**上方那道横向空隙**（y < 日历.y）里
+            // 塞得下一个矮格子 —— 那是流布局的正常结果，只要不重叠就对。
+        }
+        // 挂件仍然钉在最右侧一列（贴右边界）
+        assert_eq!(calendar_rect.x + calendar_rect.w, WORK_W - ARRANGE_MARGIN);
+    }
+
+    #[test]
+    fn content_boxes_stay_clear_of_the_left_loose_strip() {
+        // V42：左侧那条「未归类」竖条（系统 + 快捷方式 + 落单）占住左上角之后，
+        // 分类格**一个像素都不许压过去** —— 用户点名要那些快捷方式「依次展示」，
+        // 被格子盖住就白搭了。
+        let (path, conn) = temp_conn("strip");
+        seed_real_boxes(&conn);
+        // 注入 30 条未归类条目：19 行/列 → 3 列，宽 284、高 656 的一块
+        let loose_count = 30usize;
+        layout_all_boxes_with(&conn, WORK_W, WORK_H, ICON, loose_count).expect("排布失败");
+        let boxes = read_boxes(&conn);
+        let _ = std::fs::remove_file(&path);
+
+        let strip = super::loose_strip_rect(WORK_W, WORK_H, loose_count, ICON)
+            .expect("有未归类条目必须有竖条");
+        assert_eq!(strip.rect.x, ARRANGE_MARGIN);
+        assert_eq!(strip.rect.y, ARRANGE_MARGIN);
+        let strip_rect = strip.rect;
+        for b in boxes.iter().filter(|b| is_content(&b.kind)) {
+            let r = SlotRect {
+                x: b.x,
+                y: b.y,
+                w: b.w,
+                h: b.h,
+            };
             assert!(
-                r.x + r.w <= calendar_rect.x
-                    || r.y >= calendar_rect.y + calendar_rect.h + ARRANGE_GAP_Y,
-                "格子「{}」既不在日历左边也不在其正下方（V41：右上角整片归挂件）",
+                !r.intersects(&strip_rect),
+                "格子「{}」压到了左侧「未归类」竖条上",
                 b.name
             );
-        }
-        // 固定列（V41）：系统 / 快捷方式永远在第 0 列
-        for name in ["系统", "快捷方式"] {
-            let pinned = boxes
-                .iter()
-                .find(|b| b.name == name)
-                .unwrap_or_else(|| panic!("找不到「{name}」"));
-            assert_eq!(pinned.x, ARRANGE_MARGIN, "「{name}」必须钉在第 0 列");
+            assert!(
+                b.x >= strip_rect.x + strip_rect.w,
+                "格子「{}」挤进了竖条的横向区间（竖条右沿 = {}）",
+                b.name,
+                strip_rect.x + strip_rect.w
+            );
         }
     }
 }

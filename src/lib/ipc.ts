@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { isTauri } from '@/platform/detect';
 import { diagLog } from '@/lib/diag';
 import type { PlatformInfo } from '@/types/platform';
 import type {
@@ -49,6 +50,11 @@ import type { Todo } from '@/core/data/todosService';
  * - Rust 命令返回 `Result<T, String>`，此处统一归一为 `Error`，`message` 为中文可读信息。
  */
 async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  // 浏览器预览模式：没有 Tauri 宿主，任何系统能力都不可用。
+  // 统一抛出可读的降级文案，避免每个页面各自冒「Cannot read properties of undefined (reading 'invoke')」
+  if (!isTauri()) {
+    throw new Error('浏览器预览模式：该功能需要 Handy 桌面版');
+  }
   const started = performance.now();
   // 看门狗：超过 5s 未返回则记入 Handy.log（不 reject，仅诊断「永久挂起」类问题）
   let pendingLogged = false;
@@ -286,7 +292,7 @@ export const ipc = {
   gridOpenPath: (path: string): Promise<void> => call<void>('grid_open_path', { path }),
   /** 在资源管理器中定位该文件（V41 条目右键「打开文件位置」，explorer /select） */
   gridRevealPath: (path: string): Promise<void> => call<void>('grid_reveal_path', { path }),
-  /** 「不整理」区当前状态（V41）：矩形 + 落单条目；width=0 表示没有落单条目 */
+  /** 左侧「未归类」竖条当前状态（V42）：几何 + 分几列 + 条目；width=0 表示没有条目 */
   gridLooseList: (): Promise<LooseArea> => call<LooseArea>('grid_loose_list'),
   /** 提取文件/文件夹的系统真实图标（RGBA base64）；失败或不支持返回 null */
   gridFileIcon: (path: string): Promise<FileIconData | null> =>
@@ -367,6 +373,14 @@ export const ipc = {
    */
   barOpenCommand: (commandId: string): Promise<void> =>
     call<void>('bar_open_command', { commandId }),
+  /**
+   * 从**桌面层**（格子挂件窗 / 桌面快捷条）唤出主窗口并跳到指定视图（V42）。
+   *
+   * `target`：`module:<id>` 打开模块（如 `module:vault` = 密码存储器），其余按
+   * 工具 / 命令 id 处理（如 `timestamp`）。语义与 `bar_open_command` 完全一致。
+   */
+  desktopOpenView: (target: string): Promise<void> =>
+    call<void>('desktop_open_view', { target }),
 
   // —— 主窗口置顶（默认关；置顶会盖住其它程序，收敛为设置项由用户自选）——
 

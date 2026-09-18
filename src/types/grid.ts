@@ -63,20 +63,35 @@ export interface GridItem {
   createdAt: string;
 }
 
-/** 「不整理」区里的一个落单条目（V41）：没被任何格子登记，身份就是磁盘路径 */
+/**
+ * 左侧「未归类」竖条里的一个条目（V42）：没被任何格子登记，身份就是磁盘路径。
+ *
+ * 三类来源：系统入口（`isSystem`，路径是 `::{CLSID}`）、快捷方式（`isLnk`）、
+ * 以及普通落单文件 / 文件夹。
+ */
 export interface LooseEntry {
   path: string;
   name: string;
   isDir: boolean;
   isLnk: boolean;
+  /** 系统入口（此电脑 / 回收站 / 用户的文件）：前端画专用图标 */
+  isSystem: boolean;
 }
 
-/** 「不整理」区的完整状态：矩形（逻辑像素，相对挂件窗）+ 条目；width=0 表示没有落单条目 */
+/**
+ * 左侧「未归类」竖条的完整状态（`grid_loose_list`）。
+ *
+ * 几何由 Rust 用**与收纳格同一套度量**算出（[`loose_cell_size`]），前端按
+ * `columns` 列等宽网格渲染 —— 两边必须严格一致，差一列就会盖住分类格。
+ * `width === 0` 表示没有未归类条目，前端不渲染。
+ */
 export interface LooseArea {
   x: number;
   y: number;
   width: number;
   height: number;
+  /** 分几列（V42）：竖条条目多到一列放不下时往右铺开 */
+  columns: number;
   iconSize: number;
   items: LooseEntry[];
 }
@@ -156,14 +171,14 @@ export interface AutoArrangeReport {
   itemsAdded: number;
   /** 其中文件夹占的数量 */
   foldersMoved: number;
-  /**
-   * 其中快捷方式占的数量。
-   *
-   * V38 起 `.lnk` **参与归类**（进「快捷方式」格）。V34 时跳过它们，是因为那时
-   * 原生图标还留在桌面上；现在整理会接管桌面呈现，再跳过的话程序快捷方式会
-   * 当场没有入口可点。
-   */
+  /** 其中快捷方式占的数量 —— **V42 起恒为 0**（快捷方式不再进格子） */
   lnkAdded: number;
+  /** V42：本次扫描里没进格子、留在左侧「未归类」竖条的条目数 */
+  leftOver: number;
+  /** V42：本次解散掉的历史「系统」/「快捷方式」格数量 */
+  dissolvedBoxes: number;
+  /** V42：本次从各格子里摘掉的快捷方式 / 系统入口登记条数（只删登记，文件不动） */
+  dissolvedItems: number;
   /** 本次新建的格子数 */
   boxesCreated: number;
   /** 复用了同名已有格子的次数 */

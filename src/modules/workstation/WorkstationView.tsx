@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { CalendarDays, Pin, PinOff } from 'lucide-react';
+import { CalendarDays, Info, Pin, PinOff } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { isTauri } from '@/platform/detect';
 import { toast } from '@/components/ui/toast';
 import { useTodosStore } from '@/stores/useTodosStore';
 import { useNotesStore } from '@/stores/useNotesStore';
@@ -268,9 +269,17 @@ export default function WorkstationView(_props: WorkstationViewProps = {}): Reac
       </header>
 
       {todosError !== null ? (
-        <div className="mx-6 mb-3 shrink-0 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
-          加载待办失败：{todosError}
-        </div>
+        isTauri() ? (
+          <div className="mx-6 mb-3 flex shrink-0 items-center gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+            <Info className="h-3.5 w-3.5 shrink-0" />
+            加载待办失败：{todosError}
+          </div>
+        ) : (
+          <div className="mx-6 mb-3 flex shrink-0 items-center gap-2 rounded-md border border-brand/15 bg-brand-muted/50 px-3 py-2 text-xs text-muted-foreground">
+            <Info className="h-3.5 w-3.5 shrink-0 text-brand" />
+            浏览器预览模式：待办与便签数据存储在本机 SQLite 中，请在 Handy 桌面版中使用完整功能。
+          </div>
+        )
       ) : null}
 
       {/* —— 主区：内容列 + 右侧快捷入口图标栏 —— */}

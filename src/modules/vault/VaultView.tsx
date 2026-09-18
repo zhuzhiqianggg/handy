@@ -30,6 +30,7 @@ import {
   passwordStrength,
 } from './vaultService';
 import * as vaultService from './vaultService';
+import { isTauri } from '@/platform/detect';
 import type { VaultCategory, VaultItem } from '@/types/vault';
 
 /**
