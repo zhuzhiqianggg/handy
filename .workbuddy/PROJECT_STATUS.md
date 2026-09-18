@@ -1,7 +1,7 @@
 # Handy · 顺手 — 项目现状与续接指引
 
 > **从 `handy` 目录打开项目，先读这一份。** 它回答三个问题：**做到哪了 → 还剩什么 → 怎么继续**。
-> 最近更新：2026-09-19（**V42 批次，已打包并静默装机，待用户 GUI 验收**） · 长期约定见 [`.workbuddy/memory/MEMORY.md`](memory/MEMORY.md) · 逐日进展见 [`memory/`](memory/) · 规划文档见 [`../docs/README.md`](../docs/README.md)
+> 最近更新：2026-09-19（**V44 批次：桌面优先重构——桌面即主界面（启动不弹主窗口）+ 桌面快捷操作浮层**） · 长期约定见 [`.workbuddy/memory/MEMORY.md`](memory/MEMORY.md) · 逐日进展见 [`memory/`](memory/) · 规划文档见 [`../docs/README.md`](../docs/README.md)
 
 ---
 
@@ -2017,6 +2017,151 @@ first-fit 下不成立（**回填空档是正确打包行为**），改为「至
 | 8 | 主窗口侧栏 | 只剩**工具箱 + 密码存储器**；但搜索仍能找到原「桌面整理 / 工作台」的命令 |
 
 ---
+
+### 1.29 V43 批次（用户三截图反馈：**整理了却没重新整理 · 快捷入口不见了 · 工具箱要不要独立窗口 · 桌面还是乱 · 拖不进 Dock · 右键被格子吃掉**）
+
+用户 V43 六条原话要点：① 「我重新整理了为什么还是没有重新把桌面上零散的目录和文件重新整理呢？
+原工作台我们不是添加了各种快捷入口吗（如 hosts 文件编辑等都没有了呢）」；② 工具箱那个独立窗口
+「整个全量的工具箱列表框是否需要呢？如果需要的话我建议跟桌面成为一个整体而不是独立的窗口……
+我在桌面上就能完成所有的操作 不需要调出一个窗口去找工具等 样式也优化美化下」；③ 工作台 / 便签
+都在桌面了，「还有必要保留之前的工作台窗口吗？所有工作台的功能都迁移到桌面上」；④ 「经过整理后的
+桌面其实还是乱的 都没有对齐」；⑤（图三）「你这里说拖进来根本拖不了」；⑥ 「你的格子把我图标原始的
+右键功能全部覆盖了，这个科学吗……关于桌面整理这块你做成跟他的功能一样的即可」。
+
+#### 1.29.1 三条真根因（都从真机数据 / 代码里挖出来的，不是猜的）
+
+1. **「整理了却没有重新整理」= 一张只增不减的「不要它」名单**。
+   `grid_item_delete`（拖出格子 / 移出）为了不让下一次整理又把它拉回来，会把路径写进
+   `grid_meta.sync_dismissed`，而 `register_item` 见到名单里的路径就跳过。
+   真机库实测攒了 **13 条**，正是用户桌面上的零散目录与文件：
+   `_Work`、`software`、`test`（测试）、`dify`、`aksk`、`1.log`、`skills.tar.gz`、
+   `朱治强-20260531.pdf`、`集合竞价.pdf`…… —— 它们**永远**不会再进格子，只能留在左侧竖条里。
+   日志里的证据：`扫到 72 项，登记 0 项，未归类留在左侧竖条 39 项`。
+   **修法**：`release_dismissed()` —— 一键整理时先清空名单（用户显式要求「按桌面现状重算一遍」，
+   不该再被历史的手动移出拦住），报告新增 `released` 字段并在 UI 上如实提示。
+   名单本身保留给后台对账用（刚拖出去的东西不会立刻被塞回来）。
+2. **「拖进来根本拖不了」= HTML5 拖放的两个 effect 声明打架**。
+   拖动源写的是 `dataTransfer.effectAllowed = 'move'`，Dock 上写的是 `dropEffect = 'copy'` ——
+   按规范 `copy` 不在 `move` 允许集合里，浏览器直接判定「禁止放置」，连 `drop` 事件都不给。
+   **修法**：拖动源改成 `copyMove`（拖进格子 = 移动归属，拖到快捷条 = 收一条快捷方式），
+   Dock 的 `onDragOver` 同时识别「我们的类型标记」，ref 被清掉也能显示可放下。
+3. **「右键被格子吃掉」= 接管桌面后没人替 Shell 弹菜单**。
+   接管模式下原生桌面图标（`SysListView32`）被隐藏，右键落在我们的挂件窗上；而此前我们只弹了
+   自己那个「打开 / 打开文件位置 / 移出格子」的小菜单 —— 打开方式、发送到、复制、删除、重命名、
+   属性，以及第三方 shell 扩展（Git / 7-Zip / 杀毒）全都消失了。
+   **对标腾讯桌面整理**：它的格子内图标右键就是**系统原生菜单**。
+   **修法**：新增 `platform/shell_menu.rs`，直接调 Shell 的 `IContextMenu`
+   （`SHCreateItemFromParsingName` → `BindToHandler(BHID_SFUIObject)` → `QueryContextMenu` →
+   `TrackPopupMenuEx(TPM_RETURNCMD)` → `InvokeCommand`），命令从
+   `AppHandle::run_on_main_thread` 投递（`TrackPopupMenuEx` 自己跑模态消息循环）。
+   普通右键 = 原生菜单；**按住 Shift** 才弹我们自己那个精简菜单（含 Shell 给不了的「移出格子」）。
+
+#### 1.29.2 另外三条的落地
+
+4. **工具箱与桌面合体**（用户 ②）：新增 `DesktopToolPanel` —— 桌面上直接开一个抽屉，
+   左边是全量「工具 + 模块页面」列表（可搜索、拼音首字母），右边就是**那个工具自己的界面**
+   （工具走 `CommandMeta.load()`、模块走 `ModuleMeta.loadView()`，与主窗口同一条契约、
+   同一个组件）。桌面搜索面板选中结果后**直接在抽屉里打开**，不再唤出主窗口
+   （`desktop_open_view` 只作兜底：动作式命令没有界面时才用）。
+   于是主窗口退化成「设置 / 管理控制台」，日常操作全在桌面完成。
+5. **工作台功能全下沉 + 快捷入口回到桌面**（用户 ①③）：`QuickActionsRail.ACTION_ICONS`
+   已导出（系统动作图标与工作台共用同一套）；Dock 的数据源明确为 `quicklinks`
+   （与工作台快捷入口**同源**）。**但 V43 这一条没真正落地**——Dock 实际只画了用户的
+   自定义快捷链接，系统快捷入口（hosts 编辑 / 管理员终端 / 任务管理器…）并没有出现在桌面，
+   所以用户下一轮仍说「hosts 编辑等都没有了」。**桌面直达的系统入口在 V44 才补上**（见 §1.30）。
+6. **排版更整齐 + 样式美化**（用户 ④）：摆放顺序改为**条目少的先摆** ——
+   挂件占掉右上角之后，最右两列的可用顶端被压到挂件下沿，矮格子先填进那道缝、
+   高格子留给完整的列，减少「一列一格的碎片」。抽屉 / 搜索面板统一成深色玻璃卡片。
+
+#### 1.29.3 改动清单
+
+- `src-tauri/src/platform/shell_menu.rs`（**新增**）：Windows 原生 `IContextMenu`。
+- `src-tauri/src/platform/mod.rs`：导出 `shell_menu`。
+- `src-tauri/src/commands/grid.rs`：`release_dismissed()` + `released` 字段 + 整理日志；
+  摆放顺序按 `(items, id)` 升序；新命令 `shell_context_menu`。
+- `src-tauri/src/lib.rs`：注册 `shell_context_menu`。
+- `src/modules/desktop-grid/DesktopToolPanel.tsx`（**新增**）：桌面工具箱抽屉。
+- `src/modules/desktop-grid/GridOverlay.tsx`：条目 / 左条右键 → 原生菜单（Shift 走旧菜单）；
+  Dock 系统快捷入口 + 右键移除；`effectAllowed: copyMove` + Dock `onDragOver` 放宽；
+  工具栏「工具箱」按钮；`openTarget` 改为开抽屉；命中区域纳入抽屉。
+- `src/modules/workstation/QuickActionsRail.tsx`：`ACTION_ICONS` 导出（两处共用）。
+- `src/modules/desktop-grid/GridManagerView.tsx`：整理结果提示带上 `released` / `leftOver`。
+- `src/lib/ipc.ts` + `src/types/grid.ts`：`shellContextMenu`、`released`。
+
+#### 1.29.4 验证
+
+`tsc` 0 错 · **Rust 单测 46/46 全绿**（`real_desktop_data_lays_out_in_aligned_columns` 的一条断言
+按新摆放顺序重写：它原来断言「按 `sort` 的第一个格子必须在最右两列」，而摆放顺序已改成
+「条目少的先摆」，两者不再对应；「至少一个格子贴最右可用列」才是自右向左的实质断言，保留）·
+回归 **17/17 套** · 打包 exit 0 · 装机后 `cmp -l` 只差 3 字节。
+
+#### 1.29.5 请用户验收的点
+
+| # | 验收点 | 期望 |
+| --- | --- | --- |
+| 1 | **点「整理桌面」** | 此前拖出去过的目录/文件（`_Work`、`software`、`测试`、`dify`、`1.log`…）**被重新归类进格子**；提示里出现「放开此前移出 N 项」 |
+| 2 | 条目右键 | 弹出**系统原生菜单**（打开 / 打开方式 / 发送到 / 复制 / 删除 / 重命名 / 属性，含第三方扩展项） |
+| 3 | Shift + 右键 | 才弹我们自己的精简菜单（打开 / 打开文件位置 / 移出格子） |
+| 4 | 工具栏「工具箱」 | 桌面上直接开抽屉，左边全量列表、右边就是工具界面；搜「hosts」「密码」能直达 |
+| 5 | Dock 左半 | 出现「编辑 hosts / 任务管理器 / 管理员终端…」等系统入口，点一下即执行 |
+| 6 | 把格子里的图标拖到 Dock | 能放下（光标显示可复制），松手后 Dock 多一条 |
+| 7 | 排版 | 整理后格子更整齐、少碎片；空格子高度最小 |
+| 8 | 侧栏 | 仍只有工具箱 + 密码存储器；搜索能搜到桌面整理 / 工作台 |
+
+> ⚠️ 本轮同样**不代为启动**（agent 会话启动不了本 GUI，见 §1.19.2）。
+> 本轮**首次在真机上使用原生 Shell 菜单**，若菜单弹不出来请把
+> `%LOCALAPPDATA%\Handy\handy.log` 里 `原生右键菜单失败` 那一行发我。
+
+---
+
+### 1.30 V44 批次（用户：**「我们就是桌面工具，主要功能都是直接在桌面上实现，而不是一个单独的一个窗口里面实现」**——桌面优先重构）
+
+用户原话：「继续完成所有任务，重构优化各个模块功能，我们就是桌面工具，主要功能都是直接在桌面上实现，
+而不是一个单独的一个窗口里面实现」。这是把 V42/V43 已经铺好的「桌面层」正式立为产品的主界面，
+把遗留的「独立窗口」习惯彻底去掉。
+
+#### 1.30.1 两条落地
+
+1. **桌面即主界面（启动不再弹主窗口）**。
+   `lib.rs` 启动逻辑：先 `restore_overlay_if_visible`（桌面接管上次开着就摆回桌面），
+   再读 `grid::read_overlay_visible`（刚改成 pub）——**接管生效时桌面就是主界面，
+   不再 `show_main_palette`**，避免「一启动就多一个窗口」违背桌面工具定位；
+   主窗口退化为「按需出现的工具宿主」，只有从桌面抽屉打开工具 / 页面时（由面板触发，
+   或动作式命令走 `desktop_open_view` 兜底）才被 show。未接管（首装 / 关掉桌面整理）时
+   回退弹主窗口作兜底入口。
+2. **桌面「快捷操作」浮层（补上 V43 没落地的系统入口）**。
+   新建 `DesktopQuickActions.tsx`，工具栏「快捷」按钮唤出。它是桌面版的「快捷导航入口」，
+   把**工作台窗口**的能力全搬上桌面：
+   - 系统快捷动作（hosts 编辑 / 管理员终端 / 网络 / 服务 / 证书…50+）：`sysActionList` +
+     复用 `QuickActionsRail.ACTION_ICONS`，`sysActionRun` 走 Rust 白名单（无注入面）；
+   - 我的快捷方式：与 Dock 同源的 `quicklinks`，可打开 / 移除，Dock 增删经 `handy:quicklinks`
+     事件实时同步到面板；
+   - 应用入口（工具箱 / 便签 / 密码 / 桌面整理 / 设置）：点一下直接在桌面抽屉打开（`onLaunch`
+     复用 `openTarget`，不再弹窗口）。
+   与「搜索 / 工具箱」互斥（开一个收另一个）。至此工作台窗口无需再开——所有功能桌面直达。
+
+#### 1.30.2 改动清单
+
+- `src-tauri/src/commands/grid.rs`：`read_overlay_visible` 改 `pub`（供 `lib.rs` 判断桌面是否即主界面）。
+- `src-tauri/src/lib.rs`：启动显隐改为「接管生效则不弹主窗口」+ 日志。
+- `src/modules/desktop-grid/DesktopQuickActions.tsx`（**新增**）：桌面快捷操作浮层。
+- `src/modules/desktop-grid/GridOverlay.tsx`：导入并挂载 `DesktopQuickActions`；工具栏新增「快捷」按钮；
+  `regionsKey` 纳入 `qa`；Dock 增删链接 `dispatchEvent('handy:quicklinks')`；三个面板互斥开关。
+- `src/modules/desktop-grid/DesktopToolPanel.tsx`：V43 已建，本批未动（桌面工具箱抽屉稳定）。
+
+#### 1.30.3 验证
+
+- `tsc` → **0 错**；`cargo test --lib` → **46/46 全绿**；回归 **17/17 套**通过；
+  打包 `build-release.sh --no-deploy` **exit 0**；装机 `cmp -l` 只差 **3 字节**（NSIS 固有）。
+
+#### 1.30.4 待用户验收点
+
+1. 接管桌面时启动 Handy：**主窗口不再自动弹出**，桌面就是主界面。
+2. 工具栏「快捷」→ 系统入口里有「编辑 hosts」「管理员终端」等并能直接运行。
+3. 「我的快捷方式」与底部 Dock 是同一份数据；Dock 拖入后这里立刻出现。
+4. 应用入口（工具箱 / 便签 / 密码 / 桌面整理 / 设置）点一下在桌面抽屉打开，不弹窗口。
+5. 搜索 / 工具箱 / 快捷 三个面板同一时刻只开一个。
+6. V43 的整理修复 / 原生右键 / Dock 拖入 仍正常（回归 17/17 守住）。
 
 ## 2. 剩余任务与已知风险
 
