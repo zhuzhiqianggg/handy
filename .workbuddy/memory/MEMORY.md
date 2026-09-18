@@ -16,10 +16,11 @@
 - 真实数据：库 `%APPDATA%\com.handy.desktop\handy.db`；日志 `%LOCALAPPDATA%\Handy\handy.log`；装好的程序 `%LOCALAPPDATA%\Handy\handy.exe`（NSIS currentUser `/S`）。
 - 命令：Rust 前置 `source scripts/rust-env.sh`；前端类型检查 `node node_modules/typescript/bin/tsc --noEmit -p tsconfig.json`；打包 `bash scripts/build-release.sh --no-deploy`（PortableGit 全路径 bash + 显式 PATH）；回归 `scripts/regression/run.mjs`（17 套）；自检 `scripts/audit/`（tool-audit/layout-audit/sample-smoke/window-probe.py/desktop-icon-probe.py）。
 
-## 3. 状态快照（2026-09-17 · **V41 已打包并静默装机，待用户 GUI 验收**）
+## 3. 状态快照（2026-09-19 · **V42 已打包并静默装机，待用户 GUI 验收**）
 - ★ 桌面格子 = 呈现层（V37 立，别按旧结论推理）：条目只是桌面文件的引用登记，拖入/移出/一键归类**一个字节都不移动文件**（对标腾讯桌面整理）。V33–V36 的「真实收纳」(`fs::rename` 进 `桌面/Handy整理/<格名>/`) 已被用户否决作废。整理后必须由格子**接管桌面呈现**（隐藏 SysListView32），否则同一批文件显示两遍——用户反复投诉点。
-- V40（用户截图四点）：① 接管挂在 `items_added>0` 上 ⇒ 桌面已登记过时永远不触发 → 改「整理一律接管（仅当挂件确实在显示才藏，防桌面空白）」；② 一不可见立刻归还 → 30 秒宽限；③ 统一列宽 + 左起流布局 + 高度随内容；④ 扫两个桌面根。V40.1：dialog 插件 async/ACL 缺陷（confirmAction.ts）+ Z 序沉底再上提（CONVENTIONS §21）。
-- **V41**（用户双截图五点）：① `layout_all_boxes` **三段排布**——左上固定列=系统+快捷方式（`is_left_pinned`+`place_in_column`）、中段流布=其余分类格、挂件一律右上角；② 新增**「不整理」区**（左下角，`grid_loose_list`，仅接管模式渲染）：没登记的桌面条目都画在这里，移出格子/解散/对账后可见、可拖回 —— 修「移出没回桌面」；③ 右键各归其位：格子菜单只挂 header、条目右键（打开/打开文件位置 `grid_reveal_path`/移出格子）；④ 去 hover ×，拖出格子即移出不整理区；⑤ 挂件竖排放不下先牺牲底部边距再重叠（CONVENTIONS §22）。单测 43→44。
+- V40：接管改为「整理一律接管」+ 30 秒宽限归还；统一列宽 + 左起流布局 + 高度随内容；扫两个桌面根。V40.1：dialog 插件 async/ACL 缺陷（confirmAction.ts）+ Z 序沉底再上提（CONVENTIONS §21）。
+- V41：三段排布（左上固定列=系统+快捷方式 / 中段流布 / 挂件右上）；新增左下「不整理」区（`grid_loose_list`，仅接管模式渲染）修「移出没回桌面」；右键各归其位（格子菜单只挂 header、条目弹自己的菜单 + `grid_reveal_path`）；去 hover ×、拖出格子即移出；挂件竖排先牺牲底部边距（CONVENTIONS §22）。单测 43→44。
+- **V42**（用户双截图六点）：① **系统图标/快捷方式不再造格子** → 改「左侧『未归类』竖条」（左上角从上往下、纯图标无外壳，`loose_strip_rect` + `LooseEntry.isSystem` + `SYSTEM_ENTRIES`）；② 自动整理**先清后算**（`dissolve_auto_boxes` 删 `::%`/`%.lnk` 登记与系统/快捷方式格，`arrange_group_of` 对 `.lnk` 返回 None），报告加 `left_over/dissolvedBoxes/dissolvedItems`；③ **镜像流布**（`FlowPlacer::{mirror,min_x}`，第 0 列=最右列、从右上往左排，`min_x` 给左条留地；⚠️ first-fit 会回填空档，**偏移量非单调**，断言别写单调）；④ 主窗口侧栏只剩工具箱+密码存储器（`ModuleMeta.sidebar:false`，模块与命令保留仍可搜索）；⑤ **桌面 Dock**（底部居中，与工作台共用 `quicklinks.ts` 数据，可拖桌面图标进）；⑥ **桌面搜索 + `desktop_open_view`**（`handy:navigate` 复用 `bar_open_command` 机制，不开新窗）。单测 44→46。
 - 端到端布局测试用 `layout_all_boxes_with(loose_count)` 注入落单数，**不得依赖跑测试那台机器的桌面**。
 - DB 迁移链 v1→v9，真实库可能停在 v8，首次启动顺次自动应用；由 `cargo test --lib` 守住。
 - ⚠️ agent 会话启动不了本 GUI（新旧版本一律挂死启动早期，非代码问题）→ 打包 + `/S` 静默装即止，**不代启动**，请用户自己启动。唯一阻塞项 = 用户装机 GUI 验收。
@@ -28,7 +29,7 @@
 - 用户偏好：先规划后执行；表格化；绝对路径；改文件前先读取；目录扁平。
 - 红线：禁对真实用户目录（Desktop/Documents/Downloads）写（测试限 TEMP 沙箱）。
 - 批次收尾：功能完成 → 打包 → 停旧版 → NSIS `/S` 静默装 → `cmp -l` 取证（只应差 3 字节：`_VAR_UNK`→`_NSS`）→ 停手不启动。
-- 高频坑（完整 → CONVENTIONS）：① 同文件多处 Edit 必须串行；② vite build 与布局审计分两条命令；③ npm.cmd/cmd.exe 被拦 → 用 `node node_modules/<cli>/<entry>.js`；④ Bash shim 时好时坏 → 输出落盘再 Read、构建用 PortableGit 全路径 bash；⑤ 源码中文文案禁反引号/markdown 星号；⑥ 装机只用 PowerShell `Start-Process -ArgumentList "/S" -PassThru -Wait`（Git Bash `//S &` 双失效）。
+- 高频坑（完整 → CONVENTIONS）：① 同文件多处 Edit 必须串行（**md 追加一律用 python `open(...,'a')`，Edit 的 old_string 取太短会误删半行——V42 踩过**）；② vite build 与布局审计分两条命令；③ npm.cmd/cmd.exe 被拦 → 用 `node node_modules/<cli>/<entry>.js`；④ Bash shim 时好时坏 → 输出落盘再 Read、构建用 PortableGit 全路径 bash；⑤ 源码中文文案禁反引号/markdown 星号；⑥ 装机只用 PowerShell `Start-Process -ArgumentList "/S" -PassThru -Wait`（Git Bash `//S &` 双失效）。
 
 ## 5. 验证纪律
 - agent 自报 "exit 0" 不可信 → 独立复跑、输出与 exit code 分文件落盘再 Read。

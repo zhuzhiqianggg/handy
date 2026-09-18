@@ -1,7 +1,7 @@
 # Handy · 顺手 — 项目现状与续接指引
 
 > **从 `handy` 目录打开项目，先读这一份。** 它回答三个问题：**做到哪了 → 还剩什么 → 怎么继续**。
-> 最近更新：2026-09-17（**V41 批次**） · 长期约定见 [`.workbuddy/memory/MEMORY.md`](memory/MEMORY.md) · 逐日进展见 [`memory/`](memory/) · 规划文档见 [`../docs/README.md`](../docs/README.md)
+> 最近更新：2026-09-19（**V42 批次，已打包并静默装机，待用户 GUI 验收**） · 长期约定见 [`.workbuddy/memory/MEMORY.md`](memory/MEMORY.md) · 逐日进展见 [`memory/`](memory/) · 规划文档见 [`../docs/README.md`](../docs/README.md)
 
 ---
 
@@ -1933,6 +1933,88 @@ V40 静默装机、用户自启后，日志暴露两条流水线四层门全没�
 `tsc` 0 错 · **Rust 单测 43→44 全绿**（端到端预演断言按三段排布 + 挂件右上重写；
 `layout_all_boxes_with` 注入落单数 0，端到端测试不再依赖跑测试那台机器的桌面）。
 其余流水线随打包执行（见批次索引）。
+
+---
+
+### 1.28 V42 批次（用户双截图反馈：**不整理的东西别进格子 · 左上角排开 · 从右上角依次排开 · 桌面快捷条 · 功能全下沉到桌面**）
+
+用户 V42 原话要点：① **不整理的内容（系统图标 / 快捷方式）别放进格子**，就在桌面**左上角从上往下排开**，
+「没有必要」；该整理的才按分类进格子；② 每次点「整理桌面」要**重新计算桌面全部内容**再排；
+③ 左边是不需要分类的快捷方式依次展示，**右边从挂件到其他整理、从右上角依次顺序排开**，自动算高度展开
+所有格子，默认不要滚动条；④ **工作台里的快捷方式放到桌面上**（像 mac 的 Dock），还能把桌面图标拖进去；
+⑤ **桌面整理 + 工作台功能全部下沉到桌面**，主页面只留**工具箱 + 密码存储器**，桌面上能**快速搜索并一键
+打开工具 / 密码存储箱**。
+
+#### 1.28.1 六条改动
+
+1. **左侧「未归类」竖条取代 V41 的「不整理」区（①③）**：删掉 `loose_area_rect`（左下角卡片）与
+   左上固定列的两个格子（「系统」「快捷方式」），改为 `loose_strip_rect` —— 左上角**纯图标竖条**
+   （无卡片外壳、无标题栏），系统图标 → 快捷方式 → 落单文件（`loose_rank`）顺序排，`LOOSE_MAX_COLUMNS=4`
+   列，单元格尺寸与格子条目一致（`loose_cell_size` = `icon + CELL_EXTRA`）。`LooseEntry` 加 `is_system`，
+   系统条目用内置图标（我的电脑 / 回收站 / 控制面板 / 网络）。
+2. **自动整理先清后算（②）**：新增 `dissolve_auto_boxes(conn)` —— 每次自动整理前把
+   `grid_items` 里 `::` 前缀（系统伪条目）和 `%.lnk` 的登记全删，并删掉 `kind='system'` /
+   `name='快捷方式'` / `category='快捷方式'` 的格子；`arrange_group_of` 对 `.lnk` 返回 `None`
+   ⇒ **快捷方式永不进格**（V42 起 `lnk_added` 恒为 0，`left_over` 计的是「不进格」的条目数）。
+   报告新增 `left_over` / `dissolved_boxes` / `dissolved_items` 三个字段自证。
+3. **镜像流布（③）**：`FlowPlacer` 加 `mirror` + `min_x` 两个字段 —— `mirror=true` 时第 0 列是**最右列**、
+   列号从右往左递增，`min_x` 为左侧竖条留出地盘。挂件仍一律右上角（V41 结论保留），
+   内容格从右上角开始依次向左流布；`column_fits` 保证不越过 `min_x`。
+4. **主窗口侧栏只剩工具箱 + 密码存储器（⑤）**：`ModuleMeta` 新增 `sidebar?: boolean`（默认 true），
+   `ModuleSidebar` 过滤 `sidebar !== false`；`notes`（工作台）与 `desktop-organizer`（桌面整理）
+   标 `sidebar: false` —— **模块与命令全部保留**（仍可搜索、仍可被调用），只是不再出现在侧栏。
+5. **桌面 Dock 快捷条（④）**：`GridOverlay` 底部居中一条 mac 风格的快捷条，与工作台共用
+   `workstation/quicklinks.ts` 的 localStorage 数据（一处加、两边可见）；拖桌面文件/图标到 Dock
+   即 `addDockLink`；右键条目可移除；点击即打开（文件走 `shell open`，命令走导航）。
+6. **桌面搜索 + 一键直达（⑤）**：工具栏加「搜索」按钮 → 右下搜索面板，复用 `registry.commands()` /
+   `searchCommands` 搜工具 / 命令 / 页面，回车或点选 → 新增 Rust 命令 `desktop_open_view(app, target)`
+   ⇒ `show_main_palette` + 给主窗口发 `handy:navigate`（与 `bar_open_command` 同一套机制，不开新窗）。
+   空查询时列出三个「一键直达」，**密码存储器排第一**（用户点名）。
+
+> 右键归属（上轮 ②）不变：格子菜单只挂标题栏、条目弹自己的菜单（打开 / 打开文件位置 / 移出格子）；
+> 去 ×（上轮 ④）保持 —— 拖出格子即落到左侧竖条。
+
+#### 1.28.2 改动清单
+
+- `src-tauri/src/commands/grid.rs`：`FlowPlacer::{mirror,min_x}` + `with_bounds(...)` + `column_fits`；
+  删 `is_left_pinned/left_pin_rank/LEFT_PIN_*/place_in_column/ensure_system_box` 与 `GridBoxRect.category`；
+  `loose_strip_rect`/`LooseStrip`/`loose_cell_size`/`LOOSE_MAX_COLUMNS` 取代 `loose_area_rect`；
+  `loose_desktop_items` 并入 `SYSTEM_ENTRIES`；`dissolve_auto_boxes`；`arrange_group_of → Option<String>`；
+  新命令 `desktop_open_view`。
+- `src-tauri/src/lib.rs`：注册 `desktop_open_view`。
+- `src/modules/desktop-grid/GridOverlay.tsx`：左侧竖条（纯 grid + `LooseIcon`）、Dock（含拖入 / 右键移除）、
+  搜索面板、工具栏「搜索」按钮、`hitDock` 命中优先、`regionsKey` 带上 `dock`/`search`、
+  Esc/右键外点关闭；系统图标内置图标表 `SYSTEM_ENTRY_ICONS`。
+- `src/core/types.ts` + `src/components/ModuleSidebar.tsx`：`ModuleMeta.sidebar` 与侧栏过滤。
+- `src/modules/notes/index.ts` / `src/modules/desktop-organizer/index.ts`：`sidebar: false`。
+- `src/lib/ipc.ts` + `src/types/grid.ts`：`desktopOpenView`、`LooseEntry.isSystem`、`LooseArea.columns`、
+  `AutoArrangeReport` 三个新字段。
+
+#### 1.28.3 验证
+
+`tsc` 0 错 · **Rust 单测 44→46 全绿**（新增 `mirrored_flow_starts_at_the_right_edge`、
+`loose_strip_sits_at_the_top_left_and_only_when_needed`；`content_boxes_stay_clear_of_the_left_loose_strip`
+守住内容格不与左条打架；REAL_BOXES 由 11 降到 9 —— 系统 / 快捷方式不再是格子）。
+端到端两条老断言按镜像布局重写：原「偏移量左到右单调」与「格子必须在挂件左边或正下方」在镜像
+first-fit 下不成立（**回填空档是正确打包行为**），改为「至少一个格子贴到最右可用列」+「首格从右侧起」。
+回归 **17/17 套** · `tool-audit` **325 PASS / 0 FAIL** · `sample-smoke` **29 PASS** ·
+`layout-audit` **0 / 84 有问题** · 打包 `build-release.sh --no-deploy` exit 0 ·
+装机后 `%LOCALAPPDATA%\Handy\handy.exe` 与 `target/release/handy.exe` **逐字节只差 3 个字节**
+（偏移 10207284–10207286：安装端 `116 123 123` = `N S S`，构建端 `125 116 113` = `U N K`）
+⇒ **装上去的就是本次 V42 构建产物**（明细 `.build-logs/v42-exe-diff.txt`）。
+
+#### 1.28.4 请用户验收的点（本轮同样**不代为启动**）
+
+| # | 验收点 | 期望 |
+| --- | --- | --- |
+| 1 | 左侧「未归类」竖条 | 系统图标（我的电脑/回收站…）+ 快捷方式 + 没进格的文件，在**左上角从上往下**排开，**没有格子外壳** |
+| 2 | 快捷方式不再进格 | 整理后**不存在**「系统」「快捷方式」两个格子；`.lnk` 只出现在左条 |
+| 3 | 重算 | 再点一次「整理桌面」：上次误收的 `.lnk`/系统条目被清掉（报告里有 `dissolvedBoxes/Items`） |
+| 4 | 右侧从右上排开 | 挂件在右上角，其余分类格**从右往左**依次流布，不与左条重叠 |
+| 5 | 移出回桌面 | 条目拖出格子 → 立刻出现在左侧竖条（可见 / 双击可开 / 可拖回格子） |
+| 6 | 桌面 Dock | 桌面底部居中一条快捷条；工作台里加的快捷方式这里也有；拖桌面图标进去能收纳；右键可移除 |
+| 7 | 桌面搜索 | 工具栏「搜索」→ 输入工具名回车 → 主窗口直接打开该工具；空查询时第一条是**密码存储器** |
+| 8 | 主窗口侧栏 | 只剩**工具箱 + 密码存储器**；但搜索仍能找到原「桌面整理 / 工作台」的命令 |
 
 ---
 
