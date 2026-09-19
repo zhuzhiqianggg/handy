@@ -2163,6 +2163,89 @@ first-fit 下不成立（**回填空档是正确打包行为**），改为「至
 5. 搜索 / 工具箱 / 快捷 三个面板同一时刻只开一个。
 6. V43 的整理修复 / 原生右键 / Dock 拖入 仍正常（回归 17/17 守住）。
 
+### 1.31 V45 批次（用户五条反馈 + 三截图：**崩溃 · 面板混乱 · 密码并入工具箱 · 借鉴腾讯右键菜单 · 主窗口去留**）
+
+用户原话：「你看这个腾讯桌面整理我们是不是可借鉴呢？还有我们的 handy 主窗口还是建议使用吗？
+既然这样那就工作台和之前桌面整理控制台也都保留呗，以后我们还可以添加更多有用的模块，
+不过桌面上的各种功能还是要进一步优化……这个窗口出错了 `Tooltip` must be used within
+`TooltipProvider`……还是有点混乱了……工具搜索应该放在右侧，跟工作台差不多 直接搜索获取，
+而不是打开额外的对话框 很乱……密码存储建议也作为工具箱的其中一个工具吧 不要一个独立的工具箱模块，
+这样应该更好，我建议你把整个功能整理出来，然后重新拉通重新重构设计展现方式 交互方式等」。
+
+#### 1.31.1 五条落地
+
+1. **修 `Tooltip` 崩溃（P0 真缺陷）**。根因：`TooltipProvider` 只包在**主窗口**的
+   `AppLayout` 里；密码生成器的 `ResultBox.header` 用了 `Tooltip`，而工具现在会在
+   **桌面挂件窗**的抽屉里渲染 —— 那个窗口根没有 Provider，一点开就抛
+   `Tooltip must be used within TooltipProvider` 白屏（用户日志已抓到）。
+   修法：`main.tsx` 在 `ErrorBoundary` 外层统一包 `TooltipProvider`，覆盖**所有窗口根**。
+   这是「工具下沉桌面」这条路线必然要补的一课：任何依赖主窗口壳的能力都要在挂件窗补齐。
+
+2. **桌面右侧统一面板（搜索 / 工具箱 / 快捷 三合一）**。
+   用户嫌「搜到工具 → 弹一个大对话框」很乱，要「跟工作台差不多，在右侧直接搜索获取」。
+   新建 `DesktopSidePanel.tsx` 取代 V43 的 `DesktopToolPanel` + V44 的 `DesktopQuickActions`：
+   右侧滑入、宽 `min(620px, calc(100vw-160px))`、`right-[124px]` 给常驻工具栏留位；
+   顶部搜索框 + 三个 tab（搜索 / 工具箱 / 快捷），结果与**工具本体就地渲染**在面板内，
+   不再弹独立对话框。两个旧面板文件已 `git rm`。
+
+3. **密码存储器并入工具箱**。用户：「密码存储建议也作为工具箱的其中一个工具吧，
+   不要一个独立的工具箱模块」。做法：新增 `security` 分类（`core/types.ts` +
+   `core/toolCategories.ts` + 图标登记）；`toolbox/commands/index.ts` 加一条 `vault` 命令
+   （`load: () => import('@/modules/vault/VaultView')`，视图与 Rust 侧加解密**一字未动**）；
+   删除 `modules/vault/index.ts` 的模块注册。所有 `module:vault` 引用改走工具 id。
+   ⚠️ 顺带修了 tool-audit 的一个脆弱点：它用正则 `export type ToolCategory = ([^;]+);`
+   读联合类型，我把等号后写成换行就解析不到 → 已改成 `=\s*([^;]+);` 并把 `security` 补进联合。
+
+4. **主窗口去留 = 保留，但降级为「按需宿主」**。用户说「工作台和之前桌面整理控制台也都保留呗，
+   以后我们还可以添加更多有用的模块」。于是恢复 `modules/notes/index.ts` 与
+   `modules/desktop-organizer/index.ts` 的侧栏注册（回到 V42 之前的模块导航形态）；但
+   **启动依然不弹主窗口**（桌面优先不变），它只是「桌面抽屉放不下的东西」的宿主。
+
+5. **桌面背景右键菜单入口（借鉴腾讯）**。新增 `platform/desktop_menu.rs`：
+   写 `HKCU\Software\Classes\DesktopBackground\Shell\HandyDesktopGrid`
+   （`DesktopBackground\Shell` 正是「桌面空白处右键」，**无需管理员权限**），
+   菜单项文字「打开 Handy 桌面整理」，`command` 指向 `"<handy.exe>" --show-grid`。
+   冷启动与「已在运行」两条路都识别该参数：`lib.rs` setup 里直接 `show_overlay_now`；
+   单实例回调里同样 `show_overlay_now`（而不是弹主窗口）。于是「隐藏了整理 → 桌面右键
+   叫回来」闭环成立，与托盘入口互为备份。`GridManagerView` 新增「桌面右键菜单」卡片
+   （安装 / 卸载，显示当前状态）。用 `reg.exe` + `CREATE_NO_WINDOW`（不需要 windows
+   crate 的 Registry feature，不闪黑框）。
+
+#### 1.31.2 改动清单
+
+- `src/main.tsx`：根上包 `TooltipProvider`（覆盖全部窗口根）。
+- `src/modules/desktop-grid/DesktopSidePanel.tsx`（**新增**）：右侧统一面板。
+- `src/modules/desktop-grid/GridOverlay.tsx`：接入 `DesktopSidePanel`；删掉搜索浮层 /
+  工具箱抽屉 / 快捷浮层三套旧 UI 与 `SEARCH_SHORTCUTS`；Dock 与挂件统一深色玻璃。
+- `src/modules/toolbox/commands/Vault.tsx`（**新增**）：vault 的工具壳（不套 `CommandShell`，避免双标题栏）。
+- `src/modules/toolbox/commands/index.ts`：加 `vault` 命令（`category: 'security'`）。
+- `src/core/types.ts` / `src/core/toolCategories.ts`：新增 `security` 分类。
+- `src/modules/vault/index.ts`（**删除**）；`src/modules/vault/VaultView.tsx`（仅改注释）。
+- `src/modules/notes/index.ts` / `src/modules/desktop-organizer/index.ts`：恢复侧栏注册。
+- `src/modules/workstation/QuickActionsRail.tsx`：`APP_SHORTCUTS` 去掉 vault 模块项。
+- `src-tauri/src/platform/desktop_menu.rs`（**新增**）+ `platform/mod.rs`：注册表右键菜单。
+- `src-tauri/src/lib.rs`：单实例回调识别 `--show-grid`；setup 冷启动 `show_overlay_now`；
+  注册 `desktop_menu_*` 命令。
+- `src-tauri/src/commands/app.rs`：新增 `desktop_menu_status / install / remove`。
+- `src/modules/desktop-grid/GridManagerView.tsx`：桌面右键菜单卡片；开关语义改 `status.engaged`。
+- `scripts/audit/tool-audit.mjs`：`readCategoryUnion` 正则放宽。
+- `scripts/audit/desktop-icon-restore.py`（**新增**）：装机前把被接管藏起来的 `SysListView32`
+  恢复可见（见 §3 装机铁律）。
+
+#### 1.31.3 验证
+
+tsc **0 错** · `cargo test --lib` **46/46** · 回归 **17/17** ·
+tool-audit **339 PASS / 0 FAIL / 0 WARN** · `build-release.sh --no-deploy` exit 0 ·
+装机 `cmp -l` 恰好 **3 字节**（`UNK`→`NSS`）。
+
+#### 1.31.4 待用户验收点
+
+1. 桌面抽屉里打开**密码生成器**不再报 `Tooltip` 崩溃（P0 已修）。
+2. 工具栏「搜索」→ **右侧滑出统一面板**，不弹对话框；切到「工具箱」tab 看全量工具列表。
+3. 「密码箱」出现在**工具箱列表**里（`security` 分类），不再是一个独立模块。
+4. 主窗口侧栏重新能看到**工作台 / 桌面整理**入口。
+5. 桌面空白处右键 → 「打开 Handy 桌面整理」能唤回整理层；「设置 → 桌面整理管理」里有开关。
+
 ## 2. 剩余任务与已知风险
 
 ### 2.1 🔴 唯一阻塞项：装机 GUI 验收（用户执行）
@@ -2434,8 +2517,8 @@ node -e "…起 vite :41779 → 轮询 fetch 就绪 → node \$AB open 'http://l
 ## 6. 续接开工三件事
 
 1. **先跑六绿确认树健康**（V34 起把 Rust 单测也纳入）：`cargo check`（经 `scripts/rust-env.sh`）+
-   `cargo test --lib`（**12/12**，含迁移断言）+ `tsc --noEmit`（0 错）+
-   `node scripts/regression/run.mjs`（**17/17 套**）+ `node scripts/audit/tool-audit.mjs`（**325 PASS / 0 FAIL / 0 WARN**）+
+   `cargo test --lib`（**46/46**，含迁移断言）+ `tsc --noEmit`（0 错）+
+   `node scripts/regression/run.mjs`（**17/17 套**）+ `node scripts/audit/tool-audit.mjs`（**339 PASS / 0 FAIL / 0 WARN**）+
    `node scripts/audit/layout-audit.mjs`（**0 / 84 组合有问题**，约 10 分钟），均应为 exit 0。
    需要看真实交互面时再补 `node scripts/audit/sample-smoke.mjs`（**29/29**，**必须先 `vite build`**）。
    `vite build` 见 §4 打包段（**别先跑 `clean-dist.mjs`；也别和布局审计写在同一条 Bash 调用里**）。
