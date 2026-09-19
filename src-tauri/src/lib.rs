@@ -18,8 +18,14 @@ pub mod window;
 pub fn run() {
     tauri::Builder::default()
         // —— 单实例：必须第一个注册，拦截第二次启动并唤起已有实例 ——
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            let _ = window::show_main_palette(app);
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            // V45：从桌面右键菜单「打开 Handy 桌面整理」二次启动时，用户要的是把整理层
+            // 叫回来，而不是弹主窗口（该参数由 `platform::desktop_menu` 写进注册表）。
+            if argv.iter().any(|arg| arg.as_str() == "--show-grid") {
+                commands::grid::show_overlay_now(app);
+            } else {
+                let _ = window::show_main_palette(app);
+            }
         }))
         // —— 日志 ——
         .plugin(tauri_plugin_log::Builder::new().build())
@@ -54,6 +60,10 @@ pub fn run() {
             commands::app::app_hide_main,
             commands::app::app_toggle_main,
             commands::app::app_set_pinned,
+            // V45：桌面空白处右键的「打开 Handy 桌面整理」入口（借鉴腾讯桌面整理）
+            commands::app::desktop_menu_status,
+            commands::app::desktop_menu_install,
+            commands::app::desktop_menu_remove,
             commands::app::module_list_state,
             commands::app::module_set_enabled,
             // —— 便签（M3 / V08）——
@@ -182,6 +192,13 @@ pub fn run() {
             commands::grid::heal_desktop_icons(app.handle());
             // 桌面格子层「永久生效」：上次显示中（含重启前就在接管）→ 本次启动自动摆回桌面
             commands::grid::restore_overlay_if_visible(app.handle());
+            // V45：从桌面右键菜单「打开 Handy 桌面整理」冷启动（`handy.exe --show-grid`）→
+            // 直接**完整显示**整理层（内容 + 工具栏），不受「上次是否收起」的偏好影响。
+            // 必须放在 `restore_overlay_if_visible` 之后：那一步可能只显示了工具栏。
+            if std::env::args().any(|arg| arg == "--show-grid") {
+                println!("[Handy] 由桌面右键菜单唤起：显示桌面整理层");
+                commands::grid::show_overlay_now(app.handle());
+            }
             // 主窗口启动显示（V16 修复）：`visible:false` 交给逻辑控制显隐，
             // 首启必须显式 show —— 否则窗口一直隐藏、需手动点托盘才出现（"退出再开不显示"）。
             // 置于托盘 / 快捷键 / DB 之后，确保托盘兜底与数据层就绪再亮窗。
@@ -193,8 +210,11 @@ pub fn run() {
             let desktop_is_home = commands::grid::read_overlay_visible(app.handle());
             if desktop_is_home {
                 println!("[Handy] 桌面接管生效：桌面即主界面，启动不弹主窗口（工具从桌面抽屉打开）");
-            } else if let Err(err) = window::show_main_palette(app.handle()) {
-                eprintln!("[Handy] 启动显示主窗口失败：{err}");
+            } else {
+                // V44.3：桌面优先 —— 即便没接管，「便携工具箱」工具栏也已常驻桌面
+                // （`restore_overlay_if_visible` 会 `show_launcher_only`），所以不再弹主窗口；
+                // 主窗口只在用户从桌面打开工具 / 设置时按需出现。
+                println!("[Handy] 桌面工具栏常驻（未接管）：启动不弹主窗口");
             }
             // 无头测试通道：HANDY_AUTOTOOL=<commandId> 或 module:<moduleId>，
             // 延迟 4s 后发给主窗口（等前端监听就绪），用于自动化诊断/回归，无此变量时零开销。
@@ -212,11 +232,18 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("构建 Handy 失败")
-        .run(|_app, event| {
-            // 退出兜底（V20）：桌面整理可以把系统图标藏起来，退出时必须还回去，
-            // 否则用户会面对一个「应用没了、图标也没了」的桌面。
-            if let tauri::RunEvent::Exit = event {
-                commands::grid::restore_desktop_icons();
+        .run(|app, event| {
+            // 退出兜底（V20 / V44.2）：桌面整理会把系统图标藏起来，退出时必须还回去，
+            // 否则用户会面对一个「应用没了、图标也没了」的桌面（用户实测踩坑）。
+            //
+            // ⚠️ 两个事件都接：`ExitRequested` 在拆解开始前、进程还完全活着时触发，
+            // 此时 Explorer 的桌面图标视图句柄一定找得到，恢复最可靠；`Exit` 是兜底。
+            // 只接 `Exit` 会在拆解已开始后调用，某些本机恢复会失效 → 桌面空白。
+            match event {
+                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit => {
+                    commands::grid::restore_desktop_icons(app);
+                }
+                _ => {}
             }
         });
 }

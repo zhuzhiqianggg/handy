@@ -133,7 +133,13 @@ export interface ModuleMeta {
  * 与 `src/modules/toolbox/commands/categories.ts` 的 `TOOL_CATEGORIES` **一一对应**：
  * 这里加成员 → 那里加元数据，`scripts/audit/tool-audit.mjs` 会校验两边一致。
  */
-export type ToolCategory = 'text' | 'data' | 'encode' | 'convert' | 'generate' | 'dev';
+export type ToolCategory = 'text'
+  | 'data'
+  | 'encode'
+  | 'convert'
+  | 'generate'
+  | 'dev'
+  | 'security';
 
 export interface CommandMeta {
   /** 命令 id（kebab-case，全局唯一），如 'timestamp' */

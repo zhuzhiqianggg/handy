@@ -1748,8 +1748,18 @@ fn clear_dismissed(conn: &Connection, path: &str) -> Result<(), String> {
 }
 
 /// 退出 / 启动时无条件恢复桌面系统图标（避免「图标被藏住但应用没了」的尴尬）。
-pub fn restore_desktop_icons() {
+///
+/// 必须在应用还活着的时候调用（见 `lib.rs` 的 `ExitRequested` 分支）：进程一旦进入
+/// 真正退出的拆解阶段，窗口句柄可能被收回、调用时机不可靠。
+///
+/// 顺手把「我们代管了图标」的标记（`icons_hidden` + `ICONS_TAKEN`）一并清零 —— 否则
+/// 下次启动 `heal_desktop_icons` 还会看到旧标记、先恢复再被 `restore_overlay_if_visible`
+/// 按接管偏好重新藏起，等于白闪一次；清掉后启动直接进入「接管态」，不再多余还原。
+pub fn restore_desktop_icons(app: &AppHandle) {
     let _ = desktop_icons_apply(false);
+    let _ = write_icons_hidden(app, false);
+    ICONS_TAKEN.store(false, Ordering::Relaxed);
+    grid_log("应用退出 / 收起：已把系统桌面图标还给系统");
 }
 
 /// 启动时自愈：上次是被强杀 / 崩溃（图标还藏着），这里恢复并清标记。
@@ -2170,26 +2180,20 @@ fn reassert_takeover(app: &AppHandle) {
 /// 额外一层；V37 起格子变成桌面的**呈现层**（文件不再移动），两份图标并存就成了
 /// 用户眼里的「桌面有两个相同的内容」，所以又需要它回来，但必须是**用户可切换的偏好**
 /// 而不是每次启动都擅自决定的动作。
-fn show_overlay(app: &AppHandle) -> Result<(), String> {
+/// 确保挂件窗存在并可见、已贴到基准层（不改动接管态 / 命中区域状态）。
+///
+/// 新建与复用两条路径共用，避免 `show_overlay` / `show_launcher_only` 各写一遍建窗逻辑。
+fn ensure_overlay_window(app: &AppHandle) -> Result<WebviewWindow, String> {
     let mode = read_attach_mode(app);
     // 已存在 → 先 show 再归位。
     //
     // ⚠️ 顺序不能反（V34 修的关键 bug）：`show()` 会把窗口提到 Z 序**顶层**，
     // 若先 `apply_attach` 贴到桌面层、再 `show`，刚贴好的层级立刻被顶掉 ——
-    // 用户看到的就是「格子跑到我其他窗口上面了」；等他点一下别的窗口，那个窗口
-    // 被激活盖过来，格子又像「消失」了。同一根因，两种表象。
-    // 正确顺序：先让它显示，再把它按基准层插回「桌面正上方」。
+    // 用户看到的就是「格子跑到我其他窗口上面了」。正确顺序：先显示，再贴回桌面层。
     if let Some(existing) = app.get_webview_window(GRID_LABEL) {
         let _ = existing.show();
-        let attach = apply_attach(&existing, mode);
-        let _ = write_overlay_visible(app, true);
-        mark_overlay_shown();
-        ensure_poller(app.clone());
-        // 用户主动「显示」= 重来一次：Z 序自愈的计数与退避全部复位
-        reset_reassert_state();
-        apply_takeover_pref(app);
-        grid_log("显示挂件层（复用已有窗口）");
-        return attach;
+        let _ = apply_attach(&existing, mode);
+        return Ok(existing);
     }
 
     // 几何：DB 优先（逻辑像素），缺省 = 主显示器工作区
@@ -2224,17 +2228,42 @@ fn show_overlay(app: &AppHandle) -> Result<(), String> {
     let _ = win.set_ignore_cursor_events(true);
     // 先 show 再归位：顺序理由同上（`show()` 会把窗口顶到 Z 序顶层）
     let _ = win.show();
-    // 按基准层归位（默认「贴到桌面」；失败时窗口仍在，把原因透给前端）
-    let attach = apply_attach(&win, mode);
+    let _ = apply_attach(&win, mode);
+    Ok(win)
+}
+
+/// 创建（幂等复用）并显示挂件窗，并接管桌面呈现（隐藏原生图标）。
+///
+/// 系统桌面图标的隐藏**不在这里决定**（V38）：由用户的「接管桌面」偏好
+/// （[`META_KEY_TAKEOVER`]，一键整理时置位）决定，见 [`apply_takeover_pref`]。
+fn show_overlay(app: &AppHandle) -> Result<(), String> {
+    let _ = ensure_overlay_window(app)?;
     let _ = write_overlay_visible(app, true);
     // 冷启动基线：给 webview 启动 + React 挂载留出宽限（判定见轮询线程）
     mark_overlay_shown();
     // 新窗从零开始，自愈状态一并复位
     reset_reassert_state();
     apply_takeover_pref(app);
-    grid_log("新建并显示挂件层");
+    grid_log("显示挂件层（复用/新建窗口）");
     ensure_poller(app.clone());
-    attach
+    Ok(())
+}
+
+/// 仅显示「便携工具箱」工具栏（V44.3）：挂件窗常驻桌面，但**不接管桌面呈现** ——
+/// 原生桌面图标恢复显示，格子内容不渲染。
+///
+/// 两种触发：① 用户点「隐藏挂件」（[`grid_overlay_hide`] 把 `overlay_visible` 置 false 后，
+/// 这条让工具栏独自留在桌面上）；② 启动期 `overlay_visible` 为 false（首次安装 / 关掉桌面整理）
+/// —— 桌面优先，工具栏也应常驻，否则「隐藏后 / 未接管时桌面没有任何入口」是死路。
+fn show_launcher_only(app: &AppHandle) -> Result<(), String> {
+    let _ = ensure_overlay_window(app)?;
+    // 桌面恢复原生图标（与 `grid_overlay_hide` 对称）；`overlay_visible` 保持原值（false）
+    let _ = takeover_icons(app, false);
+    mark_overlay_shown();
+    reset_reassert_state();
+    grid_log("显示桌面工具栏（格子内容收起，原生图标恢复）");
+    ensure_poller(app.clone());
+    Ok(())
 }
 
 /// 按用户的「接管桌面」偏好决定此刻要不要隐藏系统桌面图标（V38）。
@@ -2286,6 +2315,12 @@ pub fn restore_overlay_if_visible(app: &AppHandle) {
         if let Err(err) = show_overlay(app) {
             eprintln!("[Handy] 启动恢复桌面格子层失败：{err}");
         }
+    } else {
+        // 桌面优先（V44.3）：即便没接管，也把「便携工具箱」工具栏常驻桌面，
+        // 避免「隐藏后 / 未接管时桌面没有任何入口」的死路。
+        if let Err(err) = show_launcher_only(app) {
+            eprintln!("[Handy] 启动显示桌面工具栏失败：{err}");
+        }
     }
 }
 
@@ -2295,14 +2330,31 @@ pub async fn grid_overlay_show(app: AppHandle) -> Result<(), String> {
     show_overlay(&app)
 }
 
+/// 命令行 / 桌面右键菜单唤起（V45）：把桌面整理**完整显示**出来（内容 + 工具栏）。
+///
+/// 用在两条路上（见 `platform::desktop_menu`）：
+///   - `handy.exe --show-grid` 冷启动 → `lib.rs` setup 里直接调；
+///   - Handy 已在运行时，从桌面右键点「打开 Handy 桌面整理」→ 单实例回调里调。
+///
+/// 与 `restore_overlay_if_visible` 的区别：那个尊重「上次是否收起」的偏好，
+/// 这个把偏好写成「显示」并立刻显示 —— 用户点菜单就是想看见它。
+pub fn show_overlay_now(app: &AppHandle) {
+    if let Err(err) = show_overlay(app) {
+        grid_log(&format!("命令行显示挂件层失败：{err}"));
+    }
+}
+
 /// 隐藏桌面挂件窗（不销毁，盒子配置保留；再次 show 复用同一窗口）。
+///
+/// ⚠️ V44.3：**隐藏 = 收起「格子内容」，不隐藏挂件窗**——工具栏要常驻桌面，
+/// 否则隐藏后没有任何桌面入口能再打开整理（用户实测死路）。窗保持透明 + 点击穿透，
+/// 仅工具栏命中区可交互；原生桌面图标恢复显示。
 #[tauri::command]
 pub async fn grid_overlay_hide(app: AppHandle) -> Result<(), String> {
     FORCED_INTERACTIVE.store(false, Ordering::Relaxed);
+    // 保持窗可见（工具栏常驻），只把空白区域交还点击穿透；前端会据此收起格子内容。
     if let Some(win) = app.get_webview_window(GRID_LABEL) {
         let _ = win.set_ignore_cursor_events(true);
-        win.hide()
-            .map_err(|err| format!("隐藏桌面挂件失败：{err}"))?;
     }
     // 收起格子层即交还桌面：系统图标恢复显示（与 show 时隐藏对称）
     takeover_icons(&app, false);
@@ -2482,6 +2534,10 @@ pub struct OverlayStatus {
     pub attach_mode: String,
     /// 系统桌面图标是否处于隐藏态
     pub icons_hidden: bool,
+    /// 桌面整理内容是否处于「接管呈现」态（true = 格子/未归类/Dock 在桌面上；
+    /// false = 仅常驻工具栏，桌面恢复原生图标）。**注意**：挂件窗本身始终显示
+    /// （工具栏常驻），此字段只描述「格子内容」是否接管，不要和 `visible` 混淆。
+    pub engaged: bool,
 }
 
 /// 查询挂件层真实状态（**唯一真相来源**：窗口本身，而不是前端局部 state）。
@@ -2497,6 +2553,7 @@ pub async fn grid_overlay_status(app: AppHandle) -> Result<OverlayStatus, String
         exists,
         attach_mode: read_attach_mode(&app).as_str().to_string(),
         icons_hidden: read_icons_hidden(&app),
+        engaged: read_overlay_visible(&app),
     })
 }
 

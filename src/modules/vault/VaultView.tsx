@@ -34,7 +34,12 @@ import { isTauri } from '@/platform/detect';
 import type { VaultCategory, VaultItem } from '@/types/vault';
 
 /**
- * 密码存储器视图（M5）。
+ * 密码存储器视图。
+ *
+ * V45：**不再是独立模块，改为工具箱里的一个工具**（用户：「密码存储建议也作为工具箱的
+ * 其中一个工具吧 不要一个独立的工具箱模块」）。本文件的路径与实现保持不变，唯一变化是
+ * 注册方式：`modules/vault/index.ts`（模块注册）已删除，改由工具箱命令表里的 `vault`
+ * 条目经 `toolbox/commands/Vault.tsx` 引用本视图，分类「安全存储」。
  *
  * 状态机：loading → setup（未初始化）/ locked（已初始化未解锁）→ unlocked。
  * unlocked 态提供：搜索、按类别分组展示、显示/隐藏机密（15s 自动隐藏）、

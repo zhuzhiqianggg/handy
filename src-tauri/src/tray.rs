@@ -3,11 +3,13 @@
 //! Windows：系统托盘；macOS：菜单栏图标。两者共用本模块，交互差异按 `cfg` 处理。
 
 use tauri::{
+    async_runtime,
     menu::{MenuBuilder, MenuItemBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle,
+    Emitter, AppHandle,
 };
 
+use crate::commands;
 use crate::window;
 
 const TRAY_ID: &str = "main-tray";
@@ -23,12 +25,15 @@ pub fn setup(app: &AppHandle) -> Result<(), String> {
     let autostart_item = MenuItemBuilder::with_id("autostart", "开机自启")
         .build(app)
         .map_err(|e| format!("创建托盘菜单项失败：{e}"))?;
+    let overlay_item = MenuItemBuilder::with_id("toggle-overlay", "桌面整理：显示/隐藏")
+        .build(app)
+        .map_err(|e| format!("创建托盘菜单项失败：{e}"))?;
     let quit_item = MenuItemBuilder::with_id("quit", "退出")
         .build(app)
         .map_err(|e| format!("创建托盘菜单项失败：{e}"))?;
 
     let menu = MenuBuilder::new(app)
-        .items(&[&open_item, &settings_item, &autostart_item])
+        .items(&[&open_item, &settings_item, &autostart_item, &overlay_item])
         .separator()
         .items(&[&quit_item])
         .build()
@@ -49,6 +54,21 @@ pub fn setup(app: &AppHandle) -> Result<(), String> {
             }
             "autostart" => {
                 // TODO(V14)：调用 tauri-plugin-autostart 切换自启状态（读 settings 回显）
+            }
+            "toggle-overlay" => {
+                // 桌面整理：显示/隐藏切换（V44.3）—— 隐藏后工具栏仍常驻，托盘是兜底入口。
+                // 切换后向挂件窗发 `grid:visibility` 事件，前端据此收起 / 展开格子内容。
+                let app2 = app.clone();
+                async_runtime::spawn(async move {
+                    let engaged = commands::grid::read_overlay_visible(&app2);
+                    if engaged {
+                        let _ = commands::grid::grid_overlay_hide(app2.clone()).await;
+                        let _ = app2.emit_to(commands::grid::GRID_LABEL, "grid:visibility", false);
+                    } else {
+                        let _ = commands::grid::grid_overlay_show(app2.clone()).await;
+                        let _ = app2.emit_to(commands::grid::GRID_LABEL, "grid:visibility", true);
+                    }
+                });
             }
             "quit" => {
                 app.exit(0);

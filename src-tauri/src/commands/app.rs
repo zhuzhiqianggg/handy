@@ -31,6 +31,9 @@ pub async fn debug_log(message: String) {
 /// 退出应用。
 #[tauri::command]
 pub async fn app_quit(app: AppHandle) {
+    // 退出前先把系统桌面图标还给系统（V44.2）：托盘「退出」是用户最常用的离场路径，
+    // 这里显式恢复一次，确保即便 `RunEvent` 的退出分支因故没跑到，桌面也不会被留下空白。
+    crate::commands::grid::restore_desktop_icons(&app);
     app.exit(0);
 }
 
@@ -50,6 +53,27 @@ pub async fn app_hide_main(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub async fn app_toggle_main(app: AppHandle) -> Result<(), String> {
     window::toggle_main_palette(&app)
+}
+
+/// 桌面右键菜单入口：是否已装好（V45）。
+///
+/// 用户 09-19 发来腾讯桌面整理的截图问能不能借鉴 —— 借的就是它在「桌面空白处右键」
+/// 里加的那一项「开启桌面整理」。装在 HKCU，不需要管理员权限。
+#[tauri::command]
+pub async fn desktop_menu_status() -> Result<bool, String> {
+    platform::desktop_menu::status()
+}
+
+/// 装好桌面右键菜单入口（幂等）。
+#[tauri::command]
+pub async fn desktop_menu_install() -> Result<(), String> {
+    platform::desktop_menu::install()
+}
+
+/// 移除桌面右键菜单入口（不存在时也返回成功）。
+#[tauri::command]
+pub async fn desktop_menu_remove() -> Result<(), String> {
+    platform::desktop_menu::remove()
 }
 
 /// 设置主窗口置顶（设置项「窗口置顶」的唯一执行点）。

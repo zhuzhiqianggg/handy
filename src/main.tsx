@@ -7,6 +7,7 @@ import { diagLog } from '@/lib/diag';
 import { ipc } from '@/lib/ipc';
 import { installErrorSink } from '@/lib/errorSink';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
+import { TooltipProvider } from '@/components/ui/tooltip';
 import './index.css';
 
 /**
@@ -109,11 +110,17 @@ function start(): void {
     }
   }
 
+  // TooltipProvider 必须**包住所有窗口根**（V45 修）：工具组件（如密码生成器的
+  // `ResultBox`）内部用 `Tooltip`，而它既可能在主窗口（AppLayout 已有 Provider）渲染，
+  // 也可能在桌面挂件窗的抽屉里渲染 —— 后者此前没有 Provider，一点开就抛
+  // 「`Tooltip` must be used within `TooltipProvider`」白屏。放在根上两层都覆盖。
   ReactDOM.createRoot(rootElement).render(
     <React.StrictMode>
-      <ErrorBoundary label={target.windowRoot === 'main' ? '主界面' : '这个窗口'}>
-        <App windowRoot={target.windowRoot} noteId={target.noteId} />
-      </ErrorBoundary>
+      <TooltipProvider delayDuration={300}>
+        <ErrorBoundary label={target.windowRoot === 'main' ? '主界面' : '这个窗口'}>
+          <App windowRoot={target.windowRoot} noteId={target.noteId} />
+        </ErrorBoundary>
+      </TooltipProvider>
     </React.StrictMode>,
   );
 
@@ -196,6 +203,8 @@ function start(): void {
         diagLog(`navigate received: ${payload}`);
         if (payload.startsWith('module:')) {
           useAppStore.getState().setView({ kind: 'module', moduleId: payload.slice(7) });
+        } else if (payload === 'settings') {
+          useAppStore.getState().setView({ kind: 'settings' });
         } else if (payload !== '') {
           useAppStore.getState().setView({ kind: 'command', commandId: payload });
         }

@@ -68,7 +68,9 @@ function readRegisteredIcons() {
 /** 读取 `ToolCategory` 联合类型的成员。 */
 function readCategoryUnion() {
   const src = readFileSync(TYPES_FILE, 'utf8');
-  const match = src.match(/export type ToolCategory = ([^;]+);/);
+  // `\s*` 是 V45 补的健壮性：多行写法 `export type ToolCategory =\n  | 'text'` 也要能解析
+  // （此前要求等号后必须紧跟空格，一旦被格式化成换行就整表读空，33 条校验集体误报）。
+  const match = src.match(/export type ToolCategory\s*=\s*([^;]+);/);
   if (!match) return [];
   return [...match[1].matchAll(/'([a-z]+)'/g)].map((item) => item[1]);
 }

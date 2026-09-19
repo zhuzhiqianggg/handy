@@ -122,6 +122,8 @@ export interface OverlayStatus {
   attachMode: string;
   /** 系统桌面图标是否处于隐藏态 */
   iconsHidden: boolean;
+  /** 桌面整理内容是否处于「接管呈现」态（true=格子在桌面；false=仅常驻工具栏，原生图标恢复） */
+  engaged: boolean;
 }
 
 /** 挂件窗几何（逻辑像素，持久化在 grid_meta） */

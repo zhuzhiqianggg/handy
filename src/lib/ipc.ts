@@ -98,6 +98,15 @@ export const ipc = {
   /** 应用级：退出应用 */
   appQuit: (): Promise<void> => call<void>('app_quit'),
 
+  // —— 桌面右键菜单入口（V45，借鉴腾讯桌面整理）——
+
+  /** 桌面空白处右键的「打开 Handy 桌面整理」是否已装好 */
+  desktopMenuStatus: (): Promise<boolean> => call<boolean>('desktop_menu_status'),
+  /** 装好桌面右键菜单入口（写 HKCU，无需管理员权限；幂等） */
+  desktopMenuInstall: (): Promise<void> => call<void>('desktop_menu_install'),
+  /** 移除桌面右键菜单入口 */
+  desktopMenuRemove: (): Promise<void> => call<void>('desktop_menu_remove'),
+
   // —— 模块启停（V04）——
 
   /** 读取模块启停状态（`settings.modules`，仅显式覆盖项） */

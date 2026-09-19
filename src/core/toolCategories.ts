@@ -62,6 +62,14 @@ export const TOOL_CATEGORIES: readonly ToolCategoryMeta[] = [
     order: 40,
   },
   {
+    id: 'security',
+    name: '安全存储',
+    hint: '密码生成、凭据与密钥保管',
+    icon: 'ShieldCheck',
+    chip: 'bg-teal-50 text-teal-600',
+    order: 45,
+  },
+  {
     id: 'generate',
     name: '生成器',
     hint: '密码、UUID、二维码',

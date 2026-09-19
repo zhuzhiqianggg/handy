@@ -7,6 +7,7 @@ import {
   Info,
   LayoutGrid,
   Loader2,
+  MousePointerClick,
   Pencil,
   Plus,
   RefreshCw,
@@ -83,6 +84,13 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
   const [fault, setFault] = useState<string | null>(null);
   /** V42：语义说明卡默认折叠成一行，需要时再展开（减少首屏信息过载） */
   const [guideOpen, setGuideOpen] = useState(false);
+  /**
+   * 桌面空白处右键的「打开 Handy 桌面整理」入口是否已装（V45）。
+   *
+   * 借鉴腾讯桌面整理：桌面右键是用户在桌面上最自然的第一反射，比让用户去托盘里翻
+   * 菜单顺手得多。`null` = 还没问出来（浏览器预览 / IPC 失败），此时开关置灰。
+   */
+  const [desktopMenu, setDesktopMenu] = useState<boolean | null>(null);
 
   const refresh = useCallback(async (): Promise<void> => {
     setLoading(true);
@@ -116,7 +124,9 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
   const syncOverlayStatus = useCallback(async (): Promise<void> => {
     try {
       const status = await ipc.gridOverlayStatus();
-      setOverlayVisible(status.visible);
+      // ⚠️ V44.3：挂件窗始终显示（工具栏常驻），用 `engaged` 表示「格子内容是否接管」，
+      // 不能用 `visible`（窗口永远可见，会让「显示/隐藏格子」开关永远停在「隐藏」）。
+      setOverlayVisible(status.engaged);
     } catch {
       // 查询失败保持上次状态，不误报
     }
@@ -126,6 +136,10 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
     void refresh();
     void refreshSnapshots();
     void syncOverlayStatus();
+    void ipc
+      .desktopMenuStatus()
+      .then(setDesktopMenu)
+      .catch(() => setDesktopMenu(null));
     void ipc
       .gridOverlayFaultGet()
       .then(setFault)
@@ -147,6 +161,34 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
       })
       .finally(() => setBusy(false));
   }, [overlayVisible, syncOverlayStatus]);
+
+  /**
+   * 装 / 卸桌面空白处右键的「打开 Handy 桌面整理」入口（V45）。
+   *
+   * 写的是 `HKCU\Software\Classes\DesktopBackground\Shell`，**不需要管理员权限**；
+   * 卸载整键删除，不留残留。装好之后：Handy 没在跑 → 冷启动并直接把整理层显示出来；
+   * 正在跑 → 把整理层叫回来（而不是弹主窗口）。
+   */
+  const toggleDesktopMenu = useCallback((): void => {
+    const next = desktopMenu !== true;
+    setBusy(true);
+    const action = next ? ipc.desktopMenuInstall() : ipc.desktopMenuRemove();
+    void action
+      .then(() => {
+        setDesktopMenu(next);
+        toast.success(next ? '已加入桌面右键菜单' : '已从桌面右键菜单移除', {
+          description: next
+            ? '在桌面空白处点右键，即可看到「打开 Handy 桌面整理」'
+            : '右键菜单已恢复原样',
+        });
+      })
+      .catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        setError(message);
+        toast.error('桌面右键菜单设置失败', { description: message });
+      })
+      .finally(() => setBusy(false));
+  }, [desktopMenu]);
 
   const addBox = useCallback((): void => {
     setBusy(true);
@@ -532,6 +574,35 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
 
         {/* 诊断与修复（V37）：历史收纳残留撤回/清理 + 日志入口 */}
         <LegacyRepairCard />
+
+        {/* 桌面入口（V45）：借鉴腾讯桌面整理 —— 在「桌面空白处右键」里加一项入口。
+            为什么值得做：桌面右键是用户在桌面上最自然的第一反射，比去托盘里翻菜单顺手。 */}
+        <div className="mb-5 flex flex-wrap items-center gap-3 rounded-xl border border-border px-4 py-3">
+          <MousePointerClick className="h-4 w-4 shrink-0 text-brand" />
+          <div className="min-w-0 flex-1">
+            <p className="text-xs font-medium text-foreground">桌面右键菜单入口</p>
+            <p className="text-[11px] leading-relaxed text-muted-foreground">
+              在桌面空白处右键加一项「打开 Handy 桌面整理」（借鉴腾讯桌面整理的做法）。
+              写 `HKCU` 注册表，不需要管理员权限；关掉时整键删除，不留残留。
+              装好之后，无论 Handy 是否在运行，点它都能把桌面整理叫回来。
+            </p>
+          </div>
+          <Button
+            variant={desktopMenu === true ? 'outline' : 'secondary'}
+            size="sm"
+            onClick={toggleDesktopMenu}
+            disabled={busy || desktopMenu === null || !isTauri()}
+            title={
+              desktopMenu === null
+                ? '当前环境读不到注册表状态（浏览器预览不支持）'
+                : desktopMenu
+                  ? '从桌面右键菜单里移除这一项'
+                  : '加入桌面右键菜单'
+            }
+          >
+            {desktopMenu === true ? '已开启 · 点此关闭' : '开启'}
+          </Button>
+        </div>
 
         {/* 布局备份区 */}
         <div className="mb-5 rounded-xl border border-border">

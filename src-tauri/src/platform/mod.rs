@@ -13,6 +13,9 @@ mod windows;
 #[cfg(target_os = "windows")]
 pub mod shell_menu;
 
+/// 桌面背景右键菜单入口（V45，借鉴腾讯桌面整理）：HKCU 注册表，无需管理员权限。
+pub mod desktop_menu;
+
 #[cfg(target_os = "macos")]
 mod macos;
 

@@ -1,13 +1,13 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   CalendarDays,
+  Eye,
   EyeOff,
   File,
   FolderClosed,
   FolderOpen,
   HardDrive,
   KeyRound,
-  LayoutDashboard,
   Link2,
   Lock,
   LockOpen,
@@ -25,8 +25,6 @@ import {
   Zap,
 } from 'lucide-react';
 import { registry } from '@/core/moduleRegistry';
-import { searchCommands } from '@/lib/search';
-import type { CommandMeta } from '@/core/types';
 import {
   detectQuickLinkType,
   loadQuickLinks,
@@ -52,8 +50,12 @@ import type {
   TakeoverState,
 } from '@/types/grid';
 import { ACCENT_ORDER, CalendarWidget, NOTE_ACCENTS, NoteWidget } from './DesktopWidgets';
-import { DesktopToolPanel, type PanelEntry } from './DesktopToolPanel';
-import { DesktopQuickActions } from './DesktopQuickActions';
+import {
+  DesktopSidePanel,
+  SIDE_PANEL_SHELL,
+  type PanelEntry,
+  type SidePanelTab,
+} from './DesktopSidePanel';
 
 /**
  * 桌面网格挂件 · 透明覆盖窗（`grid-overlay`）。
@@ -88,10 +90,11 @@ import { DesktopQuickActions } from './DesktopQuickActions';
  *    （`quicklinks.ts`，localStorage 同源），把桌面图标 / 格子条目拖上去即可加进去、
  *    点一下就打开 —— 用户原话「工作台里面的快捷方式可以放在桌面上的例如 mac 电脑的
  *    快捷条一样方便快速打开……把桌面图标拖进来归纳到里面」。
- * 3. **桌面搜索 + 桌面工具箱抽屉**（工具栏「搜索」/「工具箱」）：搜工具 / 命令 / 模块，
- *    选中后**直接在桌面上的抽屉里打开**（`DesktopToolPanel`，复用各工具自己的组件）——
- *    不唤主窗口、不切窗口。用户原话「在桌面上我能快速搜索并一键打开工具，一键打开
- *    密码存储箱」「我在桌面上就能完成所有的操作 不需要调出一个窗口去找工具等」。
+ * 3. **桌面右侧统一面板**（V45；V42 的中部搜索浮层 + V43 的偏左大抽屉 + V44 的右下快捷
+ *    浮层三合一）：顶部搜索框 + 分类列表 + **面板原地打开工具本体**，另一个页签放
+ *    应用入口 / 我的快捷方式 / 系统入口。用户 09-19：「工具搜索应该放在右侧，跟工作台
+ *    差不多 直接搜索获取，而不是打开额外的对话框 很乱」—— 病根就是同一件事有多个入口。
+ *    组件见 `DesktopSidePanel`，工具仍复用各工具自己的组件，不另开窗口。
  * 4. **条目右键 = 系统原生菜单**（V43）：接管桌面后原生图标被隐藏，右键落到了我们窗口上，
  *    所以必须替 Shell 把它的菜单原样弹出来（`ipc.shellContextMenu` → `IContextMenu`），
  *    打开 / 打开方式 / 复制 / 删除 / 重命名 / 属性 + 第三方扩展项全都在。
@@ -168,29 +171,6 @@ const RESIZE_HANDLES: ReadonlyArray<{ edge: ResizeEdge; className: string; curso
 /** 右键菜单行（V41：格子 / 条目 / 未归类竖条菜单共用同一条样式） */
 const menuItemRowClass =
   'flex w-full items-center gap-2 px-2.5 py-1.5 text-left transition hover:bg-white/10';
-
-/**
- * 桌面搜索面板在「空查询」时列出的**一键直达**入口（V42）。
- *
- * 用户原话：「在桌面上我能快速搜索并一键打开工具，一键打开密码存储箱」——
- * 所以密码存储器与工作台排在头两个，敲一下就唤出主窗口对应页面。
- * `target` 的语义见 Rust `desktop_open_view`（`module:<id>` = 模块，其余 = 工具 id）。
- */
-const SEARCH_SHORTCUTS: ReadonlyArray<{
-  icon: typeof Search;
-  name: string;
-  hint: string;
-  target: string;
-}> = [
-  { icon: KeyRound, name: '密码存储器', hint: '打开密码箱（主窗口）', target: 'module:vault' },
-  { icon: LayoutDashboard, name: '工作台', hint: '日历 · 计划 · 笔记', target: 'module:notes' },
-  {
-    icon: Sparkles,
-    name: '桌面整理管理',
-    hint: '格子列表 · 备份布局 · 诊断修复',
-    target: 'module:desktop-organizer',
-  },
-];
 
 /** 取路径的最后一段（快捷条上用文件名当显示名） */
 function baseNameOf(path: string): string {
@@ -484,19 +464,31 @@ export function GridOverlay(): React.JSX.Element {
   const [dockActions, setDockActions] = useState<SysAction[]>([]);
   const quickActionIds = useAppStore((state) => state.settings.quickActionIds);
   const updateSettings = useAppStore((state) => state.updateSettings);
-  /** 桌面搜索面板（V42）：是否展开 */
-  const [searchOpen, setSearchOpen] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
   /**
-   * 桌面工具箱抽屉（V43）：是否展开 + 是否要直接打开某一项。
+   * 桌面右侧**统一面板**（V45）：取代 V42–V44 的「中部搜索浮层 + 偏左大抽屉 + 右下快捷浮层」
+   * 三件套（用户 09-19：「工具搜索应该放在右侧，跟工作台差不多 直接搜索获取，而不是打开
+   * 额外的对话框 很乱」「还是有点混乱」）。
    *
-   * 用户原话：「我在桌面上就能完成所有的操作 不需要调出一个窗口去找工具等」——
-   * 于是「搜索到工具 → 直接在桌面抽屉里打开它」，不再唤出主窗口。
+   * 桌面上现在只有这一个容器：`tab` 决定落在「工具」还是「快捷」页签，`entry` 非空时
+   * 直接进「使用模式」（面板原地换成那个工具的界面）。`null` = 面板关着。
    */
-  const [toolPanelOpen, setToolPanelOpen] = useState(false);
-  const [pendingEntry, setPendingEntry] = useState<PanelEntry | null>(null);
-  /** 桌面「快捷操作」浮层（V44）：工作台窗口退场，它的系统入口 / 我的快捷方式 / 应用入口都搬上桌面 */
-  const [quickActionsOpen, setQuickActionsOpen] = useState(false);
+  const [sidePanel, setSidePanel] = useState<{ tab: SidePanelTab; entry: PanelEntry | null } | null>(
+    null,
+  );
+  /**
+   * 桌面整理内容是否收起（V44.3）。
+   *
+   * true = 只留常驻「便携工具箱」工具栏，原生桌面图标恢复显示；格子 / 未归类竖条 /
+   * Dock / 搜索面板都不渲染。false = 完整桌面整理态。
+   *
+   * 根因：之前「隐藏挂件」把整个挂件窗 `hide` 了，工具栏跟着消失，桌面再无任何入口
+   * 能重新打开整理（用户实测死路）。现在挂件窗始终显示，只有「内容」收起，工具栏恒在。
+   * 初始值按 `grid_overlay_status().engaged` 定（重启后保持一致），并监听托盘发来的
+   * `grid:visibility` 事件（托盘点「桌面整理：显示/隐藏」时同步）。
+   */
+  const [contentHidden, setContentHidden] = useState(false);
+  /** 桌面「快捷操作」浮层（V44）已并入右侧统一面板（V45），见 `sidePanel` */
+
   /** 是否正处于「条目被拖着走」的状态（拖出格子 = 移出，落在根画布上要接住 drop） */
   const [itemDragging, setItemDragging] = useState(false);
   /**
@@ -540,12 +532,8 @@ export function GridOverlay(): React.JSX.Element {
   const looseRef = useRef<HTMLDivElement | null>(null);
   /** 桌面快捷条的 DOM 引用（V42）：纳入命中区域 + 原生拖放的落点判定 */
   const dockRef = useRef<HTMLDivElement | null>(null);
-  /** 桌面搜索面板的 DOM 引用（V42）：纳入命中区域 */
-  const searchRef = useRef<HTMLDivElement | null>(null);
-  /** 搜索输入框（展开时自动聚焦） */
-  const searchInputRef = useRef<HTMLInputElement | null>(null);
-  /** 桌面工具箱抽屉的外框（V43）：纳入命中区域 */
-  const toolPanelRef = useRef<HTMLDivElement | null>(null);
+  /** 桌面右侧统一面板的外框（V45）：纳入命中区域，面板开着时桌面其余部分照样能点 */
+  const sidePanelRef = useRef<HTMLDivElement | null>(null);
   /** 正在拖拽的未归类竖条条目（拖进格子 = 登记进去） */
   const looseDragRef = useRef<LooseEntry | null>(null);
   /** 空态卡片的 DOM 引用：它也要纳入命中区域，否则「创建第一个盒子」按钮点不到 */
@@ -677,6 +665,33 @@ export function GridOverlay(): React.JSX.Element {
       window.clearInterval(timer);
     };
   }, [showHint]);
+
+  // —— 桌面整理内容收起态（V44.3）：挂载时按后端 `engaged` 初始化，并监听托盘切换 ——
+  useEffect(() => {
+    if (!isTauri()) {
+      return;
+    }
+    // 启动期已接管（overlay_visible=1）→ 内容展开；否则只常驻工具栏。
+    void ipc
+      .gridOverlayStatus()
+      .then((status) => setContentHidden(!status.engaged))
+      .catch(() => undefined);
+    // 托盘「桌面整理：显示/隐藏」切换时，Rust 会向本窗发事件，保持前后端一致。
+    let unlisten: (() => void) | null = null;
+    void (async () => {
+      try {
+        const { getCurrentWindow } = await import('@tauri-apps/api/window');
+        unlisten = await getCurrentWindow().listen('grid:visibility', (event) => {
+          setContentHidden(!(event.payload as boolean));
+        });
+      } catch {
+        /* 事件监听失败不影响工具栏使用 */
+      }
+    })();
+    return () => {
+      unlisten?.();
+    };
+  }, []);
 
   // —— 健康监控（V32）：心跳 + 故障自捕获 ——
 
@@ -824,29 +839,31 @@ export function GridOverlay(): React.JSX.Element {
     .map((b) => `${b.id}:${b.posX},${b.posY},${b.width},${b.height}`)
     .join('|')}|sf=${scaleFactor}|loose=${
     loose ? `${loose.x},${loose.y},${loose.width},${loose.height}` : ''
-  }|dock=${dockLinks.length + dockActionList.length}|search=${searchOpen ? 1 : 0}|tools=${
-    toolPanelOpen ? 1 : 0
-  }|qa=${quickActionsOpen ? 1 : 0}`;
+  }|dock=${dockLinks.length + dockActionList.length}|panel=${
+    sidePanel === null ? '' : `${sidePanel.tab}:${sidePanel.entry?.id ?? ''}`
+  }`;
 
   useEffect(() => {
     if (!isTauri()) {
       return;
     }
-    const regions: GridRegion[] = visibleBoxes.map((box) => ({
-      x: box.posX * scaleFactor,
-      y: box.posY * scaleFactor,
-      width: box.width * scaleFactor,
-      height: box.height * scaleFactor,
-    }));
+    // 内容收起（V44.3）时只报工具栏命中区，其余区域交还原生桌面（点击穿透）。
+    const regions: GridRegion[] = contentHidden
+      ? []
+      : visibleBoxes.map((box) => ({
+          x: box.posX * scaleFactor,
+          y: box.posY * scaleFactor,
+          width: box.width * scaleFactor,
+          height: box.height * scaleFactor,
+        }));
     // 工具栏与空态卡片常驻可交互（锁定态也要能点「隐藏挂件 / 解锁」，空态要能直接建盒子）；
-    // 未归类竖条（V41）/ 快捷条 / 搜索面板（V42）渲染出来时同样要可交互
+    // 未归类竖条（V41）/ 快捷条 / 右侧统一面板（V45）渲染出来时同样要可交互
     for (const node of [
       toolbarRef.current,
       emptyRef.current,
       looseRef.current,
       dockRef.current,
-      searchRef.current,
-      toolPanelRef.current,
+      sidePanelRef.current,
     ]) {
       if (!node) {
         continue;
@@ -860,9 +877,9 @@ export function GridOverlay(): React.JSX.Element {
       });
     }
     void ipc.gridOverlayUpdateRegions(regions).catch(() => undefined);
-    // regionsKey 已覆盖 boxes 几何变化；eslint-disable 因键值派生依赖
+    // regionsKey 已覆盖 boxes 几何变化；contentHidden 翻转时要重算命中区（只留工具栏）
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [regionsKey, scaleFactor]);
+  }, [regionsKey, scaleFactor, contentHidden]);
 
   // —— 布局交互（mousemove 全局监听 + mouseup 落库） ——
 
@@ -1180,72 +1197,59 @@ export function GridOverlay(): React.JSX.Element {
     );
   }, []);
 
-  // —— 桌面搜索（V42） ——
+  // —— 桌面右侧统一面板（V45） ——
 
-  /** 打开搜索面板并聚焦输入框 */
-  const openSearch = useCallback((): void => {
-    setSearchOpen(true);
-    window.setTimeout(() => searchInputRef.current?.focus(), 0);
+  /** 打开面板（指定页签，可顺带直接打开一项）；已经开着时按需切页签 / 换项 */
+  const openPanel = useCallback((tab: SidePanelTab, entry: PanelEntry | null = null): void => {
+    setSidePanel({ tab, entry });
   }, []);
 
-  const closeSearch = useCallback((): void => {
-    setSearchOpen(false);
-    setSearchQuery('');
+  const closePanel = useCallback((): void => {
+    setSidePanel(null);
   }, []);
 
   /**
-   * 把搜索结果送进主窗口打开。
+   * 按「导航目标」在面板里打开一项（`module:<id>` / 命令 id）。
    *
-   * 视图状态是每窗口一份的（挂件窗改不了主窗口的 store），所以走 Rust
-   * `desktop_open_view` → `show 主窗 + handy:navigate`。
-   */
-  /**
-   * 打开一个目标（V42 起由桌面搜索面板调用，V43 改走桌面抽屉）。
-   *
-   * 用户原话：「我在桌面上就能完成所有的操作 不需要调出一个窗口去找工具等」——
-   * 所以搜到的工具 / 模块**直接在桌面抽屉里打开**，不再唤出主窗口。
-   * 只有抽屉开不了的目标（动作式命令，没有界面）才退回主窗口那条老路。
+   * 视图状态是每窗口一份的（挂件窗改不了主窗口的 store）。有界面的目标一律**在桌面面板
+   * 里就地打开**（用户：「我在桌面上就能完成所有的操作，不需要调出一个窗口去找工具」）；
+   * 只有面板开不了的（动作式命令，没有界面）才退回 Rust `desktop_open_view` 那条老路
+   * （show 主窗 + `handy:navigate`）。
    */
   const openTarget = useCallback(
     (target: string): void => {
-      closeSearch();
       const moduleId = target.startsWith('module:') ? target.slice('module:'.length) : null;
       if (moduleId !== null) {
         const mod = registry.enabled().find((item) => item.id === moduleId);
         if (mod?.loadView !== undefined) {
-          setPendingEntry({
+          openPanel('tools', {
             id: target,
             name: mod.name,
             description: mod.description,
             kind: 'module',
+            icon: mod.icon,
             load: mod.loadView as PanelEntry['load'],
           });
-          setToolPanelOpen(true);
           return;
         }
       } else {
         const command = registry.findCommand(target);
         if (command?.load !== undefined) {
-          setPendingEntry({
+          openPanel('tools', {
             id: command.id,
             name: command.name,
             description: command.description,
             kind: 'tool',
+            ...(command.category !== undefined ? { category: command.category } : {}),
+            ...(command.icon !== undefined ? { icon: command.icon } : {}),
             load: command.load as PanelEntry['load'],
           });
-          setToolPanelOpen(true);
           return;
         }
       }
       void ipc.desktopOpenView(target).catch((error: Error) => showHint(error.message));
     },
-    [closeSearch, showHint],
-  );
-
-  /** 搜索结果（空查询返回空数组，面板会改为展示 [`SEARCH_SHORTCUTS`]） */
-  const searchResults: CommandMeta[] = React.useMemo(
-    () => (searchQuery.trim().length === 0 ? [] : searchCommands(registry.commands(), searchQuery, 8)),
-    [searchQuery],
+    [openPanel, showHint],
   );
 
   /**
@@ -1772,9 +1776,31 @@ export function GridOverlay(): React.JSX.Element {
     [refreshLoose, showHint],
   );
 
-  const hideOverlay = useCallback((): void => {
-    void ipc.gridOverlayHide().catch(() => undefined);
-  }, []);
+  /**
+   * 桌面整理内容的「显示 / 隐藏」切换（V44.3）。
+   *
+   * 隐藏：收起格子 / 未归类 / Dock，恢复原生桌面图标，并顺手关掉右侧统一面板与右键菜单，
+   * 避免它们脱离格子孤零零飘在原生桌面上。挂件窗与工具栏**保持显示**。
+   * 显示：重新接管桌面呈现（按偏好隐藏原生图标），格子内容回到桌面。
+   */
+  const toggleOverlay = useCallback((): void => {
+    if (contentHidden) {
+      void ipc
+        .gridOverlayShow()
+        .then(() => setContentHidden(false))
+        .catch(() => undefined);
+    } else {
+      setSidePanel(null);
+      setMenuBox(null);
+      setMenuItem(null);
+      setMenuLoose(null);
+      setMenuDock(null);
+      void ipc
+        .gridOverlayHide()
+        .then(() => setContentHidden(true))
+        .catch(() => undefined);
+    }
+  }, [contentHidden]);
 
   /** 手动对账一次（清掉文件已不存在的失效登记，顺带刷新未归类竖条） */
   const syncNow = useCallback((): void => {
@@ -1797,6 +1823,29 @@ export function GridOverlay(): React.JSX.Element {
    * 便签 V35 起可以多个，所以不再置灰。
    */
   const hasCalendar = boxes.some((box) => box.kind === 'calendar');
+
+  /**
+   * 密码存储器（vault）的面板入口（V45）。
+   *
+   * V45 起 vault 不再是模块，而是**工具箱里的一个工具**（用户：「密码存储建议也作为
+   * 工具箱的其中一个工具吧 不要一个独立的工具箱模块」），所以这里按**命令**取；
+   * 拿到的仍是同一个 `VaultView`，不存在第二份实现。
+   */
+  const vaultEntry = useMemo<PanelEntry | null>(() => {
+    const command = registry.findCommand('vault');
+    if (command === undefined || typeof command.load !== 'function') {
+      return null;
+    }
+    return {
+      id: command.id,
+      name: command.name,
+      description: command.description,
+      kind: 'tool',
+      ...(command.category !== undefined ? { category: command.category } : {}),
+      ...(command.icon !== undefined ? { icon: command.icon } : {}),
+      load: command.load as PanelEntry['load'],
+    };
+  }, []);
 
   /** 新建一个与模板同款（同尺寸、同配色）的收纳格。 */
   const duplicateBox = useCallback(
@@ -1858,19 +1907,8 @@ export function GridOverlay(): React.JSX.Element {
     };
   }, [menuBox, menuItem, menuLoose, menuDock]);
 
-  /** 搜索面板打开时，Esc 关掉它（右键菜单那套监听不覆盖它） */
-  useEffect(() => {
-    if (!searchOpen) {
-      return undefined;
-    }
-    const onKey = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') {
-        closeSearch();
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [searchOpen, closeSearch]);
+  // 右侧统一面板的 Esc 由 `DesktopSidePanel` 自己处理（先退回列表，再关面板），
+  // 这里不再重复挂监听（V45 之前是搜索浮层专属的一段）。
 
   return (
     <div
@@ -1899,7 +1937,7 @@ export function GridOverlay(): React.JSX.Element {
       }}
     >
       {/* 盒子画布：每个盒子自身恢复指针事件（外层穿透不继承） */}
-      {visibleBoxes.map((box) => {
+      {!contentHidden && visibleBoxes.map((box) => {
         const boxItems = items[box.id] ?? [];
         const isDropTarget = dropTargetId === box.id;
         const isWidget = box.kind === 'note' || box.kind === 'calendar';
@@ -2224,7 +2262,7 @@ export function GridOverlay(): React.JSX.Element {
           等宽网格「先自上而下、再往右一列」铺开 —— 前后端差一列就会盖住分类格。
 
           只在接管模式下渲染：接管关着时桌面本来就看得见这些图标，再画一份就是两份。 */}
-      {takeover?.enabled === true && loose !== null && loose.columns > 0 && (
+      {!contentHidden && takeover?.enabled === true && loose !== null && loose.columns > 0 && (
         <div
           ref={looseRef}
           style={{
@@ -2295,7 +2333,7 @@ export function GridOverlay(): React.JSX.Element {
       )}
 
       {/* 一个格子都没有时给引导（卡片自身可交互，已纳入命中区域） */}
-      {boxes.length === 0 && (
+      {!contentHidden && boxes.length === 0 && (
         <div
           ref={emptyRef}
           style={{ pointerEvents: 'auto' }}
@@ -2429,7 +2467,7 @@ export function GridOverlay(): React.JSX.Element {
         })()}
 
       {/* 条目右键菜单（V41）：接管模式下给不了原生 shell 菜单，先补最高频的三件事 */}
-      {menuItem !== null && (
+      {menuItem !== null && !contentHidden && (
         <div
           key="grid-item-menu"
           ref={itemMenuRef}
@@ -2480,7 +2518,7 @@ export function GridOverlay(): React.JSX.Element {
       )}
 
       {/* 未归类竖条条目右键菜单（V41） */}
-      {menuLoose !== null && (
+      {menuLoose !== null && !contentHidden && (
         <div
           key="grid-loose-menu"
           ref={looseMenuRef}
@@ -2524,44 +2562,32 @@ export function GridOverlay(): React.JSX.Element {
         </div>
       )}
 
-      {/* 桌面工具箱抽屉（V43）：在桌面上直接开任意工具 / 页面。
-          用户原话：「我在桌面上就能完成所有的操作 不需要调出一个窗口去找工具等」。
-          外框用 pointerEvents:none（只把抽屉那块矩形报成命中区），
-          这样抽屉开着的时候，桌面其余部分照样能点、能拖。 */}
-      {toolPanelOpen && (
-        <div
-          ref={toolPanelRef}
-          style={{ pointerEvents: 'none' }}
-          className="absolute right-4 top-14 z-40 h-[78vh] w-[min(1120px,90vw)]"
-        >
-          <DesktopToolPanel
-            initial={pendingEntry}
-            onClose={() => {
-              setToolPanelOpen(false);
-              setPendingEntry(null);
-            }}
+      {/* 桌面右侧统一面板（V45）：工具搜索 / 工具箱 / 快捷入口三合一。
+          用户 09-19：「工具搜索应该放在右侧，跟工作台差不多 直接搜索获取，而不是打开
+          额外的对话框 很乱」—— 于是桌面上只保留这一个容器，V42–V44 那三个分散的浮层
+          （中部搜索、偏左大抽屉、右下快捷）合并到这里。
+          外框用 pointerEvents:none（只把面板那块矩形报成命中区），
+          这样面板开着的时候，桌面其余部分照样能点、能拖。
+          `key` 让「换页签 / 换目标」时重新挂载，面板内部状态（搜索词 / 当前工具）随之重置。 */}
+      {sidePanel !== null && (
+        <div ref={sidePanelRef} style={{ pointerEvents: 'none' }} className={SIDE_PANEL_SHELL}>
+          <DesktopSidePanel
+            key={`${sidePanel.tab}:${sidePanel.entry?.id ?? ''}`}
+            initialTab={sidePanel.tab}
+            initialEntry={sidePanel.entry}
+            onClose={closePanel}
+            onLaunch={openTarget}
+            onOpenLink={(link) => openDockLink(link)}
+            onRemoveLink={(id) => removeDockLink(id)}
           />
         </div>
-      )}
-
-      {/* 桌面「快捷操作」浮层（V44）：工作台窗口退场，系统入口 / 我的快捷方式 / 应用入口都在桌面直达 */}
-      {quickActionsOpen && (
-        <DesktopQuickActions
-          onClose={() => setQuickActionsOpen(false)}
-          onLaunch={(target) => {
-            setQuickActionsOpen(false);
-            openTarget(target);
-          }}
-          onOpenLink={(link) => openDockLink(link)}
-          onRemoveLink={(id) => removeDockLink(id)}
-        />
       )}
 
       {/* 桌面快捷条 Dock（V42）：底部居中，像 mac 的 Dock —— 点一下就开；
           把桌面图标 / 格子条目 / 未归类条目拖上来即可收成一条快捷方式。
           数据就是工作台那份 `quicklinks`（localStorage 同源），两边实时一致。
           只在「接管桌面」时出现 —— 接管关着时桌面上本来就是原生图标，不必再来一条。 */}
-      {takeover?.enabled === true && (
+      {takeover?.enabled === true && !contentHidden && (
         <div
           ref={dockRef}
           style={{ pointerEvents: 'auto' }}
@@ -2597,8 +2623,10 @@ export function GridOverlay(): React.JSX.Element {
             endItemDrag();
           }}
           title="桌面快捷条：点一下打开；把桌面图标拖到这里收成快捷方式（与工作台共用一份数据）"
-          className={`absolute bottom-5 left-1/2 flex max-w-[60vw] -translate-x-1/2 items-center gap-1.5 overflow-x-auto rounded-2xl px-2.5 py-2 shadow-2xl ring-1 backdrop-blur-xl transition ${
-            dockHot ? 'bg-sky-500/25 ring-sky-300/60' : 'bg-neutral-900/60 ring-white/15'
+          className={`absolute bottom-5 left-1/2 flex max-w-[60vw] -translate-x-1/2 items-center gap-1.5 overflow-x-auto rounded-2xl border border-white/10 px-2.5 py-2 shadow-2xl backdrop-blur-2xl transition ${
+            dockHot
+              ? 'bg-sky-500/30 ring-1 ring-sky-300/60'
+              : 'bg-neutral-900/85 ring-1 ring-white/10'
           }`}
         >
           {dockActions.length === 0 && dockLinks.length === 0 ? (
@@ -2666,77 +2694,8 @@ export function GridOverlay(): React.JSX.Element {
         </div>
       )}
 
-      {/* 桌面搜索（V42）：搜工具 / 命令 / 页面，选中即唤出主窗口打开。
-          空查询时列出三个「一键直达」（密码存储器排第一 —— 用户点名要的）。 */}
-      {searchOpen && (
-        <div
-          ref={searchRef}
-          style={{ pointerEvents: 'auto' }}
-          className="absolute bottom-5 right-[136px] flex w-80 flex-col overflow-hidden rounded-2xl bg-neutral-900/92 text-neutral-100 shadow-2xl ring-1 ring-white/15 backdrop-blur-xl"
-        >
-          <div className="flex items-center gap-2 border-b border-white/10 px-3 py-2">
-            <Search className="h-3.5 w-3.5 shrink-0 opacity-60" />
-            <input
-              ref={searchInputRef}
-              value={searchQuery}
-              onChange={(event) => setSearchQuery(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') {
-                  const first =
-                    searchResults.length > 0
-                      ? (searchResults[0]?.id ?? null)
-                      : (SEARCH_SHORTCUTS[0]?.target ?? null);
-                  if (first !== null) {
-                    openTarget(first);
-                  }
-                }
-              }}
-              placeholder="搜索工具 / 命令 / 页面…"
-              className="min-w-0 flex-1 bg-transparent text-xs text-neutral-100 outline-none placeholder:text-neutral-500"
-            />
-            <button
-              type="button"
-              onClick={closeSearch}
-              className="shrink-0 text-[10px] text-neutral-400 transition hover:text-neutral-100"
-            >
-              Esc
-            </button>
-          </div>
-          <div className="max-h-72 overflow-y-auto py-1">
-            {searchQuery.trim().length === 0
-              ? SEARCH_SHORTCUTS.map((item) => (
-                  <button
-                    key={item.target}
-                    type="button"
-                    onClick={() => openTarget(item.target)}
-                    className={menuItemRowClass}
-                  >
-                    <item.icon className="h-3.5 w-3.5 shrink-0 text-sky-300" />
-                    <span className="min-w-0 flex-1 truncate">{item.name}</span>
-                    <span className="shrink-0 text-[10px] text-neutral-500">{item.hint}</span>
-                  </button>
-                ))
-              : searchResults.map((cmd) => (
-                  <button
-                    key={cmd.id}
-                    type="button"
-                    onClick={() => openTarget(cmd.id)}
-                    className={menuItemRowClass}
-                  >
-                    <Search className="h-3.5 w-3.5 shrink-0 opacity-50" />
-                    <span className="min-w-0 flex-1 truncate">{cmd.name}</span>
-                    <span className="shrink-0 text-[10px] text-neutral-500">{cmd.moduleId}</span>
-                  </button>
-                ))}
-            {searchQuery.trim().length > 0 && searchResults.length === 0 && (
-              <p className="px-3 py-2 text-[11px] text-neutral-500">没有匹配的工具</p>
-            )}
-          </div>
-          <p className="border-t border-white/10 px-3 py-1.5 text-[10px] text-neutral-500">
-            选中即在主窗口打开（桌面层不另开窗口）
-          </p>
-        </div>
-      )}
+      {/* V45：中部搜索浮层已并入右侧统一面板（见上方 `sidePanel` 那段渲染），
+          这里不再有独立的搜索框与结果列表。 */}
 
       {/* 快捷条条目右键菜单（V42）：打开 / 从快捷条移除 */}
       {menuDock !== null && (
@@ -2785,16 +2744,14 @@ export function GridOverlay(): React.JSX.Element {
                 void updateSettings({
                   quickActionIds: quickActionIds.filter((item) => item !== id),
                 }).catch((error: Error) => showHint(error.message));
-                showHint('已从快捷条移除（可在工作台「快捷入口」里加回来）');
+                showHint('已从快捷条移除（可在桌面「快捷」面板里重新固定）');
               }
             }}
           >
             从快捷条移除
           </button>
           <p className="px-2.5 pb-1 pt-0.5 text-[10px] leading-relaxed text-neutral-500">
-            {menuDock.kind === 'link'
-              ? '与工作台的「快捷方式」是同一份数据'
-              : '与工作台的「快捷入口」是同一份数据'}
+            与桌面「快捷」面板共享同一份数据
           </p>
         </div>
       )}
@@ -2805,52 +2762,54 @@ export function GridOverlay(): React.JSX.Element {
         style={{ pointerEvents: 'auto' }}
         className="absolute bottom-5 right-5 flex flex-col gap-1.5 rounded-2xl bg-neutral-900/75 px-2 py-2 shadow-2xl ring-1 ring-white/15 backdrop-blur-xl"
       >
-        {/* 组 0：快捷入口（搜索 / 一键打开）—— V42：主面板只留工具箱与密码存储器，
-            其余功能都在桌面上直达，这条路就是「在桌面上快速搜索并一键打开」 */}
+        {/* 组 0：面板入口（工具 / 快捷）—— V45：桌面上只有“一块面板”，两个按钮分别落到
+            它的两个页签；搜索框就在面板顶部，打开即用，不再有第二处搜索框。 */}
         <div className="flex items-center gap-0.5">
           <button
             type="button"
             onClick={() => {
-              setQuickActionsOpen(false);
-              openSearch();
+              if (sidePanel !== null && sidePanel.tab === 'tools') {
+                closePanel();
+              } else {
+                openPanel('tools');
+              }
             }}
-            title="搜索工具 / 命令 / 页面（密码存储器、工作台、桌面整理管理也在这里一键打开）"
+            title="工具面板：在右侧搜索并直接使用任意工具 / 页面（密码存储器、工作台、桌面整理都在这）"
             className={`flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[11px] font-medium transition hover:bg-white/10 ${
-              searchOpen ? 'text-sky-300' : 'text-neutral-200'
+              sidePanel !== null && sidePanel.tab === 'tools' ? 'text-sky-300' : 'text-neutral-200'
             }`}
           >
             <Search className="h-3.5 w-3.5" />
-            搜索
+            工具
           </button>
           <button
             type="button"
             onClick={() => {
-              setQuickActionsOpen(false);
-              setPendingEntry(null);
-              setToolPanelOpen(true);
+              if (sidePanel !== null && sidePanel.tab === 'quick') {
+                closePanel();
+              } else {
+                openPanel('quick');
+              }
             }}
-            title="工具箱：在桌面上直接打开任意工具或页面（不用开窗口）"
+            title="快捷面板：应用入口 / 我的快捷方式 / 系统入口（hosts 编辑、服务、证书…）"
             className={`flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[11px] font-medium transition hover:bg-white/10 ${
-              toolPanelOpen ? 'text-sky-300' : 'text-neutral-200'
-            }`}
-          >
-            <Wrench className="h-3.5 w-3.5" />
-            工具箱
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setSearchOpen(false);
-              setToolPanelOpen(false);
-              setQuickActionsOpen((prev) => !prev);
-            }}
-            title="快捷操作：系统入口（hosts 编辑等）/ 我的快捷方式 / 应用入口，全在桌面直达（工作台窗口已退场）"
-            className={`flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[11px] font-medium transition hover:bg-white/10 ${
-              quickActionsOpen ? 'text-sky-300' : 'text-neutral-200'
+              sidePanel !== null && sidePanel.tab === 'quick' ? 'text-sky-300' : 'text-neutral-200'
             }`}
           >
             <Zap className="h-3.5 w-3.5" />
             快捷
+          </button>
+          <button
+            type="button"
+            onClick={() => openPanel('tools', vaultEntry)}
+            disabled={vaultEntry === null}
+            title="密码存储器：在右侧面板里直接打开（它是工具箱里的一个工具，不再单占模块）"
+            className={`flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[11px] font-medium transition hover:bg-white/10 ${
+              sidePanel?.entry?.id === 'vault' ? 'text-sky-300' : 'text-neutral-200'
+            }`}
+          >
+            <KeyRound className="h-3.5 w-3.5" />
+            密码箱
           </button>
         </div>
         {/* 组 1：布局 */}
@@ -2945,12 +2904,18 @@ export function GridOverlay(): React.JSX.Element {
         </button>
         <button
           type="button"
-          onClick={hideOverlay}
-          title="隐藏挂件（可在应用内重新打开）"
-          className="flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[11px] font-medium text-neutral-200 transition hover:bg-white/10"
+          onClick={toggleOverlay}
+          title={
+            contentHidden
+              ? '显示桌面整理：把格子 / 未归类 / Dock 重新摆回桌面（原生图标再次接管）'
+              : '收起桌面整理：只留这个工具栏，桌面恢复原生图标（随时可再显示）'
+          }
+          className={`flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[11px] font-medium transition hover:bg-white/10 ${
+            contentHidden ? 'text-sky-300' : 'text-neutral-200'
+          }`}
         >
-          <EyeOff className="h-3.5 w-3.5" />
-          隐藏
+          {contentHidden ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
+          {contentHidden ? '显示' : '隐藏'}
         </button>
         </div>
       </div>

@@ -58,7 +58,7 @@ import {
 import { toast } from '@/components/ui/toast';
 import { ipc } from '@/lib/ipc';
 import { isTauri } from '@/platform/detect';
-import { openModule, openSettings } from '@/core/navigation';
+import { openSettings, openTarget } from '@/core/navigation';
 import { DEFAULT_QUICK_ACTION_IDS } from '@/core/settings';
 import { useAppStore } from '@/stores/useAppStore';
 import { cn } from '@/lib/utils';
@@ -145,12 +145,17 @@ export const ACTION_ICONS: Record<string, LucideIcon> = {
   defender: ShieldAlert,
 };
 
-/** 应用内跳转（走模块视图，跨窗口状态由 store 驱动） */
-const APP_SHORTCUTS: ReadonlyArray<{ moduleId: string; name: string; description: string; icon: LucideIcon }> = [
-  { moduleId: 'notes', name: '工作台', description: '日历 · 任务 · 便签 · 快捷入口', icon: LayoutGrid },
-  { moduleId: 'toolbox', name: '工具箱', description: '23 个本地小工具（对比 / Cron / 正则 / 编码…）', icon: Wrench },
-  { moduleId: 'vault', name: '密码存储器', description: 'AES-256-GCM 加密的本地密码库', icon: ShieldCheck },
-  { moduleId: 'desktop-organizer', name: '桌面整理', description: '一键整理桌面 · 布局备份还原', icon: AppWindow },
+/**
+ * 应用内跳转（走模块视图 / 命令视图，跨窗口状态由 store 驱动）。
+ *
+ * V45：`target` 统一为「导航目标字符串」（`module:<id>` 或命令 id）——
+ * vault 已从模块降级为工具箱工具，所以它这里是命令 id `vault` 而不是 `module:vault`。
+ */
+const APP_SHORTCUTS: ReadonlyArray<{ target: string; name: string; description: string; icon: LucideIcon }> = [
+  { target: 'module:notes', name: '工作台', description: '日历 · 任务 · 便签 · 快捷入口', icon: LayoutGrid },
+  { target: 'module:toolbox', name: '工具箱', description: '25 个本地小工具（对比 / Cron / 正则 / 编码…）', icon: Wrench },
+  { target: 'vault', name: '密码存储器', description: 'AES-256-GCM 加密的本地密码库', icon: ShieldCheck },
+  { target: 'module:desktop-organizer', name: '桌面整理', description: '一键整理桌面 · 布局备份还原', icon: AppWindow },
 ];
 
 /** 栏内单个图标按钮的固定边长（与 `h-11 w-11` 一致） */
@@ -383,19 +388,24 @@ export function QuickActionsRail(): React.JSX.Element {
       .finally(() => setRunningId(null));
   };
 
-  const isModuleActive = (moduleId: string): boolean =>
-    view.kind === 'module' && view.moduleId === moduleId;
+  /** 该导航目标当前是否就是正在展示的视图（模块看 moduleId，命令看 commandId） */
+  const isTargetActive = (target: string): boolean => {
+    if (target.startsWith('module:')) {
+      return view.kind === 'module' && view.moduleId === target.slice('module:'.length);
+    }
+    return view.kind === 'command' && view.commandId === target;
+  };
 
   /** 待排布的按钮节点（应用内跳转在前，系统动作在后，顺序即用户的自定义顺序） */
   const items = useMemo<React.JSX.Element[]>(() => {
     const nodes: React.JSX.Element[] = APP_SHORTCUTS.map((item) => (
       <RailButton
-        key={`app-${item.moduleId}`}
+        key={`app-${item.target}`}
         icon={item.icon}
         name={item.name}
         description={item.description}
-        active={isModuleActive(item.moduleId)}
-        onClick={() => openModule(item.moduleId)}
+        active={isTargetActive(item.target)}
+        onClick={() => openTarget(item.target)}
         onTip={setTip}
         onTipEnd={() => setTip(null)}
       />

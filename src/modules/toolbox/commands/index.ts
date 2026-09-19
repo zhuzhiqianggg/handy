@@ -371,4 +371,21 @@ export const toolboxCommands: CommandMeta[] = [
     tier: 'free',
     load: () => import('./ApiTester'),
   },
+  {
+    id: 'vault',
+    category: 'security',
+    moduleId: 'toolbox',
+    name: '密码存储器',
+    description: 'AES-256-GCM 加密的本地密码库（主密码解锁）',
+    icon: 'ShieldCheck',
+    aliases: ['vault', 'password', 'passwords', 'keepass'],
+    keywords: ['密码', '密码库', '保险库', '密钥', '凭据', 'vault', 'password', 'mima', 'yaoshi', 'mmcq'],
+    layout: 'split',
+    tier: 'free',
+    sensitive: true,
+    // V45：vault 不再是独立模块（用户：「密码存储建议也作为工具箱的其中一个工具，
+    // 不要一个独立的工具箱模块」）。视图组件原样复用 `modules/vault/VaultView`，
+    // 安全实现（Argon2id 派生 + Rust 侧加密）一个字都没动。壳文件见 `./Vault.tsx`。
+    load: () => import('./Vault'),
+  },
 ];
