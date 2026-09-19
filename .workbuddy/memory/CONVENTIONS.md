@@ -1148,3 +1148,17 @@ V40.1 真机启动还抓到第二条：`Z 序自动纠正已连续失败 5 次�
   （用户截图里「工具栏不见了」的观感来源之一）。
   ⇒ 约定：**写死像素避让时，把「被避让方的实际宽度」写进注释**，
   并把它当作「改动那个组件时要一起更新的东西」。
+
+### 27.x 装机取证：mtime 对齐是唯一证据（V46 补装踩到）
+
+- `scripts/build-release.sh --no-deploy` 之后 **必须手动补一次部署**，否则
+  「日志 6/6 完成 + exit 0」只说明包造出来了，桌面上跑的还是上一份构建。
+- 判定同源只用两条：
+  1. `stat -c %y "$LOCALAPPDATA/Handy/handy.exe"` 与
+     `src-tauri/target/release/handy.exe` 的 mtime **对齐**；
+  2. `cmp -l` 两者只差 **3 字节**（`_VAR_UNK`→`_NSS`）。
+- **不要用 sha256 判断同源**：同一源码两次 cargo release 构建哈希天然不同
+  （本次差 620 万字节）。hash 变化 ≠ 代码变了，hash 相同才说明是同一次构建产物。
+- 部署前的安全门（缺一不可）：进程已停 → `desktop-icon-probe.py` 复核
+  explorer 的 `SysListView32 vis=True` → `grid-meta-dump.py` 看 `desktop_icons_hidden`。
+  本次三者都满足，所以没走「停进程 → 归还图标」那套（那套的前提是进程还活着）。
