@@ -1,7 +1,7 @@
 # Handy · 顺手 — 项目现状与续接指引
 
 > **从 `handy` 目录打开项目，先读这一份。** 它回答三个问题：**做到哪了 → 还剩什么 → 怎么继续**。
-> 最近更新：2026-09-19（**V44 批次：桌面优先重构——桌面即主界面（启动不弹主窗口）+ 桌面快捷操作浮层**） · 长期约定见 [`.workbuddy/memory/MEMORY.md`](memory/MEMORY.md) · 逐日进展见 [`memory/`](memory/) · 规划文档见 [`../docs/README.md`](../docs/README.md)
+> 最近更新：2026-09-19（**V47 批次：Win+D 桌面消失（Z 序锚定法）· 菜单命中区白名单 · 拖放源对称 · 挂件区整列保留 · 新建挂件重排 · 便签 Markdown**） · 长期约定见 [`.workbuddy/memory/MEMORY.md`](memory/MEMORY.md) · 逐日进展见 [`memory/`](memory/) · 规划文档见 [`../docs/README.md`](../docs/README.md)
 
 ---
 
@@ -2355,6 +2355,81 @@ exit 0（`handy.exe` 14:53:50 晚于 `dist/index.html` 14:52:17）·
 3. 抽屉是**实心的**：壁纸再花也读得清；工具本体也是实心底。
 4. 抽屉更宽更高，列表字号更大；右下角工具栏不再被抽屉盖住。
 5. 工具标题栏「在控制台打开」→ 主窗口直达该工具；顶栏「控制台」→ 主窗口。
+
+### 1.33 V47 批次（用户 10 条反馈 + 7 截图：**Win+D 桌面全空 · 图标全都不能拖 · 右键菜单点不动** —— 三条核心不可用；用户质问「你的设计逻辑是否真的对呢」）
+
+用户原话（节选）：「windows+d 展示桌面后格子这些本身都是桌面的一部分，我显示桌面后这些我们的桌面整理都没有了，包括原桌面都没有」；
+「现在桌面上的图标所有的都不能拖动了，直接是圆圈禁止状态」；
+「我右键刚打开这个菜单的时候几个菜单都不能点击…等个 2s 左右就可以点击了…按理说这种右键菜单我鼠标离开菜单区域这个菜单就应消失的，
+改了这么多版本这种基本问题都还有，**你的设计逻辑是否真的对呢**」。
+
+#### 1.33.1 共性根因：三条没写下来的「隐式假设」
+
+本轮三条核心故障都不是「没做」，而是**把某次偶然观察当成了永恒前提**，且都没配可验证的判据：
+
+| 隐式假设 | 什么时候崩 | V47 换成的显式不变量 |
+| --- | --- | --- |
+| 「桌面宿主永远在普通窗带最底」→ 单步 `SetWindowPos(HWND_BOTTOM)` | **Win+D** 把 Progman 抬到带顶 | **锚定法** `anchor = GetWindow(host, GW_HWNDPREV)`：overlay 永远插在宿主正上方，宿主移到哪都成立 |
+| 「点不动是前端没渲染」 | 弹层矩形从未进命中区白名单，只能靠「鼠标碰巧回到某个格子矩形」才恢复 | **命中区白名单**：overlay 全局 `ignore_cursor_events`，凡要能点的区域（含菜单）必须显式上报；菜单打开期间强制可交互 |
+| 「拖拽只有一种来源」 | 从左侧竖条拖没置 `itemDragging` → 根画布 `pointerEvents:none` → 不 `preventDefault` → 浏览器拒绝放下 | **拖放源对称**：`startLooseDrag` 与 `startItemDrag` 必须同置状态 |
+
+- 直接证据：`handy.log` **265+ 条** `Z 序不对（TooHigh/BelowDesktop，第 N 次纠正）`；
+  新探针 `scripts/audit/zdiag.py` 现场事实 —— overlay `topmost=False`、其上方堆着
+  **10+ 个 `handy.exe` 自己的 `IME` 窗口**（WebView2 每个 webview 一个）、往下 6 层才到 Progman。
+- 关键教训：V46 那句「已摆回桌面层」**只证明调用没报错**，不证明摆对了。
+  V47 纠正后**再复验一次**，不对就打 `摆回桌面层后复验**仍不对**`。
+
+#### 1.33.2 其余七条的落点
+
+| # | 用户反馈 | 状态 | 落点 |
+| --- | --- | --- | --- |
+| 1 | 装机自动加「桌面整理」右键菜单 | ✅ | `ensure_desktop_menu` 启动幂等注册；`desktop_menu_remove` 写 `desktop_menu_optout=1`，之后启动跳过（尊重用户关闭），`install` 清标记 |
+| 2 | 此电脑/回收站/用户的文件图标像按钮 | ◐ | 只去掉 `bg-white/10 ring` 底片、统一成裸图标；**仍不是 Windows 真实图标**（下一步：CLSID 探针 + `SHGetFileInfoW` + `SHGFI_SYSICONINDEX`） |
+| 4 | 格子错位 / 宽度不一 / 钻到日历下 | ✅ | 挂件区**整列保留**（`col_left_at`）：凡与挂件区相交的列全高归挂件区。本机实测日历占 2 列、收纳格剩左侧 2 列 |
+| 5 | 默认隐藏的快捷方式仍显示 | ✗ | 未定位；需过滤 `FILE_ATTRIBUTE_HIDDEN` |
+| 6 | 新建便签位置不合适 | ✅ | 新增轻量命令 **`grid_relayout`**（只归位不扫描），新建挂件后立即调用；前端不再硬算 `40 + n*344` |
+| 7 | 便签 Markdown（`---` / 三反引号） | ◐ | `---` 是 CommonMark **setext 规则**（紧跟段落行 = 二级标题下划线）→ 渲染前补空行规范化；三反引号只能写一行是 **`AUTO_PAIRS` 把反引号当配对**、同行被就地闭合 → 特判摊成三行围栏 + `handleEnter` 加「围栏内一律纯换行」守卫。已验证不误伤 `\|---\|---\|` |
+| 8 | 左侧系统工具区是禁区 | ◐ | 禁区已生效（系统图标与快捷方式不造格子）；**「拖进格子才动」语义待做** |
+| 9 | 图标全都不能拖（禁止圆标） | ✅ | 见 1.33.1 第三条 |
+| 10 | 右键菜单点不动 / 应离开即消失 | ✅ | 见 1.33.1 第二条；四个菜单统一 `scheduleMenuLeave` / `cancelMenuLeave`（300ms），并去掉 `backdrop-blur` 改实心 |
+
+#### 1.33.3 改动清单
+
+- `src-tauri/src/commands/grid.rs`：`place_above_desktop` 改锚定法；`reassert_attach` 纠正后复验；
+  新增 `META_KEY_DESKTOP_MENU_OPTOUT` / `ensure_desktop_menu`；`layout_all_boxes_with` 增「挂件区整列保留」；
+  新增命令 `grid_relayout`；`real_desktop_data_lays_out_in_aligned_columns` 断言重写
+  （原 `min_offset <= pitch` 是过时期望值 —— 它假设「最右可用列是第 0 列」，整列保留后失效；
+  换成两条与实现解耦的：① 分类格不得侵入挂件区 ② 与挂件区之间不得空出整列）。
+- `src-tauri/src/lib.rs`：注册 `grid_relayout`；setup 中调 `ensure_desktop_menu`。
+- `src-tauri/src/commands/app.rs`：`desktop_menu_install` / `desktop_menu_remove` 落 `desktop_menu_optout`。
+- `src/modules/desktop-grid/GridOverlay.tsx`：菜单矩形纳入命中区上报 + `anyMenuOpen` 强制可交互；
+  `startLooseDrag` 置 `itemDragging`；根画布同时认 `itemDragRef` / `looseDragRef`；
+  四个菜单统一「离开即关闭」；`addWidget` 新建后 `grid_relayout` + `refresh`；`LooseIcon` 去底片。
+- `src/modules/desktop-grid/GridManagerView.tsx`、`src/lib/ipc.ts`：去掉新建坐标硬算 / 新增 `gridRelayout`。
+- `src/lib/markdown.ts`、`src/components/MarkdownEditor.tsx`：`normalizeHorizontalRules` + 围栏三行展开 + 围栏内回车守卫。
+- `scripts/audit/zdiag.py`（**新增**）：Z 序诊断（扩展样式 / 自身往下 60 层 / 上面盖着谁）。
+- `docs/02-architecture/DESKTOP-LAYER.md`：§2.4 更正（V46 结论作废，改锚定法 + 复验）；
+  新增 §2.6 命中区白名单 / §2.7 拖放源对称 / §2.8 挂件区整列保留 / §2.9 新建后重排。
+
+#### 1.33.4 验证与产物取证
+
+tsc **0 错** · `cargo test --lib` **47/47** · 回归 **17/17 套** · `build-release.sh --no-deploy` exit 0
+（`handy.exe` 16:53:36 晚于 `dist/index.html`）。装机：`handy.exe` mtime **16:53:30**、
+size 11307520（与产物完全一致），`cmp -l` **恰好 3 字节**（`_VAR_UNK`→`_NSS`）。
+装机前按铁律：查库（旧版接管中 `desktop_icons_hidden=1`）→ `Stop-Process` → `desktop-icon-restore.py`
+→ 复核 `vis=True` → `--clear-icons-hidden` → NSIS `/S`。**装机后不代启动**（HEAD = `823219f`）。
+装机后独立复核：无 `handy.exe` 进程 · `desktop_icons_hidden=0` · 正链 `SysListView32 vis=True`
+→ 桌面不会空白。⚠️ 日志 16:53:56 又出现一次「曾被系统恢复 → 已重新接管」（其后无新启动头）：
+**还原脚本放出图标后，自愈会在秒级再藏回去**，再次印证「接管期间装机不能先恢复再杀」。
+
+#### 1.33.5 待用户验收点
+
+1. **Win+D / 点桌面空白 → 整理层与原生桌面都不消失**（本轮第一优先）。
+2. 桌面上**所有图标都能拖**（不再出禁止圆标），从左侧竖条也能拖出/拖回。
+3. 右键菜单**点开即可点**（不必等 2s、也不必把鼠标挪开再回来），**鼠标离开菜单即消失**。
+4. 收纳格上下对齐、宽度一致，**不再钻到日历下面**；新建便签/日历后**自动落到合理位置**。
+5. 便签里 `---` 出分割线、三反引号出可多行扩展的代码块。
+6. 装机后桌面右键应已有「Handy 桌面整理」（若你手动删过则不会再自动加，可到整理设置页重装）。
 
 ## 2. 剩余任务与已知风险
 

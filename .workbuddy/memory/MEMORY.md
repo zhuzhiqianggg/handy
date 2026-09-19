@@ -16,21 +16,21 @@
 - 真实数据：库 `%APPDATA%\com.handy.desktop\handy.db`（接管态看 `grid_meta`：`overlay_visible`/`desktop_takeover`/`desktop_icons_hidden`）；日志 `%LOCALAPPDATA%\Handy\handy.log`；装好的程序 `%LOCALAPPDATA%\Handy\handy.exe`（NSIS currentUser `/S`）。
 - 命令：Rust 前置 `source scripts/rust-env.sh`；类型检查 `node node_modules/typescript/bin/tsc --noEmit -p tsconfig.json`；打包 `bash scripts/build-release.sh --no-deploy`（PortableGit 全路径 bash + 显式 PATH）；回归 `scripts/regression/run.mjs`（17 套）；自检 `scripts/audit/`（tool-audit / layout-audit / sample-smoke / window-probe.py / desktop-icon-probe.py / **desktop-icon-restore.py**）。
 
-## 3. 状态快照（2026-09-19 · **V46 已打包并静默装机，待用户 GUI 验收**）
-- ★ **桌面格子 = 呈现层**（V37 立，别按旧结论推理）：条目只是桌面文件的引用登记，拖入/移出/一键归类**一个字节都不移动文件**。V33–V36 的「真实收纳」(`fs::rename` 进 `桌面/Handy整理/<格名>/`) 已被用户否决作废。整理后必须由格子**接管桌面呈现**（隐藏 `SysListView32`），否则同一批文件显示两遍——用户反复投诉点。
-- ★ **接管与归还**：`grid_overlay_hide` **不隐藏挂件窗**，只收「格子内容」+ 恢复原生图标 —— 工具栏**常驻桌面**（否则隐藏后无入口再打开整理 = 死路）。启动走 `restore_overlay_if_visible`（接管→`show_overlay`，未接管→`show_launcher_only`），**不弹主窗口**。退出恢复三处：`ExitRequested`＋`Exit`＋`app_quit`（**强杀不会触发任何一处** → 见 §4 装机铁律）。
+## 3. 状态快照（2026-09-19 · **V47 已打包并静默装机，待用户 GUI 验收**；装机后复核：无进程 / `desktop_icons_hidden=0` / 正链 `SysListView32 vis=True`）
+- ★ **桌面格子 = 呈现层**（V37 立）：条目只是桌面文件的引用登记，拖入/移出/一键归类**一个字节都不移动文件**（V33–V36 的「真实收纳」已被用户否决）。整理后必须**接管桌面呈现**（隐藏 `SysListView32`），否则同一批文件显示两遍。
+- ★ **接管与归还**：`grid_overlay_hide` **不隐藏挂件窗**，只收「格子内容」+ 恢复原生图标 —— 工具栏**常驻桌面**（否则隐藏后无入口 = 死路）。启动走 `restore_overlay_if_visible`，**不弹主窗口**。退出恢复三处：`ExitRequested`＋`Exit`＋`app_quit`（**强杀不触发** → 见 §4）。
 - 端到端布局测试用 `layout_all_boxes_with(loose_count)` 注入落单数，**不得依赖跑测试那台机器的桌面**。DB 迁移链 v1→v9，由 `cargo test --lib` 守住。
-- ★ **桌面层权威定义 → `docs/02-architecture/DESKTOP-LAYER.md`（V46 新建，先读它）**：六区结构 + `overlay_visible` 唯一真源（`On`/`Off`）+ 五条不变量 + 桌面层保险 + 工具呈现模型。别再按代码注释里的旧结论推理。
-- ★ **Z 序：`SetWindowPos(hwnd, X)` 是把 hwnd 放到 X 下面**（V46 现场实验确立，见 CONVENTIONS §27）。「贴桌面正上方」= **单步 `HWND_BOTTOM`**，幂等。旧的两步法方向写反了，靠「普通窗口不可能低于桌面」的钳制侥幸成立。
-- ★ **桌面层保险指标 = 产品指标**：检测 **1s**、判到就纠、退避上限 **5s**（旧：3s/两次去抖/失败退避 **300s** → 真机单会话 265 条 `TooHigh`）。不变量：`Off ⇒ 原生图标必须可见`（V45 的 `reassert_takeover` 只看偏好不看 `overlay_visible` ⇒ 收起后图标又被藏 = 空桌面）；`On ⇒ 窗口可见`（新增「显示态却不可见 → `show()` 捞回」）。单测 47/47（新增 `band_insurance_recovers_fast`）。
-- 布局不变量（V38–V42）：三段排布（左上固定列 / 中段流布 / 挂件右上）+ 左下「不整理」竖条（`loose_strip_rect`，系统图标与快捷方式不造格子）；**镜像流布**（`FlowPlacer::{mirror,min_x}`，第 0 列=最右列；⚠️ first-fit 会回填空档，**偏移量非单调**，断言别写单调）；自动整理**先清后算**（`dissolve_auto_boxes`）；摆放「条目少的先摆」填挂件压出的缝。
+- ★ **桌面层权威定义 → `docs/02-architecture/DESKTOP-LAYER.md`（先读它）**：六区结构 + `overlay_visible` 唯一真源 + 不变量 + 桌面层保险。别再按代码注释里的旧结论推理。
+- ★ **Z 序用锚定法，别用「压在窗口带最底」**（V47 更正，见 DESKTOP-LAYER §2.4）：`SetWindowPos(hwnd, X)` 把 hwnd 放到 X **下面**；「贴桌面正上方」= `anchor = GetWindow(host, GW_HWNDPREV)`（同 band 内取，不跨 topmost）再 `SetWindowPos(overlay, anchor)`。⚠️ **V46 的「单步 `HWND_BOTTOM` 就够」已作废** —— 它只在实验那一瞬成立，**Win+D 把 Progman 抬到带顶**，overlay 就被压到宿主下面、整块桌面消失。真正的不变量是「永远紧贴宿主上方」，与宿主位置无关。
+- ★ **桌面层保险指标 = 产品指标**：检测 **1s**、判到就纠、退避上限 **5s**（旧：3s/两次去抖/失败退避 **300s** → 真机单会话 265 条 `TooHigh`）。不变量：`Off ⇒ 原生图标必须可见`（V45 的 `reassert_takeover` 只看偏好不看 `overlay_visible` ⇒ 收起后图标又被藏 = 空桌面）；`On ⇒ 窗口可见`（新增「显示态却不可见 → `show()` 捞回」）。单测 47/47。★ **纠正后必须复验**：V46 那句「已摆回桌面层」**只证明调用没报错**，不证明摆对了（V47 加二段复验）。
+- 布局不变量（V38–V42）：三段排布（左上固定列 / 中段流布 / 挂件右上）+ 左下「不整理」竖条（`loose_strip_rect`，系统图标与快捷方式不造格子）；**镜像流布**（`FlowPlacer::{mirror,min_x}`，第 0 列=最右列；⚠️ first-fit 会回填空档，**偏移量非单调**，断言别写单调）；自动整理**先清后算**（`dissolve_auto_boxes`）；摆放「条目少的先摆」填挂件压出的缝；**挂件区整列保留**（与挂件相交的列全高归挂件区）+ 新建挂件后调 `grid_relayout` 立即归位。
 
 ### 批次索引（细节见 PROJECT_STATUS §1.x）
 - **V42–V44.3** 左侧竖条 · 镜像流布 · 桌面 Dock/搜索 · 桌面优先（启动不弹主窗、对话框面板→桌面抽屉、挂件窗常驻 + `contentHidden`）。
-- **V45** `TooltipProvider` 提到 `main.tsx` 根覆盖**所有窗口根**（工具会跑在挂件窗，任何依赖主窗口壳的能力都要在挂件窗补齐）；三套旧面板合并为 `DesktopSidePanel.tsx`；密码存储器并入工具箱；恢复 `notes`/`desktop-organizer` 侧栏（主窗口=「按需宿主」，启动仍不弹）；桌面右键菜单 `platform/desktop_menu.rs`（`--show-grid` → `show_overlay_now`）。
-- **V46** 桌面层保险 v2（见上）+ 修 `reassert_takeover` 空桌面 + 新增捞回路径 + 日志限流带 `z_chain_brief()`；桌面上的**面板/工具本体/工具栏/Dock 全部改实心**（用户：「不要透明了 透明有问题」），抽屉尺寸 620→**820px** 且 `right-[252px]`（旧 124px 会盖住工具栏）；工具标题栏「在控制台打开」→ `desktop_open_view`；新增诊断 `scripts/audit/zorder-probe.py`（复刻 Rust 判定 + 实验）。
+- **V45** `TooltipProvider` 提到 `main.tsx` 根覆盖**所有窗口根**（工具会跑在挂件窗，依赖主窗口壳的能力必须在挂件窗补齐）；三面板合并为 `DesktopSidePanel.tsx`；密码存储器并入工具箱；桌面右键菜单 `platform/desktop_menu.rs`。
+- **V46** 桌面层保险 v2（见上）+ 面板/工具本体/工具栏/Dock 全改**实心**（用户：「不要透明了 透明有问题」），抽屉 620→**820px** 且 `right-[252px]`（旧 124px 盖住工具栏）；新增诊断 `scripts/audit/zorder-probe.py`。
+- **V47** ① **Z 序锚定法** + 纠正后复验（修 Win+D / 点空白整层消失）② 弹层与菜单矩形纳入**命中区白名单** + 菜单打开期间强制可交互 + 离开即关闭（300ms）③ `startLooseDrag` 补 `itemDragging`（修「禁止圆标」拖不动）④ 挂件区整列保留 ⑤ 新增 `grid_relayout`；便签：`---` 的 setext 规范化 + 三反引号摊成三行围栏。新增 `scripts/audit/zdiag.py`。
 - ⚠️ agent 会话启动不了本 GUI（新旧版本一律挂死启动早期，非代码问题）→ 打包 + `/S` 静默装即止，**不代启动**，请用户自己启动。唯一阻塞项 = 用户装机 GUI 验收。
-- 预存未清（与本批无关）：`sample-smoke` 13 个工具内探针过期、`layout-audit` 2/84（`base64-codec`/`cron-descriptor` @680 窄屏微裁切）。
 
 ## 4. 协作与操作约定
 - 用户偏好：先规划后执行；表格化；绝对路径；改文件前先读取；目录扁平。
