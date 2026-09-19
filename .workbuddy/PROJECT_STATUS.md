@@ -2246,6 +2246,116 @@ tool-audit **339 PASS / 0 FAIL / 0 WARN** · `build-release.sh --no-deploy` exit
 4. 主窗口侧栏重新能看到**工作台 / 桌面整理**入口。
 5. 桌面空白处右键 → 「打开 Handy 桌面整理」能唤回整理层；「设置 → 桌面整理管理」里有开关。
 
+---
+
+### 1.32 V46 批次（用户：**点桌面空白就整层消失** · 要先把桌面布局结构/逻辑设计清楚 · 工具别透明 · 尺寸不友好）
+
+用户原话：「点了下空白的地方桌面全都消失了，然后我到托盘里面点了下 handy，然后最小化 handy，
+桌面才又出来，好像必须有个顶层页面最小化后才能出来我们的整理桌面。**按理说应该不管什么情况
+只要是桌面都无条件显示整理（除非是桌面整理关闭状态）**。你要整个交互逻辑 桌面功能都梳理清晰了，
+**先设计好桌面布局结构 在设计逻辑**。另外工具箱这些工具类**不要透明了，透明有问题**，
+工具打开还是可以直接切换 handy 控制台页面，或者我们可以直接裁剪到 handy 控制台，
+在桌面的每个挂件例如工具箱挂件上搜索查找到对应的工具直接弹出对应的工具框，
+现在这个全都是透明很难清楚的操作。**还有大小也不太友好**。」
+
+#### 1.32.1 先诊断：三份证据钉死了「桌面消失」的机制
+
+用户机 `handy.log`（11 次启动 523 行）+ 两个**现场探针**（都是只读的）：
+
+| 证据 | 内容 | 结论 |
+| --- | --- | --- |
+| `handy.log` 词频 | **265 条** `Z 序不对（TooHigh，第 N 次纠正）`，单轮连续 5 次后 `暂停 300 秒`；另有 8 条 `BelowDesktop` | Z 序守卫在真机上**一直在判、一直在纠、还纠不对**，且失败后 5 分钟放弃自愈 |
+| `window-probe.py zlist` | 挂件窗 `0x21098` 的**正下方就是 `Progman`**，`vis=True` | 层级那一刻其实是**对的** → 判据或纠正动作有问题，不是环境 |
+| 新建 `zorder-probe.py`（复刻 Rust 判定） | 复刻 `desktop_host()` + 走链 → 结论 `InDesktopBand`；再用**自建顶层窗**做 `SetWindowPos` 语义实验 | 见下面两条真根因 |
+
+**真根因 ①：`place_above_desktop` 的第二步方向是反的。**
+`SetWindowPos(hwnd, hWndInsertAfter, ...)` 的语义是「把 hwnd 放到 `hWndInsertAfter`
+**下面**」（实验：`SetWindowPos(B, A)` 之后 B 落在 A 下方）。旧实现两步走
+`HWND_BOTTOM` → `SetWindowPos(hwnd, host)`，第二步等于「放到桌面宿主**之下**」。
+在 `desktop_host()` 返回 `Progman` 的机器上因为「普通窗口不可能低于桌面」被系统钳制，
+侥幸成立；一旦命中「顶层 WorkerW」那条分支，就会把挂件层推到**原生图标背后**
+—— 正是用户截图里的「只有壁纸 + 回收站」。V46 起只保留幂等的单步 `HWND_BOTTOM`。
+
+**真根因 ②：`Off` 态会被自愈重新藏图标。**
+`grid_overlay_hide` 交还图标后，3 秒一次的 `reassert_takeover` **只看接管偏好、
+不看 `overlay_visible`**，于是又把图标藏回去 —— 「格子内容收起 + 图标也被藏」= 空桌面。
+这解释了日志里 `交还图标 → 收起挂件层 → 接管图标 → 显示挂件层` 的一秒级抖动。
+
+**另外一条结构缺口**：窗口若「显示态却不可见」，轮询线程只做「图标归还」，
+**没有任何路径把它重新显示出来** —— 只能靠用户去托盘瞎点（用户实测）。
+
+#### 1.32.2 先结构、再逻辑（用户明确要求的设计产出）
+
+新建 `docs/02-architecture/DESKTOP-LAYER.md`（**权威**），把此前散在代码注释里的约定收口成：
+
+1. **§1 桌面布局结构**：六区（① 不整理竖条 ② 格子流布区 ③ 挂件区 ④ 桌面抽屉
+   ⑤ Dock ⑥ 工具栏）+ 两条硬约束（区域不重叠、几何只来自 Rust）。
+2. **§2 桌面模式状态机**：`overlay_visible` 是**唯一真源**，对外只有 `On` / `Off`；
+   给出派生表（谁在什么模式下是什么样）与**五条不变量**：
+   I1 `Off ⇒ 原生图标可见`、I2 `On ⇒ 挂件窗可见且在桌面正上方`、I3 挂件窗恒可见、
+   I4 窗口显隐与图标显隐同源、I5 绝不移动用户文件。
+3. **§2.4 桌面层保险**：采样 25ms / 检测 1s / 幂等纠正 / 退避 5s，参数即产品指标。
+4. **§3 工具呈现模型**：实心化规则、尺寸规则、进控制台的出口。
+5. **§4 诊断三件套**：出问题时先跑哪三条命令。
+
+#### 1.32.3 落地
+
+- **桌面层保险 v2**（`grid.rs`）：
+  - `REASSERT_INTERVAL_SECS` 3 → **1**（恢复延迟 = 用户看到的故障时长）；
+  - 去掉「连续两次才动手」的去抖 → **判到就纠**（动作已幂等）；
+  - `REASSERT_GIVEUP_BACKOFF_SECS` 300 → **5**（旧值一次故障 = 5 分钟无自愈）；
+  - `place_above_desktop` 重写为单步 `HWND_BOTTOM`（附实测依据）；
+  - Z 序纠正日志**限流但不吞第一条**，并带上新增的 `z_chain_brief()`
+    —— 一行里写明「往下走的前 4 个窗口是谁」（输入法助手窗会折叠成 `×N`），
+    以后一条日志就能定位夹层。
+- **不变量 I1 落地**：`reassert_takeover` 先读 `overlay_visible`，`Off` 态直接返回
+  并兜底 `release_icons_if_taken`。
+- **不变量 I2 落地**：轮询线程新增「显示态却不可见 → `show()` + 重新贴回」，
+  宽限 `VISIBLE_RECOVER_TICKS = 1000 / POLL_INTERVAL_MS`（≈1 秒）。
+- **工具实心化 + 尺寸**（用户第 3、4 点）：`DesktopSidePanel` 外壳
+  `bg-neutral-900/93 + backdrop-blur-2xl` → **`bg-neutral-900`（不透明）**，
+  工具本体区 `bg-neutral-950/45` → **`bg-neutral-950`**；外壳从
+  `right-[124px] bottom-[96px] w-[min(620px,…)]` → **`right-[252px] bottom-[92px]
+  w-[min(820px,calc(100vw-300px))]`**（`right-[124px]` 是按「工具栏约 92px 宽」估的，
+  V45 加了「密码箱」按钮后工具栏宽到约 236px，面板会盖住它；下缘 92px 仍要让开 Dock
+  —— Dock 最宽 `60vw` 且居中，**横向会跨到面板下方**，不能靠横向错开）；列表行高、标题字号
+  统一上调一档；工具栏 `/75 + blur` → `/95`、Dock `/85 + blur` → `/95`。
+- **进控制台**（用户第 3 点）：「在控制台打开」两处入口 —— 面板顶栏「控制台」
+  （`app_show_main`）+ 工具标题栏「在控制台打开 <工具名>」（`desktop_open_view(entry.id)`，
+  模块走 `module:<id>`、工具走命令 id，与主窗口 `handy:navigate` 监听语义对齐）。
+- **新增诊断脚本** `scripts/audit/zorder-probe.py`（复刻判定 + 实验，见 §1.32.1）。
+
+#### 1.32.4 改动清单
+
+- `docs/02-architecture/DESKTOP-LAYER.md`（**新增**）：桌面层权威设计。
+- `src-tauri/src/commands/grid.rs`：常量三处（1s / 5s / 新增 `VISIBLE_RECOVER_TICKS`、
+  `Z_LOG_INTERVAL_SECS`、`LAST_Z_LOG_AT`）；`place_above_desktop` 重写；
+  `reassert_attach` 去去抖 + 限流日志；新增 `z_chain_brief()`；轮询线程新增
+  「显示态却不可见 → 捞回」；`reassert_takeover` 增加 I1 前置判断；
+  单测新增 `band_insurance_recovers_fast`（把三个时间参数写成产品指标断言）。
+- `src/modules/desktop-grid/DesktopSidePanel.tsx`：实心化 + 尺寸 + 「控制台」两处入口。
+- `src/modules/desktop-grid/GridOverlay.tsx`：工具栏 / Dock 去透明。
+- `scripts/audit/zorder-probe.py`（**新增**）。
+
+#### 1.32.5 验证
+
+tsc **0 错** · `cargo test --lib` **47/47**（+1 新测试）· 回归 **17/17** ·
+tool-audit **339 PASS / 0 FAIL / 0 WARN** · `zorder-probe.py` 现场判定
+**`InDesktopBand`**（与 `zlist` 一致，证明判据与现场对齐）· `build-release.sh --no-deploy`
+exit 0（`handy.exe` 14:53:50 晚于 `dist/index.html` 14:52:17）·
+装机：`handy.exe` mtime 14:18 → **14:53**、大小 11299840 → 11301376，
+`cmp -l` **恰好 3 字节**（偏移 10247540–10247542，`UNK`→`NSS`，即 NSIS 的占位替换）。
+装机前按铁律停进程 → 立刻 `desktop-icon-restore.py`（`SysListView32` 可见=True）→
+`grid-meta-dump.py --clear-icons-hidden`（`desktop_icons_hidden` 1→0）。**装机后不代启动**。
+
+#### 1.32.6 待用户验收点
+
+1. **点桌面空白处之后，整理层不再消失**；即便被系统挪走，1 秒内自动回来（无需去托盘折腾）。
+2. 点工具栏「隐藏」→ 桌面回到**原生样子**（原生图标必须回来），工具栏仍在。
+3. 抽屉是**实心的**：壁纸再花也读得清；工具本体也是实心底。
+4. 抽屉更宽更高，列表字号更大；右下角工具栏不再被抽屉盖住。
+5. 工具标题栏「在控制台打开」→ 主窗口直达该工具；顶栏「控制台」→ 主窗口。
+
 ## 2. 剩余任务与已知风险
 
 ### 2.1 🔴 唯一阻塞项：装机 GUI 验收（用户执行）
