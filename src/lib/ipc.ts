@@ -238,6 +238,13 @@ export const ipc = {
    */
   gridAutoArrange: (dir?: string | null): Promise<AutoArrangeReport> =>
     call<AutoArrangeReport>('grid_auto_arrange', { dir: dir ?? null }),
+  /**
+   * 只重排、不扫描（V47）。
+   *
+   * 新建便签 / 日历之后必须调一次：否则新挂件停在 `grid_box_upsert` 的默认坐标
+   * （32,32）上，正好压住左侧「不整理」竖条那条禁区。
+   */
+  gridRelayout: (): Promise<void> => call<void>('grid_relayout'),
   /** 导出当前桌面布局快照（备份用；只含几何与路径引用，不含文件内容） */
   gridLayoutExport: (): Promise<GridLayout> => call<GridLayout>('grid_layout_export'),
   /** 从布局快照还原（替换式：先清空现有格子，再按快照重建） */

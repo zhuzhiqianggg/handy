@@ -411,6 +411,17 @@ function handleEnter(state: EditState): EditState | null {
     return insertText(state, '\n');
   }
 
+  // —— 围栏代码块内一律换行，不续列表（V47）——
+  //
+  // 用户原话：「code ```输入貌似只能输入一行内容，不能自动根据我的输入扩展行数」。
+  // 代码里 `- ` / `1. ` / `> ` 全是**字面内容**，不是列表标记；不拦住的话，
+  // 在代码块里回车会被塞进一个 "- " 前缀，代码直接写坏。
+  // 判据：光标之前出现了奇数个围栏行 ⇒ 此刻在围栏内部。
+  const fences: number = (value.slice(0, start).match(/^[ \t]*(?:`{3,}|~{3,})/gm) ?? []).length;
+  if (fences % 2 === 1) {
+    return insertText(state, '\n');
+  }
+
   const blockStart: number = lineStartOf(value, start);
   const lineBefore: string = value.slice(blockStart, start);
 
@@ -724,6 +735,33 @@ export function MarkdownEditor({
           applyEdit(next);
         }
         return;
+      }
+
+      // —— 围栏代码块：连敲第三个反引号时摊成三行（V47）——
+      //
+      // 用户原话：「code ```输入貌似只能输入一行内容，不能自动根据我的输入扩展行数」。
+      // 根因：`AUTO_PAIRS` 把反引号也当成了「成对符号」—— 敲第一个 ` 立刻补出 ``，
+      // 敲到第三个时又命中"右侧已有闭符号就跳过"分支，于是三个反引号**在同一行被就地闭合**，
+      // 围栏从头到尾只有一行，代码无处可写。
+      //
+      // 这里特判「补上的第三个反引号」= 用户明确要一个代码块：直接摊成
+      // ```\n<缩进>\n```，并把光标放到中间那行。缩进跟随当前行，
+      // 这样在列表项里也能插代码块。单个反引号的行内代码仍走原有自动配对。
+      if (event.key === '`' && !mod && !event.altKey) {
+        const state: EditState = readState();
+        const twoBefore: string = state.value.slice(Math.max(0, state.start - 2), state.start);
+        if (state.start === state.end && twoBefore === '``') {
+          event.preventDefault();
+          const lineStart: number = lineStartOf(state.value, state.start);
+          const indent: string = /^[ \t]*/.exec(state.value.slice(lineStart, state.start))?.[0] ?? '';
+          const head: string = state.value.slice(0, state.start - 2);
+          const tail: string = state.value.slice(state.end);
+          // 三行：开围栏 / 缩进占位 / 闭围栏
+          const block: string = `\`\`\`\n${indent}\n${indent}\`\`\``;
+          const caret: number = head.length + 4 + indent.length;
+          applyEdit({ value: `${head}${block}${tail}`, start: caret, end: caret });
+          return;
+        }
       }
 
       const closing: string | undefined = AUTO_PAIRS[event.key];

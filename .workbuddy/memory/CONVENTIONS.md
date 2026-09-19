@@ -1162,3 +1162,40 @@ V40.1 真机启动还抓到第二条：`Z 序自动纠正已连续失败 5 次�
 - 部署前的安全门（缺一不可）：进程已停 → `desktop-icon-probe.py` 复核
   explorer 的 `SysListView32 vis=True` → `grid-meta-dump.py` 看 `desktop_icons_hidden`。
   本次三者都满足，所以没走「停进程 → 归还图标」那套（那套的前提是进程还活着）。
+
+### 27.y 现场实验的**样本代表性**（V47 血案，比代码 bug 更贵）
+
+V46 把 `place_above_desktop` 改成单步 `SetWindowPos(hwnd, HWND_BOTTOM)`，依据是
+`zorder-probe.py` 的现场实验：「沉底之后往下走立刻就是桌面宿主」。
+这个实验**成立，但只在做实验的那一刻成立** —— 那时 `Progman` 恰好待在最底。
+用户按一次 Win+D，Shell 把 `Progman` 抬到普通窗口带**最顶**，同一行代码就把挂件层
+压到了桌面**下面**，桌面全空。
+
+- **教训**：验证窗口层级 / 时序 / 并发这类"状态会变"的行为时，
+  **实验样本必须覆盖反例状态**（宿主不在最底 / 窗口被最小化 / 前台窗口切换）。
+  只在一个稳态上跑通的实验，得到的是"此刻的经验值"，不是不变量。
+- **推论**：只要结论写成「A 一定成立」，就要能说出「什么情况下 A 不成立」；
+  说不出来就说明还没验完。这次正确的不变量是**「挂件层紧贴桌面宿主正上方」**
+  （`anchor = GetWindow(host, GW_HWNDPREV)` + `SetWindowPos(hwnd, anchor)`），
+  与宿主在哪无关，所以 Win+D 也打不破。
+- **配套动作**：纠正动作之后**必须当场复验**。只记录"调用没报错"的日志等于没有日志
+  （V46 的「已摆回桌面层」就是这么骗过自己的）。
+
+### 27.z 挂件窗的**可交互性是白名单**（V47）
+
+挂件窗整窗 `set_ignore_cursor_events(true)`，由 Rust 按前端上报的命中区决定何时切回可交互。
+
+- **没上报 = 不可点击。** 加任何浮层（右键菜单 / 气泡 / 弹层）时，
+  **必须**把它的矩形加进 `gridOverlayUpdateRegions` 的上报名单，
+  并把"开/合"进 `regionsKey`（矩形尺寸只能渲染后量）。
+- 右键菜单这类"点了就要能用"的东西，**不能只靠 25ms 轮询**：
+  打开时再显式 `gridSetInteractive(true)` 按住。
+- 该由**几何**决定的事，不要用 `onMouseEnter/onMouseLeave` 去近似 ——
+  本次「离开再回去就能点」的假象就是 hover 语义与命中语义不一致造成的。
+
+### 27.aa 拖放：多个拖拽源必须共用同一套状态（V47）
+
+`startItemDrag`（格子内）与 `startLooseDrag`（左侧竖条）必须**对称**：
+都置 `itemDragging`（它决定根画布 `pointerEvents`）、都设 `effectAllowed='copyMove'`、
+都由 `endItemDrag` 收尾；根画布的 `onDragOver`/`onDrop` 必须同时认两个 ref。
+漏一个 → 该来源拖拽时整层仍穿透 → 浏览器画**圆圈禁止**。

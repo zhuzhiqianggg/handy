@@ -257,6 +257,17 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
           height: preset.height,
         })
         .then(async () => {
+          // V47：新建后立刻重排（只归位、不扫描）。
+          //
+          // 用户原话：「添加便签后这个位置放在这里也不合适，便签的位置需要自动放在
+          // 合理的位置上」。此前这里硬算了一个 `40 + n*344` 的"网格位"，那两个数
+          // 跟实际列宽 / 左侧禁区宽度毫无关系 —— 新建的便签会压在「不整理」竖条上。
+          // 交给布局流水线归位，才能保证「列对齐 + 挂件区整列保留」那套不变量成立。
+          try {
+            await ipc.gridRelayout();
+          } catch {
+            // 归位失败不影响已建好的挂件；下次「一键整理」会纠正。
+          }
           await refresh();
           toast.success(kind === 'note' ? `已新建${preset.name}` : '已新建日历挂件', {
             description: overlayVisible

@@ -68,6 +68,41 @@ function escapeHtml(text: string): string {
 }
 
 /**
+ * 把「贴着正文的 `---`」还原成用户想要的**分割线**（V47）。
+ *
+ * 用户原话：「现在 --- 分割线不支持」。这不是解析器坏了，而是 CommonMark 的 setext 规则：
+ * `---` 紧跟在段落行下面时会被当成「二级标题下划线」，于是
+ *
+ * ```text
+ * 今天要做
+ * ---
+ * ```
+ *
+ * 渲染成 `<h2>今天要做</h2>`，分割线消失。语法上完全合规，但在便签这个场景里
+ * 「`---` = 分割线」是压倒性的期望，而标题另有 `##`/`###` 可写。
+ * 所以这里做一次**规范化**：`---` 独占一行且上一行非空时，先补一个空行，让它落成 `<hr>`。
+ *
+ * 只处理连字符（`*` / `_` 不参与 setext，本来就永远是 `<hr>`，不必动）。
+ *
+ * @param src Markdown 源文本
+ * @returns 规范化后的源文本（不改变任何其他行的内容）
+ */
+function normalizeHorizontalRules(src: string): string {
+  const lines: string[] = src.replace(/\r\n?/g, '\n').split('\n');
+  const out: string[] = [];
+  for (const line of lines) {
+    if (/^\s{0,3}-{3,}\s*$/.test(line)) {
+      const prev: string = out.length > 0 ? (out[out.length - 1] ?? '') : '';
+      if (prev.trim() !== '') {
+        out.push('');
+      }
+    }
+    out.push(line);
+  }
+  return out.join('\n');
+}
+
+/**
  * 将 Markdown 渲染为安全的 HTML 片段。
  *
  * @param src Markdown 源文本
@@ -80,7 +115,7 @@ export function renderMarkdown(src: string): string {
   try {
     installHooks();
     // marked v18 的 parse() 存在同步 / 异步重载，显式 `async: false` 走同步分支
-    const raw: string = markedInstance.parse(src, { async: false });
+    const raw: string = markedInstance.parse(normalizeHorizontalRules(src), { async: false });
     return DOMPurify.sanitize(raw, {
       // GFM 任务列表渲染成 `<input type="checkbox">`，显式放行以免被默认策略裁掉
       ADD_TAGS: ['input'],

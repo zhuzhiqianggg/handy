@@ -131,6 +131,7 @@ pub fn run() {
             commands::grid::grid_takeover_get,
             // —— 桌面整理：一键整理 / 布局备份与还原（V19）——
             commands::grid::grid_auto_arrange,
+            commands::grid::grid_relayout,
             commands::grid::grid_desktop_sync,
             commands::grid::grid_file_icon,
             // V37：历史收纳残留（预览 / 撤回桌面 / 清理）+ 桌面图标尺寸
@@ -190,6 +191,10 @@ pub fn run() {
             // `restore_overlay_if_visible` 之前：如果用户开了接管偏好，紧接着的
             // 恢复格子层会按偏好重新隐藏，两者顺序不能反。
             commands::grid::heal_desktop_icons(app.handle());
+            // V47：装机即把「打开 Handy 桌面整理」注册进桌面空白处右键菜单。
+            // 必须在 db::init 之后（要用 grid_meta 读用户的关闭偏好）；
+            // 与格子层显示与否无关，所以放在 `restore_overlay_if_visible` 之前。
+            commands::grid::ensure_desktop_menu(app.handle());
             // 桌面格子层「永久生效」：上次显示中（含重启前就在接管）→ 本次启动自动摆回桌面
             commands::grid::restore_overlay_if_visible(app.handle());
             // V45：从桌面右键菜单「打开 Handy 桌面整理」冷启动（`handy.exe --show-grid`）→

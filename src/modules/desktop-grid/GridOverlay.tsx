@@ -135,7 +135,15 @@ const STRIP_CELL_EXTRA_H = 30;
 /**
  * 系统入口的 CLSID → 图标（与 Rust `SYSTEM_ENTRIES` 一一对应）。
  *
- * 不用 `FileIcon`：那走 `SHGetFileInfo`，对 `::{CLSID}` 这类 shell 命名空间路径不可靠。
+ * 历史决定：不用 `FileIcon`，理由是「`SHGetFileInfo` 对 `::{CLSID}` 这类 shell 命名空间
+ * 路径不可靠」。
+ *
+ * ⚠️ **V47 待办（用户已明确提出）**：这个前提**没有被验证过**，而用户明确要求
+ * 「我原我的电脑 回收站这几个系统本身的图标怎么变成这样了」——他要的是 Windows 真实图标。
+ * `SHGetFileInfoW` 传 `::{CLSID}` 路径 + `SHGFI_SYSICONINDEX` 取系统图像列表，
+ * 是 shell 命名空间项**标准**的取图标方式（回收站还能正确反映空/满状态）。
+ * 下一步：先用一个独立探针（`ctypes` 或 `zdiag.py` 式脚本）实测这三种 CLSID 的返回，
+ * 实测能拿到就删掉本表、让系统入口也走 `FileIcon`；确实不可靠再回来记录判据。
  */
 const SYSTEM_ENTRY_ICONS: Readonly<Record<string, typeof Monitor>> = {
   '::{20D04FE0-3AEA-1069-A2D8-08002B30309D}': Monitor,
@@ -382,8 +390,17 @@ function FileIcon({ path, size }: { path: string; size: number }): React.JSX.Ele
 /**
  * 「未归类」竖条里的单个图标（V42）。
  *
- * 系统入口（此电脑 / 回收站 / 用户的文件）走内置图标 —— 它们是 shell 命名空间虚拟路径，
- * `SHGetFileInfo` 取不到系统图像；其余条目照旧取真实 shell 图标（含 `.lnk` 的小箭头）。
+ * 系统入口（此电脑 / 回收站 / 用户的文件）目前走内置线条图标 —— 见下方 V47 注释。
+ *
+ * # V47：去掉深色圆角底片
+ *
+ * 用户原话：「我原我的电脑 回收站这几个系统本身的图标怎么变成这样了」。
+ * V42 给这三个入口套了一层 `bg-white/10 + ring` 的圆角方块，于是它们在桌面上一眼看
+ * 就不是"桌面图标"，而像三个按钮 —— 与整条竖条里其它裸图标（Chrome、微信…）风格断裂。
+ * 现在统一成裸图标。
+ *
+ * ⚠️ **仍未解决的部分**：这三个图标是内置线条图标，**不是** Windows 真实图标
+ * （真实的是蓝色显示器 / 蓝色回收站）。原因见 [`SYSTEM_ENTRY_ICONS`] 处注释。
  */
 function LooseIcon({ entry, size }: { entry: LooseEntry; size: number }): React.JSX.Element {
   const SystemIcon = entry.isSystem ? SYSTEM_ENTRY_ICONS[entry.path] : undefined;
@@ -392,10 +409,10 @@ function LooseIcon({ entry, size }: { entry: LooseEntry; size: number }): React.
   }
   return (
     <span
-      className="flex shrink-0 items-center justify-center rounded-lg bg-white/10 ring-1 ring-white/15"
+      className="flex shrink-0 items-center justify-center"
       style={{ width: size, height: size }}
     >
-      <SystemIcon style={{ width: size * 0.55, height: size * 0.55 }} className="text-sky-100" />
+      <SystemIcon style={{ width: size * 0.78, height: size * 0.78 }} className="text-white/90" />
     </span>
   );
 }
@@ -841,7 +858,18 @@ export function GridOverlay(): React.JSX.Element {
     loose ? `${loose.x},${loose.y},${loose.width},${loose.height}` : ''
   }|dock=${dockLinks.length + dockActionList.length}|panel=${
     sidePanel === null ? '' : `${sidePanel.tab}:${sidePanel.entry?.id ?? ''}`
-  }`;
+  }|menu=${[menuBox, menuItem, menuLoose, menuDock]
+    .map((m) => (m === null ? '0' : '1'))
+    .join('')}`;
+
+  /**
+   * 是否有右键菜单开着。
+   *
+   * V47 新增：这决定两件事 —— ① 菜单矩形必须进命中区（否则菜单落在格子外的那半边
+   * 是穿透的，点不动）；② 菜单开着期间强制整窗可交互。
+   */
+  const anyMenuOpen =
+    menuBox !== null || menuItem !== null || menuLoose !== null || menuDock !== null;
 
   useEffect(() => {
     if (!isTauri()) {
@@ -858,12 +886,22 @@ export function GridOverlay(): React.JSX.Element {
         }));
     // 工具栏与空态卡片常驻可交互（锁定态也要能点「隐藏挂件 / 解锁」，空态要能直接建盒子）；
     // 未归类竖条（V41）/ 快捷条 / 右侧统一面板（V45）渲染出来时同样要可交互
+    //
+    // V47 补上四个右键菜单 —— 这是「菜单刚弹出来点不动、鼠标离开再回去才行」的根因：
+    // 菜单锚在右键落点上，常常有一半探出格子矩形之外，那半边就落在「未上报」的区域里，
+    // Rust 判定光标没命中任何交互区 → 把整窗切回穿透 → 点上去直接漏到桌面。
+    // 菜单矩形的尺寸只能在渲染后量，所以靠 ref 现取；`regionsKey` 里的 `menu=` 段
+    // 保证「菜单开/关」会触发这次重报。
     for (const node of [
       toolbarRef.current,
       emptyRef.current,
       looseRef.current,
       dockRef.current,
       sidePanelRef.current,
+      menuRef.current,
+      itemMenuRef.current,
+      looseMenuRef.current,
+      dockMenuRef.current,
     ]) {
       if (!node) {
         continue;
@@ -877,9 +915,23 @@ export function GridOverlay(): React.JSX.Element {
       });
     }
     void ipc.gridOverlayUpdateRegions(regions).catch(() => undefined);
-    // regionsKey 已覆盖 boxes 几何变化；contentHidden 翻转时要重算命中区（只留工具栏）
+    // regionsKey 已覆盖 boxes / 菜单几何变化；contentHidden 翻转时要重算命中区（只留工具栏）
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [regionsKey, scaleFactor, contentHidden]);
+
+  /**
+   * 右键菜单开着期间**强制整窗可交互**（V47）。
+   *
+   * 上面那条命中区上报走的是 Rust 的 25ms 轮询，天然有一拍延迟；菜单是「点了就要能用」
+   * 的东西，不能把可用性押在轮询上。所以这里再显式按住 `gridSetInteractive`，
+   * 菜单全部关掉后交还命中轮询（编辑态除外 —— 那是用户自己按下的持续交互意图）。
+   */
+  useEffect(() => {
+    if (!isTauri()) {
+      return;
+    }
+    void ipc.gridSetInteractive(anyMenuOpen || editMode).catch(() => undefined);
+  }, [anyMenuOpen, editMode]);
 
   // —— 布局交互（mousemove 全局监听 + mouseup 落库） ——
 
@@ -1318,6 +1370,14 @@ export function GridOverlay(): React.JSX.Element {
   /** 未归类竖条条目开始拖拽（V41）：拖进哪个格子就登记进哪个格子 */
   const startLooseDrag = useCallback((entry: LooseEntry, event: React.DragEvent): void => {
     looseDragRef.current = entry;
+    // V47 关键修复：**必须同时置 `itemDragging`**。
+    //
+    // 根画布的 `pointerEvents` 由它决定（`itemDragging ? 'auto' : 'none'`）。
+    // V41 起只有「拖格子里的条目」会置位，「从左侧竖条拖」忘了 —— 于是从竖条起拖时
+    // 整层仍是穿透态，落点判定一路拿不到有效 dragover，浏览器直接把光标画成
+    // 「圆圈禁止」，用户看到的就是「桌面上的图标全都拖不动」。
+    // 置位后：根画布可接住 dragover/drop、格子高亮生效、拖到空白处松手也有明确落点。
+    setItemDragging(true);
     // 同上：要能拖进格子（move），也要能拖到快捷条（copy）
     event.dataTransfer.effectAllowed = 'copyMove';
     event.dataTransfer.setData('application/x-handy-loose', entry.path);
@@ -1684,9 +1744,22 @@ export function GridOverlay(): React.JSX.Element {
           width: preset.width,
           height: preset.height,
         })
-        .then((created) => {
+        .then(async (created) => {
           setBoxes((prev) => [...prev, created]);
           setItems((prev) => ({ ...prev, [created.id]: [] }));
+          // —— V47：新建后**立刻重排一次**（只归位、不扫描）——
+          //
+          // 用户原话：「添加便签后这个位置放在这里也不合适，便签的位置需要自动放在
+          // 合理的位置上」。根因不是"放得不好"，而是**放的位置从来没被布局碰过**：
+          // `gridBoxUpsert` 不给坐标时落默认值 (32,32)，而布局只在一键整理时才跑。
+          // 于是新便签正好压在左侧「不整理」竖条那条禁区上。
+          try {
+            await ipc.gridRelayout();
+            await refresh();
+          } catch {
+            // 重排失败不影响「便签已经建出来」这个事实：留在默认坐标也能用，
+            // 用户下次点「一键整理」同样会归位。这里刻意不打扰用户。
+          }
           showHint(
             kind === 'note'
               ? `已新建${created.name}（支持 Markdown，边写边渲染）`
@@ -1695,7 +1768,7 @@ export function GridOverlay(): React.JSX.Element {
         })
         .catch((error: Error) => showHint(error.message));
     },
-    [showHint],
+    [refresh, showHint],
   );
 
   /** 改格子配色（便签尤其需要：多个便签并存时要一眼分清） */
@@ -1869,6 +1942,36 @@ export function GridOverlay(): React.JSX.Element {
   );
 
   /**
+   * 菜单「鼠标离开即消失」（V47）。
+   *
+   * 用户原话：「按理说这种右键菜单 我鼠标离开菜单区域这个菜单就应消失的，
+   * 改了这么多版本这种基本问题都还有」。此前只在「点别处」或 Esc 时才关，
+   * 菜单可以一直赖在桌面上。
+   *
+   * 给 300ms 宽限而不是立刻关：菜单有时贴着格子边缘，鼠标划过一行会短暂离开再回来，
+   * 零宽限会显得「手一抖就没了」。
+   */
+  const menuLeaveTimer = useRef<number | null>(null);
+  const cancelMenuLeave = useCallback((): void => {
+    if (menuLeaveTimer.current !== null) {
+      window.clearTimeout(menuLeaveTimer.current);
+      menuLeaveTimer.current = null;
+    }
+  }, []);
+  const scheduleMenuLeave = useCallback(
+    (close: () => void): void => {
+      cancelMenuLeave();
+      menuLeaveTimer.current = window.setTimeout(() => {
+        menuLeaveTimer.current = null;
+        close();
+      }, 300);
+    },
+    [cancelMenuLeave],
+  );
+  // 卸载时清掉挂起的关闭定时器，避免对已卸载组件 setState
+  useEffect(() => cancelMenuLeave, [cancelMenuLeave]);
+
+  /**
    * 右键菜单的关闭时机（V41：格子菜单 / 条目菜单 / 未归类竖条菜单 / 快捷条菜单共用一套规则）。
    *
    * 注意**不能**只靠「在菜单上 stopPropagation 就完事」：菜单是 React 节点，
@@ -1915,7 +2018,10 @@ export function GridOverlay(): React.JSX.Element {
       className="fixed inset-0 select-none overflow-hidden"
       style={{ pointerEvents: itemDragging ? 'auto' : 'none' }}
       onDragOver={(event) => {
-        if (itemDragRef.current === null) {
+        // V47：两种拖拽源都要接住 —— 格子里的条目（itemDragRef）与左侧竖条的条目
+        // （looseDragRef）。此前只认前者，从竖条起拖时这里直接 return，
+        // 根画布不 preventDefault ⇒ 浏览器判定「此处不可放置」，光标画成禁止符号。
+        if (itemDragRef.current === null && looseDragRef.current === null) {
           return;
         }
         // 拖出所有格子 = 移出（V41）：根画布必须能接住 dragover/drop，否则浏览器
@@ -1924,6 +2030,14 @@ export function GridOverlay(): React.JSX.Element {
         event.dataTransfer.dropEffect = 'move';
       }}
       onDrop={(event) => {
+        const loose = looseDragRef.current;
+        if (loose !== null) {
+          // 竖条条目拖到空白处松手 = 本来就在竖条里，什么都不用做（只是结束这次拖拽）。
+          // 必须 preventDefault，否则浏览器按「取消」处理，会连带触发一次幽灵 dragend。
+          event.preventDefault();
+          endItemDrag();
+          return;
+        }
         const drag = itemDragRef.current;
         if (drag === null) {
           // 落在格子里的事件已由格子自己处理（处理完 endItemDrag 会清掉 ref）
@@ -2389,7 +2503,9 @@ export function GridOverlay(): React.JSX.Element {
               key="grid-box-menu"
               ref={menuRef}
               style={{ left: menuBox.x, top: menuBox.y, pointerEvents: 'auto' }}
-              className="absolute z-50 w-48 overflow-hidden rounded-lg bg-neutral-900/95 py-1 text-xs text-neutral-100 shadow-2xl ring-1 ring-white/15 backdrop-blur"
+              onMouseEnter={cancelMenuLeave}
+              onMouseLeave={() => scheduleMenuLeave(() => setMenuBox(null))}
+              className="absolute z-50 w-48 overflow-hidden rounded-lg bg-neutral-900 py-1 text-xs text-neutral-100 shadow-2xl ring-1 ring-white/15"
             >
               <div className="truncate px-2.5 pb-1 pt-0.5 text-[10px] text-neutral-400">
                 {box.name}
@@ -2472,7 +2588,9 @@ export function GridOverlay(): React.JSX.Element {
           key="grid-item-menu"
           ref={itemMenuRef}
           style={{ left: menuItem.x, top: menuItem.y, pointerEvents: 'auto' }}
-          className="absolute z-50 w-44 overflow-hidden rounded-lg bg-neutral-900/95 py-1 text-xs text-neutral-100 shadow-2xl ring-1 ring-white/15 backdrop-blur"
+          onMouseEnter={cancelMenuLeave}
+          onMouseLeave={() => scheduleMenuLeave(() => setMenuItem(null))}
+          className="absolute z-50 w-44 overflow-hidden rounded-lg bg-neutral-900 py-1 text-xs text-neutral-100 shadow-2xl ring-1 ring-white/15"
         >
           <div className="truncate px-2.5 pb-1 pt-0.5 text-[10px] text-neutral-400">
             {menuItem.item.displayName}
@@ -2523,7 +2641,9 @@ export function GridOverlay(): React.JSX.Element {
           key="grid-loose-menu"
           ref={looseMenuRef}
           style={{ left: menuLoose.x, top: menuLoose.y, pointerEvents: 'auto' }}
-          className="absolute z-50 w-44 overflow-hidden rounded-lg bg-neutral-900/95 py-1 text-xs text-neutral-100 shadow-2xl ring-1 ring-white/15 backdrop-blur"
+          onMouseEnter={cancelMenuLeave}
+          onMouseLeave={() => scheduleMenuLeave(() => setMenuLoose(null))}
+          className="absolute z-50 w-44 overflow-hidden rounded-lg bg-neutral-900 py-1 text-xs text-neutral-100 shadow-2xl ring-1 ring-white/15"
         >
           <div className="truncate px-2.5 pb-1 pt-0.5 text-[10px] text-neutral-400">
             {menuLoose.entry.name}
@@ -2703,7 +2823,9 @@ export function GridOverlay(): React.JSX.Element {
           key="grid-dock-menu"
           ref={dockMenuRef}
           style={{ left: menuDock.x, top: menuDock.y, pointerEvents: 'auto' }}
-          className="absolute z-50 w-44 overflow-hidden rounded-lg bg-neutral-900/95 py-1 text-xs text-neutral-100 shadow-2xl ring-1 ring-white/15 backdrop-blur"
+          onMouseEnter={cancelMenuLeave}
+          onMouseLeave={() => scheduleMenuLeave(() => setMenuDock(null))}
+          className="absolute z-50 w-44 overflow-hidden rounded-lg bg-neutral-900 py-1 text-xs text-neutral-100 shadow-2xl ring-1 ring-white/15"
         >
           <div className="truncate px-2.5 pb-1 pt-0.5 text-[10px] text-neutral-400">
             {menuDock.kind === 'link' ? menuDock.link.name : menuDock.action.name}

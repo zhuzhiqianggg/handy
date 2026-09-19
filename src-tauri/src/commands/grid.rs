@@ -1376,25 +1376,46 @@ fn make_unfocusable(hwnd: HWND) {
 #[cfg(target_os = "windows")]
 fn place_above_desktop(hwnd: HWND) -> Result<(), String> {
     use windows::Win32::UI::WindowsAndMessaging::{
-        SetWindowPos, HWND_BOTTOM, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+        GetWindow, SetWindowPos, GW_HWNDPREV, HWND_BOTTOM, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
     };
     // 找不到桌面宿主时不盲目沉底：调用方据此退回「普通窗口」并如实告警，
     // 而不是让用户面对一个「看不见的窗」。
-    if desktop_host().is_none() {
+    let Some(host) = desktop_host() else {
         return Err("未找到桌面窗口（Progman / WorkerW）".to_string());
-    }
-    // SAFETY: hwnd 为本进程窗口的有效句柄；HWND_BOTTOM 只改 Z 序，不改几何。
+    };
+
+    // —— V47：改成「锚定在桌面宿主正上方」——
+    //
+    // V46 用的是单步 `SetWindowPos(hwnd, HWND_BOTTOM)`，前提是「桌面宿主永远待在 Z 序最底」。
+    // 这个前提**不成立**：用户按 Win+D / 点「显示桌面」，Shell 会把 Progman 抬到普通窗口带的
+    // **最顶上**（它就是靠这一手让所有窗口"消失"的）。这时再沉底只是把挂件层压到 Progman
+    // **下面** —— 桌面看起来干干净净，正是用户报的「win+d 之后桌面什么都没有了」。
+    // 判据还判不出来：`z_verdict` 往下走找得到 Progman（它在下面），于是报 `InDesktopBand`，
+    // 自愈一次都不触发。
+    //
+    // 所以要表达的不是「沉到底」，而是**不变量本身**：挂件层紧贴桌面宿主正上方。
+    // `SetWindowPos(hwnd, X)` 的语义是「把 hwnd 排到 X 的下面」，于是：
+    //   anchor = 宿主正上方那一层（`GW_HWNDPREV`，同 band 内取，不会跨到 topmost）
+    //   → 把挂件窗插到 anchor 下面 = 正好落在宿主正上方。
+    // 宿主被抬到哪儿都成立，且同样幂等。anchor 为空（宿主已在本 band 顶端）时退回沉底。
+    let anchor = unsafe { GetWindow(host, GW_HWNDPREV) }.unwrap_or_else(|_| null_hwnd());
+    let insert_after = if anchor.0.is_null() {
+        HWND_BOTTOM
+    } else {
+        anchor
+    };
+    // SAFETY: hwnd 为本进程窗口的有效句柄；SetWindowPos 只改 Z 序，不改几何。
     unsafe {
         SetWindowPos(
             hwnd,
-            HWND_BOTTOM,
+            insert_after,
             0,
             0,
             0,
             0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         )
-        .map_err(|err| format!("把挂件窗沉到桌面层底部失败：{err}"))
+        .map_err(|err| format!("把挂件窗贴回桌面正上方失败：{err}"))
     }
 }
 
@@ -1620,6 +1641,19 @@ fn reassert_attach(win: &WebviewWindow) {
                 }
                 if let Err(err) = place_above_desktop(hwnd) {
                     grid_log(&format!("摆回桌面层失败（overlay={:?}）：{err}", hwnd.0));
+                } else if let Some(after) = z_verdict(hwnd) {
+                    // —— V47：纠正后**当场复验** ——
+                    //
+                    // V46 只在纠正前判一次，`已摆回桌面层` 这句其实只说明「调用没报错」，
+                    // 不说明真的摆对了。用户看到「桌面还是空的」而日志上写着"已摆回"，
+                    // 排查时无法从日志分辨。复验把「摆完到底对不对」写进日志 ——
+                    // 这条也是 `REASSERT_MAX_FIXES` 退避计数的依据（下一轮才算数）。
+                    if after != ZVerdict::InDesktopBand {
+                        grid_log(&format!(
+                            "摆回桌面层后复验**仍不对**（{after:?}，夹层={}）—— 判据或环境需重查",
+                            z_chain_brief(hwnd)
+                        ));
+                    }
                 }
             }
         }
@@ -1715,6 +1749,69 @@ fn write_attach_mode(app: &AppHandle, mode: AttachMode) -> Result<(), String> {
     )
     .map_err(|err| format!("保存挂件基准层失败：{err}"))?;
     Ok(())
+}
+
+/// grid_meta 键：用户主动**关闭**过桌面右键菜单入口 → 启动时不再自动注册。
+const META_KEY_DESKTOP_MENU_OPTOUT: &str = "desktop_menu_optout";
+
+/// 读「用户是否主动关过桌面右键菜单入口」。
+fn read_desktop_menu_optout(app: &AppHandle) -> bool {
+    let Ok(conn) = connect(app) else {
+        return false;
+    };
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT value FROM grid_meta WHERE key = ?1",
+            params![META_KEY_DESKTOP_MENU_OPTOUT],
+            |row| row.get(0),
+        )
+        .ok();
+    raw.as_deref() == Some("1")
+}
+
+/// 记「用户主动关过 / 重新打开」桌面右键菜单入口。
+pub fn set_desktop_menu_optout(app: &AppHandle, optout: bool) -> Result<(), String> {
+    let conn = connect(app)?;
+    conn.execute(
+        "INSERT INTO grid_meta (key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![
+            META_KEY_DESKTOP_MENU_OPTOUT,
+            if optout { "1" } else { "0" }
+        ],
+    )
+    .map_err(|err| format!("保存桌面右键菜单偏好失败：{err}"))?;
+    Ok(())
+}
+
+/// V47：**装机即注册**桌面空白处右键菜单里的「打开 Handy 桌面整理」。
+///
+/// 用户原话：「把 handy 这个桌面整理功能能自动安装的时候加入到系统桌面的鼠标右键菜单里面吗」。
+/// V45 只做了「桌面整理」页里的手动开关，用户不知道要去点，等于没有入口。
+///
+/// 但**必须尊重用户的关闭动作**：他一旦在设置页关掉，就写
+/// [`META_KEY_DESKTOP_MENU_OPTOUT`]，之后启动不再往回加 —— 否则那个开关形同虚设。
+/// 注册本身幂等（`reg add /f` 覆盖同名键），已注册就直接跳过，不做无谓的进程调用。
+pub fn ensure_desktop_menu(app: &AppHandle) {
+    #[cfg(target_os = "windows")]
+    {
+        if read_desktop_menu_optout(app) {
+            return;
+        }
+        match crate::platform::desktop_menu::status() {
+            Ok(true) => return, // 已在菜单里，不折腾
+            Ok(false) => {}
+            Err(err) => grid_log(&format!("查询桌面右键菜单注册状态失败（仍尝试注册）：{err}")),
+        }
+        match crate::platform::desktop_menu::install() {
+            Ok(()) => grid_log("已把「打开 Handy 桌面整理」注册进桌面空白处右键菜单"),
+            Err(err) => grid_log(&format!("注册桌面右键菜单失败（用户可手动重试）：{err}")),
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = app;
+    }
 }
 
 /// 读「系统桌面图标是否被隐藏」的持久化标记。
@@ -3708,7 +3805,16 @@ fn layout_all_boxes_with(
     }
 
     // —— ② 挂件归位到锚点，并作为格子流布的禁区 ——
+    //
+    // V47：这里**不再**把挂件自己的矩形直接当禁区用，而是先收起来，等下面
+    // 算出列宽 / 左界之后，改成「挂件区**整列**保留」（见 ②‴）。
+    // 原因（用户原话）：「虽然是流布局，但是也不能错位哇，上下还是要对齐的……
+    // 宽度不一致而且跑到日历下面了，看图片很不协调呢」——
+    // 只把挂件那块矩形当禁区时，流布器会「见缝插针」把格子塞进日历正下方那截余量
+    // （真实数据：安装包 / 图片 落在 y=694，正好压在日历下沿 670 之下），
+    // 于是一批格子整齐排在左边、另两个孤零零贴在日历底下 —— 就是用户看到的错位。
     let mut blocked: Vec<SlotRect> = Vec::new();
+    let mut widget_rects: Vec<SlotRect> = Vec::new();
     for widget in rows.iter().filter(|r| r.is_widget()) {
         let corner = widget_corner(&widget.kind);
         let rect = anchor_widget(corner, &blocked, work_w, work_h, widget.w, widget.h);
@@ -3721,6 +3827,7 @@ fn layout_all_boxes_with(
             outcome.anchored += 1;
         }
         blocked.push(rect);
+        widget_rects.push(rect);
     }
 
     // —— ②′ 左侧「未归类」竖条（V42）同样是禁区 ——
@@ -3738,6 +3845,41 @@ fn layout_all_boxes_with(
         Some(s) => s.rect.x + s.rect.w + ARRANGE_GAP_X,
         None => ARRANGE_MARGIN,
     };
+
+    // —— ②‴ 挂件区的「整列保留」（V47）——
+    //
+    // 把挂件区从「一块矩形」提升为「**若干整列**」：凡是与挂件区相交的列，自上而下
+    // 全高都归挂件区，收纳格一律不许进。于是：
+    //   · 收纳格只会落在挂件区**左边**的列里，同列从左边缘对齐 ⇒ 「上下对齐、宽度一致」；
+    //   · 不会再出现「格子钻到日历正下方」那种孤立的错位；
+    //   · 真实数据下（1707×912，列宽 300）：日历占 2 列，收纳格只剩左侧 2 列 ——
+    //     正好落在用户说的「分给他两列」。
+    let band_col_w = std_w.clamp(MIN_BOX_W, AUTO_MAX_W);
+    let col_left_at =
+        |k: i64| work_w - ARRANGE_MARGIN - band_col_w - k * (band_col_w + ARRANGE_GAP_X);
+    if let Some(zone_left) = widget_rects.iter().map(|r| r.x).min() {
+        let mut band_left: Option<i64> = None;
+        let mut k: i64 = 0;
+        while k < ARRANGE_COLUMN_CAP {
+            let left = col_left_at(k);
+            if left < min_x {
+                break; // 再往左的列已越过左侧竖条，不可能属于挂件区
+            }
+            if left + band_col_w <= zone_left {
+                break; // 这一列完全在挂件区左侧 → 后面的更左，收工
+            }
+            band_left = Some(left);
+            k += 1;
+        }
+        if let Some(left) = band_left {
+            blocked.push(SlotRect {
+                x: left,
+                y: 0,
+                w: (work_w - ARRANGE_MARGIN - left).max(0),
+                h: work_h,
+            });
+        }
+    }
 
     // —— ③ 镜像流布（V42）——
     //
@@ -4285,6 +4427,29 @@ pub async fn grid_auto_arrange(
         grid_log("挂件层未显示，本次整理不改动系统桌面图标（先显示格子再整理才会接管）");
     }
     Ok(report)
+}
+
+/// **只重排、不扫描**（V47）。
+///
+/// 「一键整理」会扫桌面并登记文件，语义太重，不适合「刚加了个便签」这种场合；
+/// 但加完挂件又**必须**让布局跑一次，否则新挂件就停在 `grid_box_upsert` 的默认坐标上。
+///
+/// 真实事故（V47 用户截图）：16:17 连加两个便签，它们落在 (32,32) 与 (32,276) ——
+/// 正好压在左侧「不整理」竖条那条**禁区**上，用户看到的是「便签糊在快捷方式上面，
+/// 位置很不合适」。根因就是「新建」走了默认坐标、而布局只在一键整理时才跑。
+///
+/// 这里复用的就是同一条布局流水线（挂件归位 → 统一列宽 + 按内容定高 → 列内镜像流布），
+/// 所以新建挂件之后桌面依然满足「列对齐 + 挂件区整列保留」那套不变量。
+#[tauri::command]
+pub async fn grid_relayout(app: AppHandle) -> Result<(), String> {
+    let conn = connect(&app)?;
+    let (work_w, work_h) = layout_work_size(&app);
+    let outcome = layout_all_boxes(&conn, work_w, work_h, layout_icon_size())?;
+    grid_log(&format!(
+        "重排（不扫描）：挪动 {} 个 / 按内容调整 {} 个尺寸 / 挂件归位 {} 个 / 空间不足 {} 个",
+        outcome.moved, outcome.resized, outcome.anchored, outcome.overflowed
+    ));
+    Ok(())
 }
 
 /// 对账全部收纳格：按磁盘目录补齐新出现的文件、清掉已消失的登记。
@@ -6279,8 +6444,42 @@ mod layout_pipeline_tests {
         let offsets: Vec<i64> = content.iter().map(|b| right_edge - (b.x + b.w)).collect();
         let min_offset = *offsets.iter().min().unwrap();
         assert!(
-            min_offset <= pitch,
-            "至少一个分类格要紧贴最右可用列（挂件占掉的那两列之后），实际列偏移：{offsets:?}"
+            min_offset % pitch == 0,
+            "列偏移必须落在等距网格上，实际：{offsets:?}"
+        );
+
+        // —— V47：把「自右向左」的实质断言换成「不侵入挂件区 + 紧贴其左」——
+        //
+        // V42 这里断言的是 `min_offset <= pitch`，隐含「最右可用列就是第 0 列」。
+        // V47 起挂件区**整列保留**（本数据下日历占满最右两列），第一个可用列变成第 2 列
+        // —— 那条断言的分母已经不成立，属于**过时的期望值**，必须改而不是硬凑。
+        //
+        // 换成两条与「挂件占几列」解耦、且回填/排序怎么变都守得住的：
+        //   ① 分类格横向**不得侵入挂件区** —— 这正是用户 V47 报的
+        //      「宽度不一致而且跑到日历下面了，看图片很不协调呢」；
+        //   ② 分类格与挂件区之间**不得空出整列** —— 否则就是白留一列不排，
+        //      等于把用户要的「分给他两列」浪费掉。
+        let widget_left = boxes
+            .iter()
+            .filter(|b| !is_content(&b.kind))
+            .map(|b| b.x)
+            .min()
+            .expect("本批至少有一个挂件");
+        for b in &content {
+            assert!(
+                b.x + b.w <= widget_left,
+                "「{}」横向侵入了挂件区（右沿 {} > 挂件区左沿 {widget_left}）—— \
+                 就是「跑到日历下面」那个错位",
+                b.name,
+                b.x + b.w
+            );
+        }
+        let rightmost_content_right = content.iter().map(|b| b.x + b.w).max().unwrap();
+        let gap_to_widgets = widget_left - rightmost_content_right;
+        assert!(
+            gap_to_widgets > 0 && gap_to_widgets <= pitch,
+            "分类格与挂件区之间空出了整列：最右分类格右沿={rightmost_content_right}，\
+             挂件区左沿={widget_left}，列距={pitch}（空档 {gap_to_widgets}）"
         );
         // V43：**不再断言「`content` 的第一个格子必须在最右两列」** ——
         // 摆放顺序已改成「条目少的先摆」（让矮格子去填挂件下方那道缝），

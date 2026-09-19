@@ -65,15 +65,25 @@ pub async fn desktop_menu_status() -> Result<bool, String> {
 }
 
 /// 装好桌面右键菜单入口（幂等）。
+///
+/// V47：同时清掉 `desktop_menu_optout` —— 用户重新打开，就是明确表达「我要它」，
+/// 启动自愈从此不再跳过。
 #[tauri::command]
-pub async fn desktop_menu_install() -> Result<(), String> {
-    platform::desktop_menu::install()
+pub async fn desktop_menu_install(app: AppHandle) -> Result<(), String> {
+    platform::desktop_menu::install()?;
+    let _ = crate::commands::grid::set_desktop_menu_optout(&app, false);
+    Ok(())
 }
 
 /// 移除桌面右键菜单入口（不存在时也返回成功）。
+///
+/// V47：同时记 `desktop_menu_optout` —— 用户主动关掉的入口，启动自愈**不得**偷偷加回来
+/// （否则「桌面整理」页里那个开关形同虚设）。
 #[tauri::command]
-pub async fn desktop_menu_remove() -> Result<(), String> {
-    platform::desktop_menu::remove()
+pub async fn desktop_menu_remove(app: AppHandle) -> Result<(), String> {
+    platform::desktop_menu::remove()?;
+    let _ = crate::commands::grid::set_desktop_menu_optout(&app, true);
+    Ok(())
 }
 
 /// 设置主窗口置顶（设置项「窗口置顶」的唯一执行点）。
