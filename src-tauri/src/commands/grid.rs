@@ -95,6 +95,14 @@ const POLL_INTERVAL_MS: u64 = 25;
 /// 贴着格子边缘点击桌面文件。
 const HIT_PADDING: f64 = 4.0;
 
+/// 「显示态却不可见」的宽限 tick 数（= 1 秒，随 [`POLL_INTERVAL_MS`] 走）。
+///
+/// V46：显示态（`overlay_visible = 1`）下挂件窗不可见，就直接把它 `show()` 回来 ——
+/// 用户的诉求是「不管什么情况，只要是桌面都无条件显示整理」。
+/// 宽限 1 秒是为了避开 show/hide 切换、Explorer 重建这类**瞬态**，
+/// 又不至于长到用户察觉「桌面少了一层」。
+const VISIBLE_RECOVER_TICKS: u64 = 1000 / POLL_INTERVAL_MS;
+
 /// Z 序自检的**时间**间隔（秒）。
 ///
 /// # 为什么是「秒」而不是「多少个轮询周期」（V35 修的坑）
@@ -103,7 +111,11 @@ const HIT_PADDING: f64 = 4.0;
 /// V35 为了拖拽手感把轮询提到 **25ms**，同一个 40 就悄悄变成 **1 秒** ——
 /// 自检频率翻了 2.4 倍，而这一点在两边代码里都看不出来。
 /// **轮询周期是「手感参数」，不该顺手改掉自愈的节奏**，所以这里改用时间。
-const REASSERT_INTERVAL_SECS: u64 = 3;
+/// V46：3 → **1**。用户 09-19 反馈「点一下桌面空白处，整理好的桌面整个不见了，
+/// 得去托盘折腾一会儿才回来」——被挪走之后的**恢复延迟就等于用户看到的故障时长**。
+/// 判据本身很便宜（一次 `GetWindow` 走链），窗口层级正确时一次窗口 API 都不调，
+/// 所以把间隔压到 1 秒不会带来重绘开销，只会把「桌面没了」压缩到用户察觉不到。
+const REASSERT_INTERVAL_SECS: u64 = 1;
 
 /// 判定「我还在不在桌面上方」时，最多往下走多少个窗口。
 ///
@@ -120,7 +132,14 @@ const REASSERT_SCAN_STEPS: usize = 24;
 const REASSERT_MAX_FIXES: u32 = 5;
 
 /// 触发保险丝后的冷却（秒）：期间只计数不再动手，过后再试一小轮。
-const REASSERT_GIVEUP_BACKOFF_SECS: u64 = 300;
+///
+/// V46：300 → **5**。旧值是把「判据和现实对不上」当成永久故障来处理的，
+/// 但实测（09-19 用户机 `handy.log`：单次会话 265 条 `Z 序不对（TooHigh）`、
+/// 连续 5 次后退避 300 秒）里，真正的问题是**纠正间隔太长**而不是纠正有害：
+/// 5 分钟的窗口期里用户面对的正是「桌面空着」。
+/// 宁可多纠正几次也不要把窗口期拉长 —— `place_above_desktop` 现在是幂等的
+/// 单步 `HWND_BOTTOM`（见该函数），反复调用只会落在同一个位置，不会闪。
+const REASSERT_GIVEUP_BACKOFF_SECS: u64 = 5;
 
 /// 收纳根目录名（桌面下的一级目录；与「归类文件」共用，避免两个相似目录）。
 const STORAGE_ROOT_NAME: &str = "Handy整理";
@@ -1335,20 +1354,36 @@ fn make_unfocusable(hwnd: HWND) {
 }
 
 /// 把挂件窗插到「桌面窗口正上方」。
+///
+/// # V46 重写：一步 `HWND_BOTTOM`（旧的两步法方向是错的）
+///
+/// 旧实现是「先 `HWND_BOTTOM` 沉底，再 `SetWindowPos(hwnd, host)` 贴到宿主之上」。
+/// 但 `SetWindowPos` 的 `hWndInsertAfter` 语义是「**排在 hwnd 前面（更靠上）**的那个窗口」，
+/// 即把 hwnd 放到它**下面** —— 与函数名和注释里的「贴到 host 之上」正好相反。
+///
+/// 之所以在用户机上看不出问题：这台机器 `desktop_host()` 返回的是 `Progman`（桌面最底），
+/// 「普通窗口不可能低于桌面」被系统钳制，第二步实际落回同一个位置，侥幸成立。
+/// 一旦 `desktop_host()` 走的是「顶层 WorkerW」那条分支（图标所在的层），
+/// 第二步就会把挂件层推到**原生图标背后** —— 用户看到的就是「整理好的桌面整个不见了」
+/// （09-19 截图：只有壁纸 + 回收站）。
+///
+/// 实测依据（`scripts/audit/zorder-probe.py`，用一个自建顶层窗复刻两步法）：
+///   · `SetWindowPos(w, HWND_BOTTOM)` → `GetWindow(w, GW_HWNDNEXT)` 立刻就是桌面宿主；
+///   · `SetWindowPos(w, a)` → w 落在 a 的**下面**。
+///
+/// 所以这里只保留**单步、幂等**的 `HWND_BOTTOM`：Windows 不允许普通窗口低于桌面，
+/// 于是它稳定地落在「所有普通窗口之下、桌面之上」—— 正是我们要的位置。
 #[cfg(target_os = "windows")]
 fn place_above_desktop(hwnd: HWND) -> Result<(), String> {
     use windows::Win32::UI::WindowsAndMessaging::{
         SetWindowPos, HWND_BOTTOM, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
     };
-    let Some(host) = desktop_host() else {
+    // 找不到桌面宿主时不盲目沉底：调用方据此退回「普通窗口」并如实告警，
+    // 而不是让用户面对一个「看不见的窗」。
+    if desktop_host().is_none() {
         return Err("未找到桌面窗口（Progman / WorkerW）".to_string());
-    };
-    // SAFETY: host 为系统桌面窗口有效句柄；hwnd 为本进程窗口有效句柄。
-    // 两步走：先把 hwnd 沉到 Z 序最底（HWND_BOTTOM），再贴到桌面宿主之上。
-    // 单步 `SetWindowPos(hwnd, host)` 在某些本机（桌面宿主被 Explorer / 第三方桌面
-    // 工具反复重排）会「贴不进去」——窗口仍停在高位，于是 Z 序自检永远判
-    // TooHigh、保险丝反复熔断（V40.1 在用户机抓到）。先沉底再上提，强制刷新
-    // 插入点，比单步稳。
+    }
+    // SAFETY: hwnd 为本进程窗口的有效句柄；HWND_BOTTOM 只改 Z 序，不改几何。
     unsafe {
         SetWindowPos(
             hwnd,
@@ -1359,17 +1394,7 @@ fn place_above_desktop(hwnd: HWND) -> Result<(), String> {
             0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         )
-        .map_err(|err| format!("把挂件窗沉到桌面层底部失败：{err}"))?;
-        SetWindowPos(
-            hwnd,
-            host,
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-        )
-        .map_err(|err| format!("把挂件窗贴到桌面层失败：{err}"))
+        .map_err(|err| format!("把挂件窗沉到桌面层底部失败：{err}"))
     }
 }
 
@@ -1467,6 +1492,56 @@ fn z_verdict(hwnd: HWND) -> Option<ZVerdict> {
     Some(classify_chain(&chain, host, hit_bottom))
 }
 
+/// 把「挂件窗往下走的前几个窗口」压成一行，供日志取证。
+///
+/// 为什么必须有：`TooHigh` / `BelowDesktop` 只说明「链条没碰到桌面」，
+/// 真正要回答的是「**夹在中间的是谁**」。V40 排查同类问题时只能靠事后
+/// 用 `window-probe.py zlist` 猜，且要用户重现；把类名写进日志，一条就够。
+/// 类名重复出现时折叠计数（例：`Sogou_TSF_UI×3`），避免一行里全是输入法助手窗。
+#[cfg(target_os = "windows")]
+fn z_chain_brief(hwnd: HWND) -> String {
+    use windows::Win32::UI::WindowsAndMessaging::{GetClassNameW, GetWindow, GW_HWNDNEXT};
+    let mut parts: Vec<String> = Vec::new();
+    let mut cursor = hwnd;
+    for _ in 0..4 {
+        // SAFETY: 有效 HWND，仅查询 Z 序与类名。
+        let next = unsafe { GetWindow(cursor, GW_HWNDNEXT) }.unwrap_or_else(|_| null_hwnd());
+        if next.0.is_null() {
+            parts.push("(Z 序末端)".to_string());
+            break;
+        }
+        let mut buf = [0u16; 64];
+        // SAFETY: buf 为本进程栈上的定长缓冲；GetClassNameW 最多写 64 个 u16。
+        let len = unsafe { GetClassNameW(next, &mut buf) };
+        let name = if len > 0 {
+            String::from_utf16_lossy(&buf[..len as usize])
+        } else {
+            "(无类名)".to_string()
+        };
+        parts.push(name);
+        cursor = next;
+    }
+    // 折叠连续同名（输入法助手窗经常一次挂好几个）
+    let mut folded: Vec<(String, usize)> = Vec::new();
+    for part in parts {
+        match folded.last_mut() {
+            Some(last) if last.0 == part => last.1 += 1,
+            _ => folded.push((part, 1)),
+        }
+    }
+    folded
+        .into_iter()
+        .map(|(name, count)| {
+            if count > 1 {
+                format!("{name}×{count}")
+            } else {
+                name
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" > ")
+}
+
 /// 周期复位：**只在 Z 序真的不对时**才重排。
 ///
 /// 每次都无脑 `SetWindowPos` 会让窗口反复重绘 —— 那正是「闪一下」的观感来源。
@@ -1478,6 +1553,17 @@ fn z_verdict(hwnd: HWND) -> Option<ZVerdict> {
 ///   2. 自检有**时间**间隔（[`REASSERT_INTERVAL_SECS`]）⇒ 不会跟着轮询提速而变密；
 ///   3. 连续纠正失败到 [`REASSERT_MAX_FIXES`] 次就退避 [`REASSERT_GIVEUP_BACKOFF_SECS`] 秒
 ///      ⇒ 就算判据和现实仍对不上，也只会偶发纠正，不会连续闪。
+///
+/// # V46：去掉去抖，改为「判到就纠」
+///
+/// 旧实现要求**连续两次**判定不对才动手（`REASSERT_MISMATCH + 1 < 2`）。
+/// 配合 3 秒的检测间隔，最坏情况是「发现 → 6 秒后才纠正」，而这 6 秒里
+/// 用户看到的就是「桌面空着」。用户的诉求是「不管什么情况，只要是桌面就无条件显示整理」，
+/// 所以 V46 起**判定不对立刻纠正**：纠正动作已是幂等的单步 `HWND_BOTTOM`，
+/// 代价是一次 `SetWindowPos`，而且判据正确时一次窗口 API 都不会调。
+///
+/// 日志仍然限流（[`Z_LOG_INTERVAL_SECS`]）：稳态不刷屏，但**每轮突发必留第一条**，
+/// 并带上「往下走的前几个窗口」——那是唯一能在事后定位夹层的信息。
 fn reassert_attach(win: &WebviewWindow) {
     #[cfg(target_os = "windows")]
     {
@@ -1505,37 +1591,35 @@ fn reassert_attach(win: &WebviewWindow) {
             }
             None => return, // 拿不到桌面宿主：判不了就别乱动
             Some(verdict) => {
-                // 去抖：连续两次判定不对才动手（滤掉第三方桌面工具的瞬时抢层）。
-                if REASSERT_MISMATCH.fetch_add(1, Ordering::Relaxed) + 1 < 2 {
-                    return;
-                }
-                REASSERT_MISMATCH.store(0, Ordering::Relaxed);
-
                 let fixes = REASSERT_FIXES.fetch_add(1, Ordering::Relaxed) + 1;
                 if fixes > REASSERT_MAX_FIXES {
                     REASSERT_FIXES.store(0, Ordering::Relaxed);
                     REASSERT_RETRY_AT.store(now + REASSERT_GIVEUP_BACKOFF_SECS, Ordering::Relaxed);
                     if !REASSERT_GAVE_UP.swap(true, Ordering::Relaxed) {
                         grid_log(&format!(
-                            "Z 序自动纠正已连续失败 {REASSERT_MAX_FIXES} 次，暂停 {REASSERT_GIVEUP_BACKOFF_SECS} 秒（避免一直闪）。\
-                             判据可能与此机环境不符，请在反馈里带上这行日志。"
+                            "Z 序连续 {REASSERT_MAX_FIXES} 次纠正后仍不对，暂停 \
+                             {REASSERT_GIVEUP_BACKOFF_SECS} 秒再试（判据：{verdict:?}；\
+                             夹层={}）。",
+                            z_chain_brief(hwnd)
                         ));
                     }
                     return;
                 }
-
-                let Some(host) = desktop_host() else {
-                    return;
-                };
-                grid_log(&format!(
-                    "Z 序不对（{verdict:?}，第 {fixes} 次纠正），重新贴回桌面层（overlay={:?} host={:?}）",
-                    hwnd.0, host.0
-                ));
-                if let Err(err) = place_above_desktop(hwnd) {
+                // 日志限流：每轮突发只留第一条（`fixes == 1`），且与上一条至少隔
+                // [`Z_LOG_INTERVAL_SECS`] 秒 —— 稳态不刷屏，突发必留证。
+                let first_of_burst = fixes == 1;
+                let quiet = now.saturating_sub(LAST_Z_LOG_AT.load(Ordering::Relaxed))
+                    < Z_LOG_INTERVAL_SECS;
+                if first_of_burst && !quiet {
+                    LAST_Z_LOG_AT.store(now, Ordering::Relaxed);
                     grid_log(&format!(
-                        "重新贴回桌面层失败（overlay={:?} host={:?}）：{err}",
-                        hwnd.0, host.0
+                        "Z 序不对（{verdict:?}），已摆回桌面层（overlay={:?} 夹层={}）",
+                        hwnd.0,
+                        z_chain_brief(hwnd)
                     ));
+                }
+                if let Err(err) = place_above_desktop(hwnd) {
+                    grid_log(&format!("摆回桌面层失败（overlay={:?}）：{err}", hwnd.0));
                 }
             }
         }
@@ -1928,6 +2012,9 @@ fn ensure_poller(app: AppHandle) {
             // 窗口连续"不在"的轮询次数：把「该不该重建」的判定降到约 30 秒一次，
             // 否则每 60ms 就要查一次库。
             let mut missing_ticks: u64 = 0;
+            // 窗口「该可见却不可见」的连续轮询次数（V46：用于按 tick 计数后再查库，
+            // 见下面「显示态却不可见 → 无条件捞回」那段）。
+            let mut hidden_ticks: u64 = 0;
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS));
                 let Some(win) = app.get_webview_window(GRID_LABEL) else {
@@ -1970,6 +2057,30 @@ fn ensure_poller(app: AppHandle) {
                         let _ = win.set_ignore_cursor_events(true);
                         last_ignore = Some(true);
                     }
+                    // —— V46：显示态却不可见 = 违反不变量 I2，无条件捞回来 ——
+                    //
+                    // 用户原话：「按理说应该不管什么情况，只要是桌面都无条件显示整理
+                    // （除非是桌面整理关闭状态）」。此前这里只做「图标归还」的兜底，
+                    // **没有任何路径把窗口重新显示出来** —— 一旦它被外部隐藏（最小化以外的
+                    // 隐藏路径 / 显示桌面 / 第三方桌面工具），桌面就永久少了一层，
+                    // 只能靠用户去托盘「显示/隐藏」瞎点。
+                    // 1 秒宽限避开 show/hide 切换与 Explorer 重建的瞬态；
+                    // 每 25ms 一次不可能每轮查库，所以按 tick 计数后再查。
+                    hidden_ticks += 1;
+                    if hidden_ticks % VISIBLE_RECOVER_TICKS == 0 {
+                        if read_overlay_visible(&app) {
+                            grid_log("挂件层处于显示态却不可见，自动恢复显示并摆回桌面层");
+                            let _ = win.show();
+                            let _ = apply_attach(&win, AttachMode::current());
+                            mark_overlay_shown();
+                            last_ignore = None;
+                            hidden_ticks = 0;
+                            continue;
+                        }
+                        // 用户要的就是收起态（overlay_visible = false）：这就是正常态，
+                        // 但**显示态标记**落盘为 false 才算真的「桌面整理关闭」，
+                        // 避免下轮又白查一次库。
+                    }
                     // 挂件不可见却还代管着图标 = 泄漏（非 grid_overlay_hide 路径的隐藏）。
                     // V40：**不再一不可见就归还** —— 先记下起点，只有连续不可见超过
                     // OVERLAY_AWAY_GRACE_SECS 才真归还（理由见该常量）。
@@ -1987,6 +2098,7 @@ fn ensure_poller(app: AppHandle) {
                     }
                     continue;
                 }
+                hidden_ticks = 0;
                 if OVERLAY_AWAY_SINCE.swap(0, Ordering::Relaxed) != 0 {
                     // 刚从「不可见」回来：立刻确认接管态，不等下一次周期自检（那最多差 3 秒，
                     // 而用户在这 3 秒里看到的正是「格子 + 原图标」）
@@ -2141,6 +2253,18 @@ fn reassert_takeover(app: &AppHandle) {
     if !read_takeover(app) {
         // 用户没选接管：清零计数，下次开启接管时从干净状态开始
         TAKEOVER_FIXES.store(0, Ordering::Relaxed);
+        return;
+    }
+    // —— 不变量 I1（见 docs/02-architecture/DESKTOP-LAYER.md §2.3）：`Off` 态绝不藏图标 ——
+    //
+    // V45 装机实测踩到的空桌面：用户点工具栏「隐藏」→ `grid_overlay_hide` 交还图标，
+    // 但**接管偏好**（`META_KEY_TAKEOVER`）仍然是「开」，于是 3 秒后这里又把图标藏回去。
+    // 用户面对的是「格子内容已收起 + 原生图标也被藏」= 一个什么都没有的桌面
+    // （用户原话：「桌面全都消失了」）。所以这里必须先读唯一真源 `overlay_visible`。
+    if !read_overlay_visible(app) {
+        TAKEOVER_FIXES.store(0, Ordering::Relaxed);
+        // 万一有路径漏了交还，这里兜底还给系统 —— `Off` 态的原生图标必须在。
+        release_icons_if_taken(app);
         return;
     }
     if ICONS_TAKEN.load(Ordering::Relaxed) && !desktop_icons_visible() {
@@ -2424,6 +2548,16 @@ static REASSERT_RETRY_AT: AtomicU64 = AtomicU64::new(0);
 
 /// 是否已触发过保险丝（只记一次日志，不刷屏）。
 static REASSERT_GAVE_UP: AtomicBool = AtomicBool::new(false);
+
+/// 上一条 Z 序纠正日志的时刻（unix 秒）：日志限流用（见 [`Z_LOG_INTERVAL_SECS`]）。
+static LAST_Z_LOG_AT: AtomicU64 = AtomicU64::new(0);
+
+/// Z 序纠正日志之间的最小间隔（秒）。
+///
+/// 稳态下判据正确 → 一条都不写；真正出问题时**每轮突发只留第一条**，
+/// 且与上一条至少隔这么久 —— 既保住「第一次故障一定有据可查」，
+/// 又不会像 V45 那样单次会话刷出 265 行把日志淹掉。
+const Z_LOG_INTERVAL_SECS: u64 = 60;
 
 /// 上次自动重建的时刻（unix 秒；用于冷却 [`HEARTBEAT_REBUILD_COOLDOWN_SECS`]）。
 static LAST_REBUILD_AT: AtomicU64 = AtomicU64::new(0);
@@ -5433,9 +5567,34 @@ mod z_verdict_tests {
         );
         // 纠正必须有上限，否则一旦判据与现实不符就是无限重排（= 一直闪）
         assert!(REASSERT_MAX_FIXES >= 1 && REASSERT_MAX_FIXES <= 10);
-        assert!(REASSERT_GIVEUP_BACKOFF_SECS >= 60);
         // 自检节奏必须是时间量，不能跟着轮询周期走（V35 的教训）
         assert!(REASSERT_INTERVAL_SECS >= 1);
+    }
+
+    #[test]
+    fn band_insurance_recovers_fast() {
+        // V46：用户诉求「不管什么情况，只要是桌面都无条件显示整理」——
+        // **恢复延迟就等于用户看到的故障时长**，所以这三个数字是产品指标，
+        // 不是随手调的参数。改动它们之前先回看 DESKTOP-LAYER §2.4。
+        //
+        // 检测间隔：超过 2 秒用户就能明显看到「桌面空了一下」。
+        assert!(
+            REASSERT_INTERVAL_SECS <= 2,
+            "Z 序检测间隔过长，用户会看到「桌面没了」持续存在"
+        );
+        // 退避：旧值 300 秒是本轮修掉的核心缺陷（一次故障 = 5 分钟无自愈）。
+        // 上界给 15 秒：既要避免疯狂重排，又不允许长时间放弃自愈。
+        assert!(
+            (1..=15).contains(&REASSERT_GIVEUP_BACKOFF_SECS),
+            "退避时间必须短到用户察觉不到：太长等于长时间放弃自愈"
+        );
+        // 「显示态却不可见」的捞回宽限：1 秒上下。
+        assert!(
+            (10..=200).contains(&VISIBLE_RECOVER_TICKS),
+            "捞回宽限应约 1 秒（POLL_INTERVAL_MS=25 时 = 40 tick）"
+        );
+        // 日志限流不能把「第一次故障」也吃掉：否则事后无从定位夹层。
+        assert!(Z_LOG_INTERVAL_SECS >= 10);
     }
 }
 

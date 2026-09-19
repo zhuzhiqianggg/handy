@@ -30,7 +30,7 @@ import type { SysAction } from '@/types/sys';
 import { cn } from '@/lib/utils';
 
 /**
- * 桌面右侧统一面板（V45）。
+ * 桌面右侧统一面板（V45 建立 · V46 实心化）。
  *
  * ## 为什么推倒重来
  *
@@ -51,6 +51,18 @@ import { cn } from '@/lib/utils';
  *   · **快捷**页签：应用入口（工具箱 / 工作台 / 密码存储器 / 桌面整理 / 设置 / 主窗口）
  *     + 我的快捷方式（与 Dock 同一份 `quicklinks` 数据）+ 系统入口（hosts 编辑 / 服务 /
  *     证书…，走 Rust 白名单 `sys_action_run`，无注入面）。
+ *
+ * ## V46：桌面上的东西一律**实心**
+ *
+ * 用户 09-19 的反馈：「工具箱这些工具类**不要透明了**，透明有问题」「现在这个全都是透明
+ * 很难清楚的操作。还有大小也不太友好」。
+ *
+ * 半透明在桌面上是**可用性缺陷**而不是美化：壁纸是一张高对比照片时，面板里的文字、
+ * 次级按钮、列表分隔都糊在背景上，读不清也点不准。所以 V46 起：
+ *   · 面板外壳 `bg-neutral-900`（不透明），工具本体区 `bg-neutral-950`（不透明）
+ *     —— 只保留 1px 的 `ring-white/15` 作边界，不再用 `/93 + backdrop-blur` 那套玻璃；
+ *   · 尺寸按「装得下一个真实工具」定（`min(820px, ...)`、上下留白），不再按浮层定；
+ *   · 标题栏提供 **「在控制台打开」**：桌面负责顺手用一下，控制台（主窗口）负责完整界面。
  *
  * ## 与其它组件的关系
  *
@@ -94,13 +106,21 @@ export interface DesktopSidePanelProps {
 /**
  * 面板外壳的定位 / 尺寸类（由 `GridOverlay` 渲染外层容器时套用）。
  *
- * - `right-[124px]`：右下角常驻着桌面工具栏（`right-5` 起、约 92px 宽），面板若贴到最右边
- *   会把它盖住 —— 那样用户连「关掉面板」都得先想起来按 Esc；
- * - `bottom-[96px]`：底部中间是 Dock 快捷条，面板从它**上方**开始，两者互不遮挡
- *   （V45 之前的大抽屉与 Dock 叠在一起，是用户说的「很乱」之一）。
+ * - `right-[252px]`：右下角常驻着桌面工具栏（`right-5` 起、竖排四组、最宽一组是
+ *   「原生图标隐藏 / 对账 / 隐藏」约 236px）。面板整体落在它**左侧**，
+ *   两者永不重叠 —— V45 用的 `right-[124px]` 是按「工具栏约 92px 宽」估的，
+ *   V45 加了「密码箱」按钮之后工具栏变宽，估算就失效了，面板会盖住工具栏
+ *   （用户截图里「工具栏不见了」的观感来源之一）；
+ * - `bottom-[92px]`：底部**居中**的 Dock 快捷条最宽可到 `60vw`，横向必然与面板相交
+ *   （面板左缘在 1707px 屏上约 x=635），所以纵向必须让开它 —— Dock 高约 44px + 距底 20px，
+ *   面板停在 92px 处即可。⚠️ 别因为「Dock 在中间、面板在右边」就以为不重叠：
+ *   60vw 的宽度是**跨到右边的**。
+ *
+ * 尺寸按「装得下一个真实工具」定：分栏类工具（JSON 格式化 / 文本对比）左右两栏
+ * 都要撑得开，所以宽度下限取 820px（而不是 V45 的 620px）。
  */
 export const SIDE_PANEL_SHELL =
-  'absolute right-[124px] top-4 bottom-[96px] z-40 w-[min(620px,calc(100vw-160px))]';
+  'absolute right-[252px] top-4 bottom-[92px] z-40 w-[min(820px,calc(100vw-300px))]';
 
 /** 把注册表里的命令 / 模块统一成面板能渲染的条目 */
 export function collectPanelEntries(): PanelEntry[] {
@@ -270,16 +290,36 @@ export function DesktopSidePanel({
     );
   };
 
+  /**
+   * 「在控制台打开」（V46）：收面板 → 显示主窗口并**直达**这一个工具 / 页面。
+   *
+   * 走 `desktop_open_view`（Rust 侧 `show_main_palette` + `handy:navigate` 事件），
+   * 与顶部贴条「打开工作台」是同一套机制 —— 视图状态每窗口各持一份（ADR-8），
+   * 挂件窗改不了主窗口的 store，只能发事件。
+   * `entry.id` 对模块是 `module:<id>`、对工具是命令 id，与那个监听的语义正好对齐。
+   */
+  const openInConsole = (entry: PanelEntry): void => {
+    onClose();
+    void ipc
+      .desktopOpenView(entry.id)
+      .catch((error: unknown) =>
+        toast.error(error instanceof Error ? error.message : String(error)),
+      );
+  };
+
   return (
     <div
       // 面板内部的事件不往桌面画布冒泡（否则会被当成「点空白处收面板」）
       onPointerDown={(event) => event.stopPropagation()}
       onContextMenu={(event) => event.stopPropagation()}
       style={{ pointerEvents: 'auto' }}
-      className="flex h-full w-full flex-col overflow-hidden rounded-2xl bg-neutral-900/93 text-neutral-100 shadow-2xl ring-1 ring-white/15 backdrop-blur-2xl"
+      // V46 实心化：`bg-neutral-900`（不透明）+ 1px 边界。半透明玻璃在真实壁纸上
+      // 会让正文、次级按钮、分隔线全部糊掉，用户的判断是「很难清楚的操作」——这是
+      // 可用性问题，不是审美偏好。阴影保留，用来和壁纸区分层次。
+      className="flex h-full w-full flex-col overflow-hidden rounded-2xl bg-neutral-900 text-neutral-100 shadow-2xl ring-1 ring-white/15"
     >
-      {/* —— 顶栏：页签 + 关闭 —— */}
-      <div className="flex items-center gap-1 border-b border-white/10 px-2 py-1.5">
+      {/* —— 顶栏：页签 + 控制台 + 关闭 —— */}
+      <div className="flex items-center gap-1 border-b border-white/10 px-2.5 py-2">
         <TabButton
           icon={Wrench}
           label="工具"
@@ -300,7 +340,17 @@ export function DesktopSidePanel({
             setActive(null);
           }}
         />
-        <span className="ml-auto text-[10px] text-neutral-500">桌面侧栏</span>
+        {/* V46：桌面 → 控制台的固定出口。用户原话：「工具打开还是可以直接切换 handy
+            控制台页面」——桌面负责顺手用一下，控制台负责完整界面，任何时候都能过去。 */}
+        <button
+          type="button"
+          onClick={() => launchAndClose(() => ipc.appShowMain())}
+          title="打开 Handy 控制台（主窗口）：工作台 · 桌面整理控制台 · 全部模块的完整界面"
+          className="ml-auto flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[11px] font-medium text-neutral-300 transition hover:bg-white/10 hover:text-neutral-100"
+        >
+          <AppWindow className="h-3.5 w-3.5" />
+          控制台
+        </button>
         <button
           type="button"
           onClick={onClose}
@@ -324,6 +374,7 @@ export function DesktopSidePanel({
           firstResult={results[0] ?? null}
           onPick={setActive}
           onBack={() => setActive(null)}
+          onOpenConsole={openInConsole}
         />
       ) : (
         <QuickTab
@@ -381,6 +432,7 @@ function ToolsTab({
   firstResult,
   onPick,
   onBack,
+  onOpenConsole,
 }: {
   active: PanelEntry | null;
   View: React.ComponentType<Record<string, never>> | null;
@@ -393,24 +445,36 @@ function ToolsTab({
   firstResult: PanelEntry | null;
   onPick: (entry: PanelEntry) => void;
   onBack: () => void;
+  onOpenConsole: (entry: PanelEntry) => void;
 }): React.JSX.Element {
   if (active !== null) {
     return (
       <>
-        <div className="flex items-center gap-2 border-b border-white/10 px-2 py-1.5">
+        <div className="flex items-center gap-2 border-b border-white/10 px-2.5 py-2">
           <button
             type="button"
             onClick={onBack}
-            className="flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-[11px] text-neutral-300 transition hover:bg-white/10"
+            className="flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-[12px] text-neutral-300 transition hover:bg-white/10 hover:text-neutral-100"
           >
             <ArrowLeft className="h-3.5 w-3.5" />
             返回
           </button>
-          <span className="min-w-0 flex-1 truncate text-xs font-medium">{active.name}</span>
+          <span className="min-w-0 flex-1 truncate text-[13px] font-medium">{active.name}</span>
+          {/* V46：工具窗的固定出口 —— 需要更大空间 / 完整界面时去控制台，不必先关面板。 */}
+          <button
+            type="button"
+            onClick={() => onOpenConsole(active)}
+            title={`在 Handy 控制台打开「${active.name}」（完整界面）`}
+            className="flex shrink-0 items-center gap-1.5 rounded-md border border-white/10 bg-white/5 px-2 py-1 text-[12px] text-neutral-200 transition hover:border-sky-400/40 hover:bg-white/10 hover:text-sky-200"
+          >
+            <AppWindow className="h-3.5 w-3.5" />
+            在控制台打开
+          </button>
         </div>
-        <div className="min-h-0 flex-1 overflow-auto bg-neutral-950/45">
+        {/* V46：工具本体底**必须不透明** —— 工具自己只画内容，不再叠在半透明玻璃上 */}
+        <div className="min-h-0 flex-1 overflow-auto bg-neutral-950">
           {loading || View === null ? (
-            <div className="flex h-full items-center justify-center gap-2 text-[11px] text-neutral-400">
+            <div className="flex h-full items-center justify-center gap-2 text-[12px] text-neutral-400">
               <Loader2 className="h-4 w-4 animate-spin" />
               正在打开 {active.name}…
             </div>
@@ -426,8 +490,8 @@ function ToolsTab({
 
   return (
     <>
-      <div className="flex items-center gap-2 border-b border-white/10 px-3 py-2">
-        <Search className="h-3.5 w-3.5 shrink-0 opacity-60" />
+      <div className="flex items-center gap-2 border-b border-white/10 px-3.5 py-2.5">
+        <Search className="h-4 w-4 shrink-0 opacity-60" />
         <input
           ref={inputRef}
           value={query}
@@ -438,19 +502,19 @@ function ToolsTab({
             }
           }}
           placeholder="搜索工具 / 页面（名称、拼音首字母都行）…"
-          className="min-w-0 flex-1 bg-transparent text-xs text-neutral-100 outline-none placeholder:text-neutral-500"
+          className="min-w-0 flex-1 bg-transparent text-[13px] text-neutral-100 outline-none placeholder:text-neutral-500"
         />
-        <span className="shrink-0 text-[10px] text-neutral-500">{results.length}</span>
+        <span className="shrink-0 text-[11px] text-neutral-500">{results.length}</span>
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
+      <div className="min-h-0 flex-1 overflow-y-auto p-2">
         {results.length === 0 && (
-          <p className="px-2 py-6 text-center text-[11px] text-neutral-500">没有匹配项</p>
+          <p className="px-2 py-6 text-center text-[12px] text-neutral-500">没有匹配项</p>
         )}
         {keyword.length > 0
           ? results.map((entry) => <EntryRow key={entry.id} entry={entry} onPick={onPick} />)
           : grouped.map((group) => (
-              <div key={group.key} className="mb-1.5">
-                <p className="px-2.5 pb-1 pt-1.5 text-[10px] font-semibold uppercase tracking-wide text-neutral-400">
+              <div key={group.key} className="mb-2">
+                <p className="px-2.5 pb-1.5 pt-1.5 text-[11px] font-semibold uppercase tracking-wide text-neutral-400">
                   {group.title}
                 </p>
                 {group.entries.map((entry) => (
@@ -459,8 +523,8 @@ function ToolsTab({
               </div>
             ))}
       </div>
-      <p className="border-t border-white/10 px-3 py-1.5 text-[10px] text-neutral-500">
-        回车打开第一项 · 工具就在这块面板里用，不另开窗口
+      <p className="border-t border-white/10 px-3.5 py-2 text-[11px] text-neutral-500">
+        回车打开第一项 · 工具就在这块面板里用，需要更大空间点标题栏「在控制台打开」
       </p>
     </>
   );
@@ -481,17 +545,17 @@ function EntryRow({
     <button
       type="button"
       onClick={() => onPick(entry)}
-      className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition hover:bg-white/10"
+      className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left transition hover:bg-white/10"
     >
-      <span className="shrink-0 rounded-md bg-white/10 p-1.5 text-neutral-200">
-        <Icon className="h-3.5 w-3.5" />
+      <span className="shrink-0 rounded-md bg-white/10 p-2 text-neutral-200">
+        <Icon className="h-4 w-4" />
       </span>
       <span className="min-w-0 flex-1">
-        <span className="block truncate text-xs font-medium">{entry.name}</span>
-        <span className="block truncate text-[10px] text-neutral-400">{entry.description}</span>
+        <span className="block truncate text-[13px] font-medium">{entry.name}</span>
+        <span className="block truncate text-[11px] text-neutral-400">{entry.description}</span>
       </span>
       {category !== undefined && (
-        <span className="shrink-0 rounded bg-white/5 px-1.5 py-0.5 text-[9px] text-neutral-400">
+        <span className="shrink-0 rounded bg-white/5 px-1.5 py-0.5 text-[10px] text-neutral-400">
           {category.name}
         </span>
       )}
@@ -604,7 +668,7 @@ function QuickTab({
           className="flex w-full items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-2 py-1.5 pr-6 text-left transition hover:border-sky-400/40 hover:bg-white/10"
         >
           <Icon className="h-3.5 w-3.5 shrink-0 text-neutral-200" />
-          <span className="min-w-0 flex-1 truncate text-[11px] text-neutral-100">{action.name}</span>
+          <span className="min-w-0 flex-1 truncate text-[12px] text-neutral-100">{action.name}</span>
           {action.elevated ? (
             <span className="shrink-0 rounded bg-amber-400/20 px-1 text-[8px] text-amber-200">管</span>
           ) : null}
@@ -644,7 +708,7 @@ function QuickTab({
                 className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-2 py-1.5 text-left transition hover:border-sky-400/40 hover:bg-white/10"
               >
                 <Icon className="h-3.5 w-3.5 shrink-0 text-neutral-200" />
-                <span className="min-w-0 flex-1 truncate text-[11px] text-neutral-100">{item.name}</span>
+                <span className="min-w-0 flex-1 truncate text-[12px] text-neutral-100">{item.name}</span>
               </button>
             );
           })}
@@ -655,7 +719,7 @@ function QuickTab({
             className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-2 py-1.5 text-left transition hover:border-sky-400/40 hover:bg-white/10"
           >
             <Settings className="h-3.5 w-3.5 shrink-0 text-neutral-200" />
-            <span className="min-w-0 flex-1 truncate text-[11px] text-neutral-100">设置</span>
+            <span className="min-w-0 flex-1 truncate text-[12px] text-neutral-100">设置</span>
           </button>
           <button
             type="button"
@@ -664,7 +728,7 @@ function QuickTab({
             className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-2 py-1.5 text-left transition hover:border-sky-400/40 hover:bg-white/10"
           >
             <AppWindow className="h-3.5 w-3.5 shrink-0 text-neutral-200" />
-            <span className="min-w-0 flex-1 truncate text-[11px] text-neutral-100">主窗口</span>
+            <span className="min-w-0 flex-1 truncate text-[12px] text-neutral-100">主窗口</span>
           </button>
         </div>
       </Section>
@@ -672,7 +736,7 @@ function QuickTab({
       {/* —— 我的快捷方式（与 Dock 同源） —— */}
       <Section title={`我的快捷方式（${links.length}）`}>
         {links.length === 0 ? (
-          <p className="px-1 py-1 text-[10px] leading-relaxed text-neutral-500">
+          <p className="px-1 py-1.5 text-[11px] leading-relaxed text-neutral-500">
             把桌面图标 / 文件拖到下方的快捷条（Dock）即可收成一条；这里与 Dock 是同一份数据。
           </p>
         ) : (
@@ -691,7 +755,7 @@ function QuickTab({
                   type="button"
                   onClick={() => onOpenLink(link)}
                   title={`${link.name}\n${link.value}\n单击打开`}
-                  className="min-w-0 flex-1 truncate text-left text-[11px] text-neutral-100"
+                  className="min-w-0 flex-1 truncate text-left text-[12px] text-neutral-100"
                 >
                   {link.name}
                 </button>
@@ -712,7 +776,7 @@ function QuickTab({
       {/* —— 系统快捷（已钉的常用入口） —— */}
       <Section title={`系统快捷（${pinned.length}）`}>
         {pinned.length === 0 ? (
-          <p className="px-1 py-1 text-[10px] leading-relaxed text-neutral-500">
+          <p className="px-1 py-1.5 text-[11px] leading-relaxed text-neutral-500">
             还没有固定常用入口。展开下面的「全部系统入口」，鼠标移到任意项上点右侧图钉即可固定到桌面
             Dock。
           </p>
@@ -757,7 +821,7 @@ function QuickTab({
             </div>
           )
         ) : (
-          <p className="px-1 py-1 text-[10px] leading-relaxed text-neutral-500">
+          <p className="px-1 py-1.5 text-[11px] leading-relaxed text-neutral-500">
             网络 / 服务 / 证书 / hosts 编辑 / 终端 / 控制面板… 共 {actions.length} 个系统面板，展开后点一下即开。
           </p>
         )}
@@ -779,7 +843,7 @@ function Section({
   return (
     <div>
       <div className="mb-1.5 flex items-center gap-2">
-        <span className="text-[10px] font-semibold uppercase tracking-wide text-neutral-400">{title}</span>
+        <span className="text-[11px] font-semibold uppercase tracking-wide text-neutral-400">{title}</span>
         <span className="h-px flex-1 bg-white/5" />
         {action}
       </div>

@@ -2623,10 +2623,10 @@ export function GridOverlay(): React.JSX.Element {
             endItemDrag();
           }}
           title="桌面快捷条：点一下打开；把桌面图标拖到这里收成快捷方式（与工作台共用一份数据）"
-          className={`absolute bottom-5 left-1/2 flex max-w-[60vw] -translate-x-1/2 items-center gap-1.5 overflow-x-auto rounded-2xl border border-white/10 px-2.5 py-2 shadow-2xl backdrop-blur-2xl transition ${
+          className={`absolute bottom-5 left-1/2 flex max-w-[60vw] -translate-x-1/2 items-center gap-1.5 overflow-x-auto rounded-2xl border border-white/10 px-2.5 py-2 shadow-2xl transition ${
             dockHot
-              ? 'bg-sky-500/30 ring-1 ring-sky-300/60'
-              : 'bg-neutral-900/85 ring-1 ring-white/10'
+              ? 'bg-sky-600/60 ring-1 ring-sky-300/60'
+              : 'bg-neutral-900/95 ring-1 ring-white/10'
           }`}
         >
           {dockActions.length === 0 && dockLinks.length === 0 ? (
@@ -2760,7 +2760,7 @@ export function GridOverlay(): React.JSX.Element {
       <div
         ref={toolbarRef}
         style={{ pointerEvents: 'auto' }}
-        className="absolute bottom-5 right-5 flex flex-col gap-1.5 rounded-2xl bg-neutral-900/75 px-2 py-2 shadow-2xl ring-1 ring-white/15 backdrop-blur-xl"
+        className="absolute bottom-5 right-5 flex flex-col gap-1.5 rounded-2xl bg-neutral-900/95 px-2 py-2 shadow-2xl ring-1 ring-white/15"
       >
         {/* 组 0：面板入口（工具 / 快捷）—— V45：桌面上只有“一块面板”，两个按钮分别落到
             它的两个页签；搜索框就在面板顶部，打开即用，不再有第二处搜索框。 */}
