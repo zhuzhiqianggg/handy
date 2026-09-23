@@ -222,7 +222,10 @@ async function probeDesktopConsole() {
     hasFilesTab: before.includes('归类文件'),
     hasWorkDir: before.includes('作用目录'),
     hasGroupMode: before.includes('归拢到桌面格子'),
-    hasMoveMode: before.includes('移动到整理目录'),
+    // V48 起这一项必须**不存在**：「格子 = 呈现层」，归类/拖入都不动文件（见 MEMORY §2）。
+    // 老断言写的是 `includes('移动到整理目录') === true` —— 那是 V48 之前的产品口径，
+    // 与现在的硬不变量直接冲突，永远只能红。判据翻过来：**不许**再出现这个选项。
+    moveModeGone: !before.includes('移动到整理目录'),
     gridHint: false,
     legacyHintGone: false,
   };
@@ -479,12 +482,15 @@ async function probeBarSearch() {
   if (!out.panelOpen) {
     return out;
   }
+  // ⚠️ 「旧索引」必须**在按键之前**读：这一版之前是先 dispatch 再读 `options`，
+  // 于是 beforeIdx 与 afterIdx 是同一份 DOM 快照，候选多于 1 条时断言恒假
+  // （探针自己有 bug，不是产品坏了 —— 修的是这一处，不是组件）。
+  const options = Array.from(listbox.querySelectorAll('[role="option"]'));
+  const beforeIdx = options.findIndex((o) => o.getAttribute('aria-selected') === 'true');
   input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
   await tick();
   // ↓ 键按模循环移动高亮：(i+1) % n。单候选时循环回自身（0→0）也是正确行为，
   // 所以断言「新选中索引 = 旧索引+1 取模」，不假设候选一定多于一个。
-  const options = Array.from(listbox.querySelectorAll('[role="option"]'));
-  const beforeIdx = options.findIndex((o) => o.getAttribute('aria-selected') === 'true');
   const afterList = Array.from(listbox.querySelectorAll('[role="option"]'));
   const afterIdx = afterList.findIndex((o) => o.getAttribute('aria-selected') === 'true');
   out.keyboardNav =
@@ -663,11 +669,12 @@ const CASES = [
       r.probe?.hasFilesTab === true &&
       r.probe?.hasWorkDir === true &&
       r.probe?.hasGroupMode === true &&
-      r.probe?.hasMoveMode === true &&
+      r.probe?.moveModeGone === true &&
       r.probe?.gridHint === true &&
       r.probe?.legacyHintGone === true,
     detail: (r) =>
-      `首屏=归类文件 ✓ 作用目录 ✓ 两种处理方式(归拢/移动)=${r.probe?.hasGroupMode}/${r.probe?.hasMoveMode} ` +
+      `首屏=归类文件 ✓ 作用目录 ✓ 归拢到桌面格子=${r.probe?.hasGroupMode} `
+      + `「移动到整理目录」已删(V48)=${r.probe?.moveModeGone} ` +
       `切页签后=呈现层·原地不动 ${r.probe?.gridHint ? '✓' : '✗'} ` +
       `旧「真移动」文案已清 ${r.probe?.legacyHintGone ? '✓' : '✗'}`,
   },

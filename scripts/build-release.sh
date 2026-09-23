@@ -64,7 +64,7 @@ else
 fi
 
 # —— 2. 全量回归（打包前的安全门） ——
-step "2/6 全量回归（17 套纯逻辑断言）"
+step "2/6 全量回归（套数以 scripts/regression/run.mjs 的 SUITES 为准）"
 if [ "$SKIP_REGRESSION" = "0" ]; then
   "$NODE_BIN" scripts/regression/run.mjs \
     > "$LOG_DIR/regression-$STAMP.log" 2>&1 \
