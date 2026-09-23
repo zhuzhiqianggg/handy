@@ -1,28 +1,20 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  CalendarDays,
   Eye,
   EyeOff,
   File,
   FolderClosed,
-  FolderOpen,
-  HardDrive,
-  KeyRound,
+  LayoutGrid,
   Link2,
+  List,
   Lock,
   LockOpen,
-  LogOut,
   Monitor,
-  MonitorOff,
   Palette,
   Plus,
-  Search,
-  Sparkles,
   StickyNote,
   Trash2,
-  Wand2,
   Wrench,
-  Zap,
 } from 'lucide-react';
 import { registry } from '@/core/moduleRegistry';
 import {
@@ -40,6 +32,7 @@ import type { SysAction } from '@/types/sys';
 import { ipc } from '@/lib/ipc';
 import { reportOperation } from '@/lib/errorSink';
 import { isTauri } from '@/platform/detect';
+import { cn } from '@/lib/utils';
 import type {
   GridAccent,
   GridBox,
@@ -49,13 +42,23 @@ import type {
   LooseEntry,
   TakeoverState,
 } from '@/types/grid';
-import { ACCENT_ORDER, CalendarWidget, NOTE_ACCENTS, NoteWidget } from './DesktopWidgets';
+import {
+  ACCENT_ORDER,
+  CALENDAR_THEMES,
+  CalendarWidget,
+  noteAccent,
+  NOTE_ACCENTS,
+  NoteWidget,
+} from './DesktopWidgets';
 import {
   DesktopSidePanel,
-  SIDE_PANEL_SHELL,
+  sidePanelShell,
   type PanelEntry,
   type SidePanelTab,
 } from './DesktopSidePanel';
+// 工作台（V60）：日历 + 快捷入口 + 操作按钮整合成的常驻浮窗，固定在右侧。
+// 它独立于盒子系统，所以「退出整理」只收盒子与竖条，工作台仍在。
+import { DesktopWorkstation, WorkstationSectionLabel, WORKSTATION_W } from './DesktopWorkstation';
 
 /**
  * 桌面网格挂件 · 透明覆盖窗（`grid-overlay`）。
@@ -73,8 +76,9 @@ import {
  *     （`gridOverlayUpdateRegions`），Rust 光标轮询命中后才开放交互；拖拽期间
  *     经 `gridSetInteractive(true)` 显式申请保持可交互，避免拖快了被切回穿透；
  *   - **窗口几何持久化**：moved / resized 停稳 500ms 后写 `grid_geometry_set`；
- *   - **浮动工具栏**（常驻，右下角）：锁定/解锁布局、添加收纳格 / 便签 / 日历、
- *     **整理桌面**（一键归类 + 重排 + 接管原生图标）、原生图标显示切换、隐藏挂件。
+ *   - **右侧常驻「工作台」**（V60，见下方 §V60）：日历 + 快捷入口 + 操作按钮（便签 /
+ *     格子 / 整理 / 退出整理）合成的**一个整体模块**，组件见 `DesktopWorkstation`。
+ *     V44.3 那颗「浮动工具栏」的职能（整理桌面、隐藏挂件）现已并入它。
  *
  * 交互约定（V41）：格子右键菜单**只挂在标题栏上**（图标 / 条目上的右键还给条目自己的
  * 菜单：打开 / 打开文件位置 / 移出格子）；条目**拖出格子**即移入左侧「未归类」竖条
@@ -86,10 +90,14 @@ import {
  *    自上而下排开，纯图标、无卡片外框 —— 用户原话「不整理的和快捷方式别整理到格子了，
  *    他们就是自动在桌面左上角从上往下排开即可，不需要放到格子里面，没有必要」。
  *    分类格改从**右侧**起流布（Rust `FlowPlacer` 的镜像模式），两边互不打扰。
- * 2. **桌面快捷条 Dock**（底部居中）：与工作台共用同一份快捷入口数据
- *    （`quicklinks.ts`，localStorage 同源），把桌面图标 / 格子条目拖上去即可加进去、
- *    点一下就打开 —— 用户原话「工作台里面的快捷方式可以放在桌面上的例如 mac 电脑的
- *    快捷条一样方便快速打开……把桌面图标拖进来归纳到里面」。
+ * 2. **桌面快捷条 Dock**（底部居中）→ **V56 改成右下角格子样式的固定小块** →
+ *    **V60 并入工作台**（用户：「把快捷入口这些都可以整合到工作台里面」）。
+ *    它与工作台共用同一份快捷入口数据（`quicklinks.ts`，localStorage 同源），
+ *    把桌面图标 / 格子条目拖上去即可加进去、点一下就打开 ——
+ *    用户 V42 原话「工作台里面的快捷方式可以放在桌面上的例如 mac 电脑的快捷条一样
+ *    方便快速打开……把桌面图标拖进来归纳到里面」。
+ *    ⚠️ **本文件里 `dock*` 那一批命名（`dockRef`/`dockLinks`/`hitDock`/`menuDock`…）
+ *    现在指的就是「工作台里的快捷入口那一段」**，不是底部工具栏 —— 别再被名字误导。
  * 3. **桌面右侧统一面板**（V45；V42 的中部搜索浮层 + V43 的偏左大抽屉 + V44 的右下快捷
  *    浮层三合一）：顶部搜索框 + 分类列表 + **面板原地打开工具本体**，另一个页签放
  *    应用入口 / 我的快捷方式 / 系统入口。用户 09-19：「工具搜索应该放在右侧，跟工作台
@@ -99,6 +107,28 @@ import {
  *    所以必须替 Shell 把它的菜单原样弹出来（`ipc.shellContextMenu` → `IContextMenu`），
  *    打开 / 打开方式 / 复制 / 删除 / 重命名 / 属性 + 第三方扩展项全都在。
  *    按住 Shift 才弹我们自己的精简菜单（含 Shell 给不了的「移出格子」）。
+ *
+ * # V60：工作台（日历 + 快捷入口 + 操作按钮 = 一个整体模块）
+ *
+ * 用户 09-21（附腾讯桌面整理截图）：「日历可以修改为工作台，把快捷入口这些都可以整合到
+ * 工作台里面，整合成一个整体的模块，现在还缺少添加便签的按钮 还有整理 关闭整理等，
+ * 工作台这个可以常驻，不跟桌面整理一起退出等」。
+ *
+ * 三条要点：
+ *   1. **日历不再是盒子** —— `kind='calendar'` 的渲染分支已删（存量数据由迁移 v11 清掉，
+ *      见 `db/migrations.rs::V11_GRID_DROP_CALENDAR`）。它并进 `DesktopWorkstation` 的
+ *      第一段，主题切换仍在这里（要写 localStorage，见 `WST_THEME_KEY`）。
+ *   2. **工作台是浮窗，不是格子** —— 「常驻、不跟整理一起退出」与「盒子在 `contentHidden`
+ *      时被收起」直接冲突，而浮窗由自己决定显隐，不必给盒子系统开特例。
+ *      Rust 侧 `grid.rs::workstation_rect` 把工作区右侧一整列当**禁区**，
+ *      宽度 `WORKSTATION_W == WST_BOX_W == 320`（由 `test-desktop-constants.mjs` 锁住）。
+ *   3. **操作按钮在工作台底栏**（便签 / 格子 / 整理 / 显示·收起格子），不参与滚动。
+ *
+ * 另外两条与本文件有关的：
+ *   · **桌面背景右键菜单的动作从这里落地** —— Rust 侧入队 `PENDING_ACTION` 并唤醒本窗
+ *     （`handy://desktop-action`），本组件在**挂载时**与**收到唤醒时**各取一次队列
+ *     （`runDesktopAction` / `takeDesktopAction`）。冷启动时事件必丢，队列才是兜底。
+ *   · **层级阶梯**：盒子(auto) < 参考线 35 < 工作台 38 < 面板 40 < 菜单 50 < 拖拽预览 95。
  *
  * # V38 两条硬规矩（都是用户实测反馈推出来的）
  *
@@ -113,12 +143,81 @@ import {
 /** 盒子最小尺寸（与 Rust 侧 grid_box_upsert 的下限一致） */
 const MIN_BOX_W = 160;
 const MIN_BOX_H = 120;
+/**
+ * 桌面右侧常驻「工作台」的宽度 —— 直接引用组件那一份，避免两处各写一个数。
+ *
+ * ⚠️ 它同时是 Rust `grid.rs::WST_BOX_W` 的镜像：引擎按那个数把**工作区右侧一整列**
+ * 当禁区（见 `workstation_rect`），前端按这个数画浮窗 —— 差一个像素就会变成
+ * 「格子压在工作台上」或「白留一条缝」。
+ */
+const WST_W = WORKSTATION_W;
+/**
+ * 工作区边距 / 相邻格子间隙 —— **与 Rust `grid.rs` 的同名常量逐字一致**
+ * （`ARRANGE_MARGIN = 32` / `ARRANGE_GAP_X = ARRANGE_GAP_Y = 24`）。
+ *
+ * V63 前端也要用它们了（`contentZoneRight`：收纳区右沿 = 挂件带左沿 − 一道缝），
+ * 所以在这里显式镜像一份；改 Rust 那边必须回来同步。
+ */
+const ARRANGE_MARGIN = 32;
+const ARRANGE_GAP_X = 24;
+/**
+ * 工作台折叠状态（收起成一条标题栏）的本地存储键。
+ *
+ * V56 时它管的是「右下角快捷入口格子」的收起；V60 快捷入口并进工作台，这个键**沿用**
+ * （不换名）—— 换名等于把用户已有的折叠偏好清掉一次，没必要。
+ */
+const WST_COLLAPSED_KEY = 'handy:grid.dock-collapsed';
+/**
+ * 工作台里**日历主题**的本地存储键。
+ *
+ * 主题是「调过一次就一直用」的偏好，必须落盘 —— 纯内存态会让用户重启后以为设置没保存
+ * （V59 修 `boxViewModes` 时踩过同一条）。
+ */
+const WST_THEME_KEY = 'handy:grid.workstation-theme';
+/**
+ * 各收纳格的**视图模式**（图标网格 / 列表）的本地存储键（V59）。
+ *
+ * 这个状态从 V51 起就是纯内存的 `useState` —— 于是用户切到列表视图，**重启就悄悄变回网格**，
+ * 而格子高度又是按「当前视图」渲染的，看起来就像「设置没保存」。
+ * 顺手落到 localStorage（与折叠态同一套做法，不占 `settings.json` 的字段）。
+ */
+const BOX_VIEW_MODES_KEY = 'handy:grid.box-view-modes';
+
+/**
+ * **格子外壳**（非编辑态）—— 收纳格与右下角快捷入口共用同一套观感。
+ *
+ * 抽成常量是因为「快捷入口就是一个格子」是用户 09-20 的明确要求
+ * （「将右下角这个快捷入口改造成格子样式」）：两处的边框 / 阴影 / 磨砂必须**一字不差**，
+ * 否则又会退化成「一颗飘在桌角的小面板」。
+ * 底色不在这里 —— 它跟着 `accent` 走，由 [`cardBackground`] 给内联渐变。
+ */
+const BOX_SHELL_CLASS =
+  'border border-white/15 bg-gradient-to-b from-white/[0.06] to-white/[0.02] shadow-[0_20px_60px_rgba(0,0,0,0.5),0_0_0_1px_rgba(255,255,255,0.05),inset_0_1px_0_rgba(255,255,255,0.15)] backdrop-blur-2xl backdrop-saturate-[180%]';
 /** 窗口几何落库防抖（拖动/缩放停稳后写入） */
 const GEOMETRY_SAVE_DEBOUNCE_MS = 500;
 /** 提示条显示时长 */
 const HINT_DURATION_MS = 2600;
-/** 盒子标题栏高度（与 JSX 里的 h-8 一致）：算挂件自动高度时要把它加回去 */
-const BOX_HEADER_H = 32;
+/**
+ * 「内容变了 → 重排桌面」的防抖窗口（V66，见 `relayoutSoon`）。
+ *
+ * 连续拖几个文件、连点几次「+ 格子」时只重排一次；拖拽本身是逐帧的，不防抖会把
+ * 布局请求打成一片。120ms 比一次拖放动作的间隔略长，用户感知不到延迟。
+ */
+const RELAYOUT_DEBOUNCE_MS = 120;
+/**
+ * 盒子标题栏**实际占掉的高度**（= `h-9` 的 36px **＋ 标题栏那道 `border-b` 的 1px**）。
+ * **必须与 JSX 里的标题栏结构和 Rust `grid.rs` 的 `BOX_HEADER_H` 一致**。
+ *
+ * ⚠️ V56 修过一次：这里当时写 32（对应更早的 `h-8`），标题栏已经改成 `h-9`（36）、Rust 也跟着
+ * 改成了 36 —— 前端这一份漏改，于是「按内容自然高度撑开」的挂件盒子永远矮 4px，
+ * 底部那 4px 被格子裁掉（便签靠内部滚动掩盖了，日历会白出滚动条）。
+ *
+ * ⚠️ **V70 又修了一次，这次是 1px**：36 只算了 `h-9`，**漏了标题栏那道 1px 的下边框** ⇒
+ * 每个格子都恰好差 1px 装不下 ⇒ 条目网格冒出滚动条 ⇒ 滚动条吃掉 4px 宽 ⇒ 每行少排一列
+ * ⇒ 需要的行数变多（正反馈）。真机：`文档`（18 项）引擎按 5 列 × 4 行算，实际渲染成
+ * 4 列 × 4 行 = 16 格，藏了 2 个图标。**1px 的账错会被滚动条放大成一整列。**
+ */
+const BOX_HEADER_H = 37;
 /** 盒子边框高度（上 + 下，border-box 下高度含边框） */
 const BOX_BORDER_H = 2;
 
@@ -128,8 +227,13 @@ const BOX_BORDER_H = 2;
  * 单元格里除了图标，还要放得下 padding、间距和一行 11px 的标签。Rust 用同一组常量
  * 算出竖条整体宽高（`loose_cell_size`），这里若对不上，前端画的图标就会与后端预留的
  * 占位错位 —— 差一列就会盖住旁边的分类格。
+ *
+ * ⚠️ V56 修：这里写着 36（配 `gap-1`），而 Rust 从 V51 起是 `CELL_EXTRA_W = 32` 配
+ * `GRID_GAP = 6`；两处叠加下来，前端每列比后端预留宽 4px、每个行距窄 2px —— 4 列时
+ * 竖条实际画出来比预留的宽 10px（吃掉 min_x 里那道 24px 间隙的一部分）。
+ * 前端一律向后端看齐（预留区由后端定，前端只能画在预留里）。
  */
-const STRIP_CELL_EXTRA_W = 36;
+const STRIP_CELL_EXTRA_W = 32;
 const STRIP_CELL_EXTRA_H = 30;
 
 /**
@@ -176,9 +280,22 @@ const RESIZE_HANDLES: ReadonlyArray<{ edge: ResizeEdge; className: string; curso
   { edge: 'se', className: 'bottom-0 right-0 h-3 w-3', cursor: 'cursor-nwse-resize' },
 ];
 
-/** 右键菜单行（V41：格子 / 条目 / 未归类竖条菜单共用同一条样式） */
+/** 右键菜单行（V41：格子 / 条目 / 未归类竖条菜单共用同一条样式）——V55 精致化 */
 const menuItemRowClass =
-  'flex w-full items-center gap-2 px-2.5 py-1.5 text-left transition hover:bg-white/10';
+  'group flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-[13px] transition-all duration-150 hover:bg-white/12 hover:text-white';
+
+/** 右键菜单外壳（统一 4 处：格子 / 条目 / 竖条 / 快捷条）——V55 精致化。
+ *
+ * ⚠️ 必须是 `fixed`，不能是 `absolute`（V59 追加）。
+ *
+ * 这四处菜单的坐标全部直接取自 `event.clientX / clientY` —— 那是**视口**坐标，
+ * 语义上本来就该锚在视口上（V53 的桌面菜单一直是 `fixed`，两边原本就不一致）。
+ *
+ * 更实际的原因：桌面根画布带 `overflow-hidden`（见它的说明），`absolute` 子元素会被
+ * 它裁剪 —— 在屏幕靠下 / 靠右的位置右键，菜单会被切掉半截。`fixed` 的包含块是视口，
+ * 不受祖先 `overflow` 裁剪（根画布没有 transform / filter，不会把 fixed 收回来）。 */
+const menuShellClass =
+  'fixed z-50 w-48 overflow-hidden rounded-2xl border border-white/15 bg-gradient-to-b from-neutral-900/95 to-neutral-950/98 py-1.5 text-[13px] text-neutral-100 shadow-[0_20px_60px_rgba(0,0,0,0.6),0_0_0_1px_rgba(255,255,255,0.05),inset_0_1px_0_rgba(255,255,255,0.1)] backdrop-blur-2xl';
 
 /** 取路径的最后一段（快捷条上用文件名当显示名） */
 function baseNameOf(path: string): string {
@@ -200,11 +317,40 @@ interface Interaction {
   origH: number;
 }
 
-/** 一次「条目跨格子拖拽」的会话状态（HTML5 drag，仅挂件内部） */
+/** 一次「条目跨格子拖拽」的会话状态（仅挂件内部；V59 起由指针拖拽驱动） */
 interface ItemDrag {
   item: GridItem;
   itemId: number;
   fromBoxId: number;
+}
+
+/**
+ * 一次**指针拖拽**（V59）的完整会话：从 `mousedown` 到 `mouseup`。
+ *
+ * 与 [`ItemDrag`] 的区别：`ItemDrag` 描述「拖的是谁」，本类型描述「这次拖拽走到哪一步了」。
+ * 两者拆开是因为 `itemDragRef` 还被别处（命中判定、原生拖放事件让路）当作「有没有拖拽在进行」
+ * 的标记读，语义别搅在一起。
+ */
+interface DragSession {
+  /** 按下时的指针位置（CSS px；挂件窗里它和盒子坐标是同一套） */
+  startX: number;
+  startY: number;
+  /** 指针位置（每帧更新，松手时按它定落点） */
+  x: number;
+  y: number;
+  /**
+   * 有没有越过 [`DRAG_THRESHOLD`] 变成**真正的拖拽**。
+   *
+   * 没过阈值就松手 = 普通单击，**什么也不做**。这一条必须留着：
+   * 条目上还挂着双击打开文件，若按下即进入拖拽态，双击会被拖拽抢掉。
+   */
+  active: boolean;
+  /** 按过 Esc = 取消本次拖拽（松手时光标在哪都不落） */
+  cancelled: boolean;
+  /** 拖的是格子里的条目（与 `loose` 互斥） */
+  item: GridItem | null;
+  /** 拖的是左侧「未归类」竖条里的条目 */
+  loose: LooseEntry | null;
 }
 
 /** 按扩展名粗判是否目录（无扩展名 → 视为文件夹；仅影响展示图标，不影响打开） */
@@ -221,19 +367,122 @@ function isDirectoryPath(path: string): boolean {
  * 「融入桌面」的感觉。0.62 → 0.46 的竖向渐变兼顾两头：上半部更实（标题读得清），
  * 下半部略透（露出壁纸走向），配合顶部 1px 高光就有了「玻璃」的厚度感。
  */
+/**
+ * 拖拽真正开始的位移阈值（px）。小于它一律当普通单击。
+ *
+ * 为什么需要：条目上同时挂着「双击打开文件」与「拖拽」。若 `mousedown` 就进入拖拽态，
+ * 双击会被拖拽吃掉（第二次点击落到拖拽逻辑里）—— 用户就会变成「点不开了」。
+ */
+const DRAG_THRESHOLD = 5;
+
+/**
+ * **内部拖拽 = 指针拖拽，不再用 HTML5 拖放**（V59）。
+ *
+ * # 为什么把 V43–V58 那一整套 `dataTransfer` 方案整体推翻
+ *
+ * V43 到 V58 一直在修同一个用户反馈：「拖动图标就显示禁用符号、放不下去」。每一版都加了
+ * 一层猜测——`effectAllowed = 'all'`（"Dock 那边 dropEffect='copy' 不兼容"）、
+ * `dataTransfer.types` 兜底、`itemDragRef` 兜底、「无论谁的拖拽都先 `preventDefault`」……
+ * 全都无效。因为**根因根本不在 JS 里**：
+ *
+ * Tauri 在 Windows 上会给挂件窗注册一个原生 `IDropTarget`（配置项 `dragDropEnabled`，
+ * 默认 `true`），而 wry 的实现（`wry-0.55.1/src/webview2/drag_drop.rs`）是这样的：
+ *
+ * ```text
+ * fn DragEnter(pDataObj, ..., pdwEffect) {
+ *     let hdrop = iterate_filenames(pDataObj, ...);   // 只认 CF_HDROP（真实文件）
+ *     if hdrop.is_none() { return Ok(()); }           // ← 直接返回，**一个字都不写 *pdwEffect**
+ * }
+ * fn DragOver(..., pdwEffect) { *pdwEffect = *self.cursor_effect.get(); }  // 初值 = DROPEFFECT_NONE
+ * ```
+ *
+ * 我们的图标是 DOM 元素，拖它**没有 `CF_HDROP`** ⇒ `enter_is_valid == false` ⇒
+ * `DragOver` 在每个像素上都把 `*pdwEffect` 写成 `DROPEFFECT_NONE` ⇒ **操作系统**判定
+ * 这次拖拽「不可放置」：光标画成禁止符号，`drop` 永远不派发。
+ *
+ * 结论：**只要用 HTML5 拖放去拖 DOM 元素，在这个窗口里就永远放不下**，
+ * 跟 JS 侧怎么写没有半点关系。用户从 V43 到 V58 反复反馈的那件事，真正的原因在
+ * wry 的 Rust↔COM 边界上，前端再怎么打补丁也修不好。
+ *
+ * # 现在的做法
+ *
+ * 指针拖拽：`mousedown` 记起点 → `mousemove` 越过 [`DRAG_THRESHOLD`] 才真正开始（自己算落点、
+ * 自己画一个跟随光标的预览）→ `mouseup` 执行落点动作。整条链路**不进入系统的拖放循环**，
+ * 那个 `IDropTarget` 根本没机会插手，`DROPEFFECT_NONE` 这回事也就不存在了。
+ *
+ * # 顺带保住的能力
+ *
+ * 「从资源管理器把文件拖进格子」走的是**另一条路**：那是真实文件、有 `CF_HDROP`，
+ * Tauri 的 `onDragDropEvent` 照旧正常工作。两套拖拽天然互不干扰 ——
+ * 这正是「关掉 `dragDropEnabled` 换 HTML5 拖放」那种改法做不到的（关了它，真实文件
+ * 就再也拿不到路径了）。见 CONVENTIONS §32。
+ */
+
+/**
+ * 工作台「快捷入口」里的**一键**（V61 由 `DockCell` 磁贴改来）。
+ *
+ * 用户 09-21（附截图）：「感觉工作台这块样式不够自然，一看那个快捷模块就是拼接上去的
+ * 要融为几个整体，简单的文字按钮就可以 不用那么大的图标占空间，本来空间就不够」。
+ *
+ * V56–V60 它是「32px 图标块 + 一行 10px 标签居中」的磁贴（3 列方阵）：9 个系统入口
+ * 要吃掉约 170px 高度，而且方阵本身非常抢眼 —— 看上去就是「另一块面板贴在工作台上」。
+ * 改成「12px 图标 + 11px 文字」的胶囊后，同一批入口只要约 110px，一行并两个，
+ * 形状语言也与日历那边的圆角小格一致了。
+ *
+ * 图标有两种给法：`icon`（lucide 组件，系统入口 / 工具箱走这条）与 `iconNode`
+ * （现成的节点 —— 「我的快捷方式」要显示真实文件图标，拿不到 lucide 组件）。
+ */
+function DockChip({
+  icon: Icon,
+  iconNode,
+  label,
+  title,
+  onClick,
+  onContextMenu,
+}: {
+  icon?: typeof Plus;
+  iconNode?: React.ReactNode;
+  label: string;
+  title: string;
+  onClick: () => void;
+  onContextMenu?: (event: React.MouseEvent) => void;
+}): React.JSX.Element {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      {...(onContextMenu !== undefined ? { onContextMenu } : {})}
+      className="group flex min-w-0 items-center gap-1.5 rounded-lg bg-white/[0.06] px-2 py-1.5 text-left transition hover:bg-white/[0.14]"
+    >
+      <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center opacity-75 transition group-hover:opacity-100">
+        {iconNode ?? (Icon !== undefined ? <Icon className="h-3.5 w-3.5" /> : null)}
+      </span>
+      <span className="min-w-0 flex-1 truncate text-[11px] leading-none text-neutral-300 transition group-hover:text-white">
+        {label}
+      </span>
+    </button>
+  );
+}
+
 function cardBackground(accent: GridAccent): string {
   /** 各配色的底色 RGB（深色，保证白色文字对比度 ≥ 7:1） */
   const tint: Record<GridAccent, string> = {
-    '': '12,14,22',
-    amber: '26,19,9',
-    rose: '30,12,20',
-    sky: '9,18,30',
-    emerald: '8,24,18',
-    violet: '20,13,30',
-    slate: '16,18,23',
+    '': '14,18,30',
+    amber: '28,20,10',
+    rose: '32,14,22',
+    sky: '10,20,34',
+    emerald: '9,26,20',
+    violet: '22,14,32',
+    slate: '18,20,26',
   };
   const rgb = tint[accent] ?? tint[''];
-  return `linear-gradient(180deg, rgba(${rgb},0.62), rgba(${rgb},0.46))`;
+  // V54：更精致的毛玻璃卡片底 —— 顶部高光 + 主体渐变 + 底部微亮，
+  // 做出「贴在壁纸上的玻璃卡」质感，不是纯黑一坨。
+  return `linear-gradient(180deg, 
+    rgba(${rgb},0.72) 0%, 
+    rgba(${rgb},0.58) 40%, 
+    rgba(${rgb},0.50) 100%)`;
 }
 
 /** 编辑态描边：用配色染一下，一眼看出这格是哪个颜色 */
@@ -403,18 +652,11 @@ function FileIcon({ path, size }: { path: string; size: number }): React.JSX.Ele
  * （真实的是蓝色显示器 / 蓝色回收站）。原因见 [`SYSTEM_ENTRY_ICONS`] 处注释。
  */
 function LooseIcon({ entry, size }: { entry: LooseEntry; size: number }): React.JSX.Element {
-  const SystemIcon = entry.isSystem ? SYSTEM_ENTRY_ICONS[entry.path] : undefined;
-  if (SystemIcon === undefined) {
-    return <FileIcon path={entry.path} size={size} />;
-  }
-  return (
-    <span
-      className="flex shrink-0 items-center justify-center"
-      style={{ width: size, height: size }}
-    >
-      <SystemIcon style={{ width: size * 0.78, height: size * 0.78 }} className="text-white/90" />
-    </span>
-  );
+  // V51：系统入口（此电脑/回收站/用户的文件）也走 FileIcon，不再用内置线条图标。
+  // 用户明确要求恢复 Windows 原生图标。后端 grid_file_icon 对 CLSID 路径调用
+  // SHGetFileInfoW，能拿到真实系统图标（含回收站空/满状态）。如果后端拿不到，
+  // FileIcon 有 fallback 到线条图标，不会空白。
+  return <FileIcon path={entry.path} size={size} />;
 }
 
 export function GridOverlay(): React.JSX.Element {
@@ -423,8 +665,32 @@ export function GridOverlay(): React.JSX.Element {
   const [items, setItems] = useState<Record<number, GridItem[]>>({});
   const [hint, setHint] = useState<string | null>(null);
 
-  // —— 布局交互态 ——
-  const [editMode, setEditMode] = useState(false);
+  // —— V52：每格子独立锁定/解锁 ——
+  // 用户 09-19：「锁定解锁应该针对每个格子上，不要全局锁定」。
+  // `unlockedBoxes` 记录当前解锁的格子 id。`editMode` 改为计算属性：
+  // 只要有任意格子解锁，全局就处于「编辑态」（显示添加按钮等）。
+  const [unlockedBoxes, setUnlockedBoxes] = useState<ReadonlySet<number>>(() => new Set());
+  const editMode = unlockedBoxes.size > 0;
+  const toggleBoxLock = useCallback((boxId: number): void => {
+    setUnlockedBoxes((prev) => {
+      const next = new Set(prev);
+      if (next.has(boxId)) {
+        next.delete(boxId);
+      } else {
+        next.add(boxId);
+      }
+      return next;
+    });
+  }, []);
+  /**
+   * 桌面工具栏是否展开（V48）。
+   *
+   * 用户 09-19 原话：「这个（工具条）可以做成工具条做成悬浮球样式」——
+   * 收起态只是一个 44px 的圆球，点一下才摊开成完整工具栏。桌面是用户自己的工作区，
+   * 常驻一长条按钮在审美上就是「多出来一块 UI」，而悬浮球既保留了「随时能用」，
+   * 又把默认占位压到最小（收起时只占球那么点，命中区也跟着缩小）。
+   */
+  const [toolbarOpen, setToolbarOpen] = useState(false);
   const [renamingId, setRenamingId] = useState<number | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
   /** 正在用「填路径」方式添加条目的盒子 id（拖放之外的第二条入口） */
@@ -479,6 +745,56 @@ export function GridOverlay(): React.JSX.Element {
    * 是同一批 id、同一份选中状态（`settings.quickActionIds`），只是换到桌面上来点。
    */
   const [dockActions, setDockActions] = useState<SysAction[]>([]);
+  /**
+   * 桌面「工作台」是否折叠（收起成一条标题栏）。
+   *
+   * V56 时它管的是「右下角快捷入口格子」；V60 快捷入口并进工作台，这个开关跟着升格为
+   * **整个工作台**的收起（工作台占着右侧一整列，桌面右侧有时正是用户要放东西的地方 ——
+   * 留一个「收起成一条标题栏」的口子）。状态存 localStorage，与快捷方式同一套做法。
+   */
+  const [dockCollapsed, setDockCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(WST_COLLAPSED_KEY) === '1';
+    } catch {
+      return false;
+    }
+  });
+  const toggleDockCollapsed = useCallback((): void => {
+    setDockCollapsed((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem(WST_COLLAPSED_KEY, next ? '1' : '0');
+      } catch {
+        // 隐私模式 / 存储被禁：本次会话内照样生效，只是记不住
+      }
+      return next;
+    });
+  }, []);
+  /**
+   * 工作台里日历的**主题**（V60 从日历格子搬过来的状态）。
+   *
+   * 落在 localStorage：主题是「用户调过一次就一直用」的偏好，丢一次他会觉得「设置没保存」
+   * —— 与 V59 修 `boxViewModes` 是同一个理由。
+   */
+  const [calendarTheme, setCalendarThemeState] = useState<GridAccent>(() => {
+    try {
+      const raw = localStorage.getItem(WST_THEME_KEY);
+      // 只认白名单里的键：脏数据（手改过 localStorage / 老版本遗留）不能让日历整块渲不出来
+      return raw !== null && raw in CALENDAR_THEMES ? (raw as GridAccent) : '';
+    } catch {
+      return '';
+    }
+  });
+  const setCalendarTheme = useCallback((accent: GridAccent): void => {
+    setCalendarThemeState(accent);
+    try {
+      localStorage.setItem(WST_THEME_KEY, accent);
+    } catch {
+      // 同上：记不住也不影响本次会话
+    }
+  }, []);
+  /** 主题调色板是否展开（纯界面态，不落盘） */
+  const [showThemePicker, setShowThemePicker] = useState(false);
   const quickActionIds = useAppStore((state) => state.settings.quickActionIds);
   const updateSettings = useAppStore((state) => state.updateSettings);
   /**
@@ -493,6 +809,14 @@ export function GridOverlay(): React.JSX.Element {
     null,
   );
   /**
+   * 面板是否铺满右侧（V49）——用户：「默认占一半的桌面空间…后面的工具打开后的具体某个
+   * 工具也有足够的操作功能」。默认半屏，用户在面板顶栏随时切到铺满。
+   *
+   * 刻意**提到 GridOverlay 里**（而不是面板内部 state）：宽度类挂在外层容器上，而外层
+   * 容器正是报给 Rust 的**命中区矩形**，宽度必须由同一个组件算，否则命中区会与视觉错位。
+   */
+  const [panelWide, setPanelWide] = useState(false);
+  /**
    * 桌面整理内容是否收起（V44.3）。
    *
    * true = 只留常驻「便携工具箱」工具栏，原生桌面图标恢复显示；格子 / 未归类竖条 /
@@ -506,8 +830,47 @@ export function GridOverlay(): React.JSX.Element {
   const [contentHidden, setContentHidden] = useState(false);
   /** 桌面「快捷操作」浮层（V44）已并入右侧统一面板（V45），见 `sidePanel` */
 
+  // V53：便签不再有折叠/展开——根据内容自动撑开高度。
+  // 用户 09-19：「便签不要折叠展开操作，默认根据里面的内容自动撑开即可」。
+  // V53：桌面右键菜单状态
+  const [menuDesktop, setMenuDesktop] = useState<{ x: number; y: number } | null>(null);
   /** 是否正处于「条目被拖着走」的状态（拖出格子 = 移出，落在根画布上要接住 drop） */
   const [itemDragging, setItemDragging] = useState(false);
+
+  // V51：格子视图模式——'grid'（图标网格）或 'list'（列表）。每格子可独立切换，
+  // 未设的默认 'grid'。用户 09-19：「格子里面显示方式可以切换图标和列表两种方式」
+  const [boxViewModes, setBoxViewModes] = useState<Record<number, 'grid' | 'list'>>(() => {
+    // V59：从 localStorage 恢复（此前是纯内存态，重启即丢）。解析失败一律退回空表 =
+    // 全部按默认的「图标网格」，不会因为一条脏数据让格子渲染不出来。
+    try {
+      const raw = localStorage.getItem(BOX_VIEW_MODES_KEY);
+      if (raw === null) {
+        return {};
+      }
+      const parsed: unknown = JSON.parse(raw);
+      return typeof parsed === 'object' && parsed !== null
+        ? (parsed as Record<number, 'grid' | 'list'>)
+        : {};
+    } catch {
+      return {};
+    }
+  });
+  const toggleBoxViewMode = useCallback((boxId: number): void => {
+    setBoxViewModes((prev) => {
+      const next: Record<number, 'grid' | 'list'> = {
+        ...prev,
+        [boxId]: prev[boxId] === 'list' ? 'grid' : 'list',
+      };
+      try {
+        localStorage.setItem(BOX_VIEW_MODES_KEY, JSON.stringify(next));
+      } catch {
+        /* 隐私模式 / 配额满：退化成「本次会话有效」，不影响视图本身 */
+      }
+      return next;
+    });
+  }, []);
+  const getBoxViewMode = (boxId: number): 'grid' | 'list' =>
+    boxViewModes[boxId] ?? 'grid';
   /**
    * 刚新建的格子 id —— 一段**高亮**期（2.4 秒）。
    *
@@ -516,6 +879,12 @@ export function GridOverlay(): React.JSX.Element {
    * 「你要操作的那个在这」。
    */
   const [focusBoxId, setFocusBoxId] = useState<number | null>(null);
+
+  /** V55：拖动格子时的对齐参考线 —— 显示其他格子边缘位置辅助对齐 */
+  const [snapGuides, setSnapGuides] = useState<{
+    vertical: number[];
+    horizontal: number[];
+  }>({ vertical: [], horizontal: [] });
   /**
    * 桌面接管态（V38）：`enabled` = 用户选择由格子层呈现桌面（原生图标藏起来）。
    *
@@ -558,6 +927,17 @@ export function GridOverlay(): React.JSX.Element {
   /** 各挂件最近一次上报的「内容自然高度」：用户手动拉过之后据此判断内容有没有变 */
   const lastNaturalRef = useRef<Map<number, number>>(new Map());
   /**
+   * 收纳区滚动容器（V63）。
+   *
+   * 收纳格全部住在这层 `overflow-y-auto` 里，便签（挂件）用 `fixed` 挂在外面 ——
+   * 于是「网格放不下」时只有收纳区滚动。**不做溢出时 `scrollTop` 恒为 0**，一切照旧。
+   *
+   * ⚠️ 只要有滚动位移，坐标换算就要带上它：盒子是「容器内坐标 = 桌面坐标」，
+   * 可视位置 = 桌面坐标 − `scrollTop`。所以命中判定（`hitBoxId`）必须把位移**加回去**，
+   * 否则滚动之后拖放会认错格子（见那里的说明）。
+   */
+  const contentScrollRef = useRef<HTMLDivElement | null>(null);
+  /**
    * 「用户手动定过高度」的挂件：`boxId → 当时的内容自然高度`。
    *
    * 自动撑高和手动缩放会互相打架 —— 用户把日历拉矮，撑高逻辑立刻又把它顶回去。
@@ -579,7 +959,10 @@ export function GridOverlay(): React.JSX.Element {
     if (hintTimerRef.current !== undefined) {
       window.clearTimeout(hintTimerRef.current);
     }
-    hintTimerRef.current = window.setTimeout(() => setHint(null), HINT_DURATION_MS);
+    // V70：按字数放宽显示时长 —— 「桌面已满，先删一个格子」这类提示带着行动指引，
+    // 固定 2.6 秒还没读完就没了（上限 9 秒，别让它赖着不走）。
+    const hold = Math.min(9000, Math.max(HINT_DURATION_MS, message.length * 110));
+    hintTimerRef.current = window.setTimeout(() => setHint(null), hold);
   }, []);
 
   // —— 首次装配 ——
@@ -605,17 +988,69 @@ export function GridOverlay(): React.JSX.Element {
     setItems(Object.fromEntries(entries));
   }, []);
 
+  /**
+   * **内容一变就让引擎重算整张桌面**（V66）。
+   *
+   * 用户 09-22：「你要动态整理，例如我添加了新的格子你要重新计算每个格子的大小等，
+   * 合理的计算分布」。V66 的引擎是「尺寸看自己的条目数、位置按列式填满」——
+   * 所以**任何**会改变「格子数 / 每格条目数」的动作都必须重排一次，否则：
+   *   · 新建格子停在哨兵坐标上（不重排就没落位）；
+   *   · 拖进来一个文件后格子还是旧尺寸（内容装不下 → 盒内滚动条）。
+   *
+   * 防抖 120ms：连续拖几个文件 / 连点新建时，一次重排就够（`grid_relayout` 是幂等的，
+   * 重复调用不会让摆好的格子抖动）。
+   */
+  const relayoutTimer = useRef<number | null>(null);
+  const relayoutSoon = useCallback((): void => {
+    if (!isTauri()) {
+      return;
+    }
+    if (relayoutTimer.current !== null) {
+      window.clearTimeout(relayoutTimer.current);
+    }
+    relayoutTimer.current = window.setTimeout(() => {
+      relayoutTimer.current = null;
+      void ipc
+        .gridRelayout()
+        .then(() => refresh())
+        .catch(() => undefined);
+    }, RELAYOUT_DEBOUNCE_MS);
+  }, [refresh]);
+
   useEffect(() => {
     void refresh().catch((error: Error) => showHint(error.message));
     refreshLoose();
   }, [refresh, refreshLoose, showHint]);
+
+
+  /**
+   * **V50：每次显示格子先「自愈」一次布局**（一次挂载只跑一次）。
+   *
+   * 用户 09-19：「你自己看图片继续重构结构并优化吧」＋「程序需要先计算，务必保证所有的
+   * 内容不能重叠」。布局引擎的增量口径是**幂等**的（摆对了就一个都不动 —— 见 `grid.rs`
+   * 里那条「加便签不许挪动任何收纳格」的单测），所以每次挂载跑一次是安全的：它只会把
+   * 「上一版算法留下的死坐标」收拾干净，**用户自己拖过的格子（`manual`）原地不动**。
+   *
+   * 不加这一步的话，用户升级之后得自己去点一次「一键整理桌面」才能看到新布局。
+   */
+  const healedRef = useRef(false);
+  useEffect(() => {
+    if (!isTauri() || healedRef.current) {
+      return;
+    }
+    healedRef.current = true;
+    void ipc
+      .gridRelayout()
+      .then(() => refresh())
+      .catch(() => undefined);
+  }, [refresh]);
 
   // —— 登记对账（V37：只校验存在性） ——
   //
   // 格子内容是「登记过的桌面文件」：用户在资源管理器里把文件改名 / 删掉后，
   // 这里对账（`grid_desktop_sync` → `list_live_items`）会把失效登记清掉，
   // 免得格子里留一个点不动的幽灵图标。
-  // **不自动把新文件收进格子** —— 收录只发生在用户点「一键归类」或手动拖入时。
+  // **不自动把新文件收进格子** —— 收录只发生在用户点「一键整理」或手动拖入时。
 
   /** 对账一次并按需刷新（有变化才重渲染，避免无谓的 DOM 抖动） */
   const syncDesktop = useCallback(async (): Promise<void> => {
@@ -847,6 +1282,28 @@ export function GridOverlay(): React.JSX.Element {
   const visibleBoxes = boxes;
 
   /**
+   * 收纳区滚动容器的宽度 —— 收纳区右沿 = 工作台左沿 − 一道缝（`ARRANGE_GAP_X = 24`）。
+   *
+   * 与 Rust `layout_all_boxes_with` 里的 `right_edge` 同一个定义。
+   *
+   * ★ **V68 起它不再看便签摆在哪儿**（以前取的是「挂件带左沿 − 一道缝」）。原因：引擎现在会把
+   * 挂件**下方**那条带也用起来（用户 09-22：「便签下面还有大量的空间，我们也可以把格子跑过去的」），
+   * 那些格子的 `x` **就落在便签列这一条竖带里**，可能一直顶到工作台左沿。容器若还只铺到便签列
+   * 左沿，带下空间里的格子会被 `overflow-x-hidden` 直接**裁掉看不见**。
+   *
+   * 取整屏曾经的问题是「滚动条被右侧常驻工作台盖住」（工作台 z-38 > 这层）—— 现在取的是
+   * `工作台左沿 − 一道缝`（不是整屏），滚动条正好落在那道缝里，不会被盖住。
+   */
+  const contentZoneRight = Math.max(
+    MIN_BOX_W,
+    window.innerWidth - ARRANGE_MARGIN - WORKSTATION_W - ARRANGE_GAP_X,
+  );
+  /** 同上，给**事件回调**读（移动处理器要用来夹住拖动的横坐标；用 ref 免得重挂监听） */
+  const contentZoneRightRef = useRef(contentZoneRight);
+  contentZoneRightRef.current = contentZoneRight;
+
+
+  /**
    * 区域键（几何或缩放变化才重新上报，避免 mousemove 高频 invoke）。
    *
    * 未归类竖条出现 / 消失、快捷条条目数变化、搜索面板开关 —— 都会改变命中区域，
@@ -856,11 +1313,11 @@ export function GridOverlay(): React.JSX.Element {
     .map((b) => `${b.id}:${b.posX},${b.posY},${b.width},${b.height}`)
     .join('|')}|sf=${scaleFactor}|loose=${
     loose ? `${loose.x},${loose.y},${loose.width},${loose.height}` : ''
-  }|dock=${dockLinks.length + dockActionList.length}|panel=${
+  }|dock=${dockLinks.length + dockActionList.length}:${dockCollapsed ? 'c' : 'o'}|panel=${
     sidePanel === null ? '' : `${sidePanel.tab}:${sidePanel.entry?.id ?? ''}`
-  }|menu=${[menuBox, menuItem, menuLoose, menuDock]
+  }|pw=${panelWide ? 'full' : 'half'}|menu=${[menuBox, menuItem, menuLoose, menuDock]
     .map((m) => (m === null ? '0' : '1'))
-    .join('')}`;
+    .join('')}|tb=${toolbarOpen ? '1' : '0'}`;
 
   /**
    * 是否有右键菜单开着。
@@ -869,7 +1326,7 @@ export function GridOverlay(): React.JSX.Element {
    * 是穿透的，点不动）；② 菜单开着期间强制整窗可交互。
    */
   const anyMenuOpen =
-    menuBox !== null || menuItem !== null || menuLoose !== null || menuDock !== null;
+    menuBox !== null || menuItem !== null || menuLoose !== null || menuDock !== null || menuDesktop !== null;
 
   useEffect(() => {
     if (!isTauri()) {
@@ -891,7 +1348,8 @@ export function GridOverlay(): React.JSX.Element {
     // 菜单锚在右键落点上，常常有一半探出格子矩形之外，那半边就落在「未上报」的区域里，
     // Rust 判定光标没命中任何交互区 → 把整窗切回穿透 → 点上去直接漏到桌面。
     // 菜单矩形的尺寸只能在渲染后量，所以靠 ref 现取；`regionsKey` 里的 `menu=` 段
-    // 保证「菜单开/关」会触发这次重报。
+    // 保证「菜单开/关」会触发这次重报；`pw=` 同理 —— 面板「半屏 / 铺满」切换后
+    // 命中区必须跟着变，否则铺满时右半边点不动、收回半屏后右侧留一块吃点击的死区。
     for (const node of [
       toolbarRef.current,
       emptyRef.current,
@@ -941,6 +1399,21 @@ export function GridOverlay(): React.JSX.Element {
       if (!box) {
         return;
       }
+      // V49：格子**不许叠在别人身上**（用户 09-19：「务必保证所有的内容不能重叠，
+      // 可以有滚动条 但是不能图标重叠」）。手工把格子拖到别人身上时，落库后立刻跑一次
+      // 「增量补齐」布局 —— 布局只安置「没落位」的格子（重叠 / 越界 / 侵入左侧竖条），
+      // 所以它只会把**这一格**挪到最近的合法列位，用户摆得合法的那次拖动完全不受影响。
+      const clash = boxesRef.current.some((other) => {
+        if (other.id === box.id) {
+          return false;
+        }
+        return (
+          box.posX < other.posX + other.width &&
+          other.posX < box.posX + box.width &&
+          box.posY < other.posY + other.height &&
+          other.posY < box.posY + box.height
+        );
+      });
       void ipc
         .gridBoxUpsert({
           boxId: box.id,
@@ -948,10 +1421,22 @@ export function GridOverlay(): React.JSX.Element {
           posY: box.posY,
           width: box.width,
           height: box.height,
+          // V50：这是**用户自己拖 / 拉**的结果 —— 打上「手工摆过」标记，此后普通整理
+          // 不再把它对齐回列网格（引擎摆过的一律重新对齐，见 grid.rs 的 layout_all_boxes）。
+          manual: true,
+        })
+        .then(() => {
+          if (!clash) {
+            return;
+          }
+          return ipc
+            .gridRelayout()
+            .then(() => refresh())
+            .catch(() => undefined);
         })
         .catch((error: Error) => showHint(error.message));
     },
-    [showHint],
+    [refresh, showHint],
   );
 
   useEffect(() => {
@@ -968,10 +1453,77 @@ export function GridOverlay(): React.JSX.Element {
             return box;
           }
           if (interaction.kind === 'move') {
+            let nextX = Math.max(interaction.origX + dx, 0);
+            let nextY = Math.max(interaction.origY + dy, 0);
+            // V55：吸附对齐 —— 拖动格子时，边缘接近其他格子边缘自动吸附
+            const SNAP_THRESHOLD = 8;
+            const guides = { vertical: [] as number[], horizontal: [] as number[] };
+            const boxW = box.width;
+            const boxH = box.height;
+            for (const other of prev) {
+              if (other.id === box.id) continue;
+              const otherLeft = other.posX;
+              const otherRight = other.posX + other.width;
+              const otherTop = other.posY;
+              const otherBottom = other.posY + other.height;
+              const otherCenterX = other.posX + other.width / 2;
+              const otherCenterY = other.posY + other.height / 2;
+              const myLeft = nextX;
+              const myRight = nextX + boxW;
+              const myTop = nextY;
+              const myBottom = nextY + boxH;
+              const myCenterX = nextX + boxW / 2;
+              const myCenterY = nextY + boxH / 2;
+
+              // 垂直参考线：左边对齐、右边对齐、居中对齐
+              if (Math.abs(myLeft - otherLeft) < SNAP_THRESHOLD) {
+                nextX = otherLeft;
+                guides.vertical.push(otherLeft);
+              } else if (Math.abs(myLeft - otherRight) < SNAP_THRESHOLD) {
+                nextX = otherRight;
+                guides.vertical.push(otherRight);
+              } else if (Math.abs(myRight - otherRight) < SNAP_THRESHOLD) {
+                nextX = otherRight - boxW;
+                guides.vertical.push(otherRight);
+              } else if (Math.abs(myRight - otherLeft) < SNAP_THRESHOLD) {
+                nextX = otherLeft - boxW;
+                guides.vertical.push(otherLeft);
+              } else if (Math.abs(myCenterX - otherCenterX) < SNAP_THRESHOLD) {
+                nextX = otherCenterX - boxW / 2;
+                guides.vertical.push(otherCenterX);
+              }
+
+              // 水平参考线：上边对齐、下边对齐、居中对齐
+              if (Math.abs(myTop - otherTop) < SNAP_THRESHOLD) {
+                nextY = otherTop;
+                guides.horizontal.push(otherTop);
+              } else if (Math.abs(myTop - otherBottom) < SNAP_THRESHOLD) {
+                nextY = otherBottom;
+                guides.horizontal.push(otherBottom);
+              } else if (Math.abs(myBottom - otherBottom) < SNAP_THRESHOLD) {
+                nextY = otherBottom - boxH;
+                guides.horizontal.push(otherBottom);
+              } else if (Math.abs(myBottom - otherTop) < SNAP_THRESHOLD) {
+                nextY = otherTop - boxH;
+                guides.horizontal.push(otherTop);
+              } else if (Math.abs(myCenterY - otherCenterY) < SNAP_THRESHOLD) {
+                nextY = otherCenterY - boxH / 2;
+                guides.horizontal.push(otherCenterY);
+              }
+            }
+            // V63：收纳格**不许被拖出收纳区** —— 那一块在滚动容器之外，会被裁掉看不见
+            // （Rust 侧 `needs_placement` 判据⑤ 早就不许格子跨进挂件带，这里让拖动与引擎
+            // 同口径，免得「拖过去看着没事、一整理才弹回来」）。便签不受限：它本来就住在
+            // 容器外面、自己那一列里。
+            if (box.kind !== 'note') {
+              const maxX = Math.max(0, contentZoneRightRef.current - boxW);
+              nextX = Math.min(Math.max(nextX, 0), maxX);
+            }
+            setSnapGuides(guides);
             return {
               ...box,
-              posX: Math.max(interaction.origX + dx, 0),
-              posY: Math.max(interaction.origY + dy, 0),
+              posX: nextX,
+              posY: nextY,
             };
           }
           // 缩放：按手柄方向决定动哪几条边。
@@ -1012,12 +1564,28 @@ export function GridOverlay(): React.JSX.Element {
         return;
       }
       interactionRef.current = null;
+      setSnapGuides({ vertical: [], horizontal: [] });
       // 交还穿透控制（光标若仍在盒子内，轮询线程会立即恢复可交互）
       void ipc.gridSetInteractive(false).catch(() => undefined);
+      // V56：**没真的动过就不要落库**。
+      //
+      // 拖动现在从「格子任意位置」都能起手（见下面 section 的 onMouseDown），于是
+      // 「单击一下格子空白处」也会走完 onUp。若无条件 `persistBoxGeometry`，
+      // 一次单击就会把这一格标成 `manual`（用户手工摆过）—— 此后引擎再也不自动对齐它。
+      // 桌面上随手点几下，全桌格子就都成了 manual，整理等于失效。
+      const target = boxesRef.current.find((box) => box.id === interaction.boxId);
+      const movedOrResized =
+        target !== undefined &&
+        (target.posX !== interaction.origX ||
+          target.posY !== interaction.origY ||
+          target.width !== interaction.origW ||
+          target.height !== interaction.origH);
+      if (!movedOrResized) {
+        return;
+      }
       // 手动缩放过挂件 → 记录「此时的内容自然高度」，自动撑高先让位（见 autoHeightBlockedRef）
       if (interaction.kind === 'resize') {
-        const target = boxesRef.current.find((box) => box.id === interaction.boxId);
-        if (target && (target.kind === 'calendar' || target.kind === 'note')) {
+        if (target && target.kind === 'note') {
           const natural = lastNaturalRef.current.get(target.id);
           if (natural !== undefined) {
             autoHeightBlockedRef.current.set(target.id, natural);
@@ -1057,6 +1625,9 @@ export function GridOverlay(): React.JSX.Element {
   const startMove = useCallback(
     (event: React.MouseEvent, box: GridBox): void => {
       event.preventDefault();
+      // V56：标题栏与「格子空白处」两个 handler 都会走到这里（事件冒泡），
+      // stopPropagation 保证一次按下只起一次拖动 —— 否则 raiseBox / 起拖会各跑两遍。
+      event.stopPropagation();
       raiseBox(box);
       interactionRef.current = {
         kind: 'move',
@@ -1160,11 +1731,13 @@ export function GridOverlay(): React.JSX.Element {
             [item.boxId]: (prev[item.boxId] ?? []).filter((i) => i.id !== item.id),
           }));
           refreshLoose();
+          // V66：条目少了 → 该格子该变矮，重排一次
+          relayoutSoon();
           showHint(`已移出格子：${item.displayName}（回到左侧「未归类」竖条）`);
         })
         .catch((error: Error) => showHint(error.message));
     },
-    [refreshLoose, showHint],
+    [refreshLoose, relayoutSoon, showHint],
   );
 
   const addItem = useCallback(
@@ -1174,11 +1747,13 @@ export function GridOverlay(): React.JSX.Element {
         .then((item) => {
           setItems((prev) => ({ ...prev, [boxId]: [...(prev[boxId] ?? []), item] }));
           refreshLoose();
+          // V66：条目多了 → 该格子该长高，重排一次（否则新条目挤在旧尺寸里出滚动条）
+          relayoutSoon();
           showHint(`已加入格子：${item.displayName}（文件仍在桌面原位）`);
         })
         .catch((error: Error) => showHint(error.message));
     },
-    [refreshLoose, showHint],
+    [refreshLoose, relayoutSoon, showHint],
   );
 
   // —— 桌面快捷条（V42） ——
@@ -1347,59 +1922,95 @@ export function GridOverlay(): React.JSX.Element {
             const target = [...(prev[targetBoxId] ?? []), { ...dragged, boxId: targetBoxId }];
             return { ...prev, [drag.fromBoxId]: source, [targetBoxId]: target };
           });
+          // V66：两个格子的条目数都变了（一个少一个多）→ 重算尺寸
+          relayoutSoon();
         })
         .catch((error: Error) => showHint(error.message));
     },
-    [showHint],
+    [relayoutSoon, showHint],
   );
 
-  const startItemDrag = useCallback((item: GridItem, event: React.DragEvent): void => {
-    itemDragRef.current = { item, itemId: item.id, fromBoxId: item.boxId };
-    setItemDragging(true);
-    // **`copyMove` 而不是 `move`**（V43 关键修复）：拖进格子是「移动」（换归属），
-    // 拖到快捷条 Dock 是「复制」（收成一条快捷方式，原文件不动）。
-    // 只声明 `move` 时，Dock 那边设的 `dropEffect='copy'` 与它不兼容，
-    // 浏览器直接判定「禁止放置」—— 用户看到的就是「拖进来根本拖不了」。
-    event.dataTransfer.effectAllowed = 'copyMove';
-    // 同窗口 HTML5 拖拽也会走 WebView2 的系统拖放事件，标记一下供其忽略
-    event.dataTransfer.setData('application/x-handy-item', String(item.id));
-    // 拖拽期保持整窗可交互（光标会频繁跨越盒子边界）
-    void ipc.gridSetInteractive(true).catch(() => undefined);
-  }, []);
+  // —— 内部拖拽（V59）：指针拖拽 —— 根因见文件头 `DRAG_THRESHOLD` 上方的说明 ——
 
-  /** 未归类竖条条目开始拖拽（V41）：拖进哪个格子就登记进哪个格子 */
-  const startLooseDrag = useCallback((entry: LooseEntry, event: React.DragEvent): void => {
-    looseDragRef.current = entry;
-    // V47 关键修复：**必须同时置 `itemDragging`**。
-    //
-    // 根画布的 `pointerEvents` 由它决定（`itemDragging ? 'auto' : 'none'`）。
-    // V41 起只有「拖格子里的条目」会置位，「从左侧竖条拖」忘了 —— 于是从竖条起拖时
-    // 整层仍是穿透态，落点判定一路拿不到有效 dragover，浏览器直接把光标画成
-    // 「圆圈禁止」，用户看到的就是「桌面上的图标全都拖不动」。
-    // 置位后：根画布可接住 dragover/drop、格子高亮生效、拖到空白处松手也有明确落点。
-    setItemDragging(true);
-    // 同上：要能拖进格子（move），也要能拖到快捷条（copy）
-    event.dataTransfer.effectAllowed = 'copyMove';
-    event.dataTransfer.setData('application/x-handy-loose', entry.path);
-    void ipc.gridSetInteractive(true).catch(() => undefined);
-  }, []);
+  /** 进行中的指针拖拽会话（`null` = 没有按下 / 已经结束） */
+  const dragSessionRef = useRef<DragSession | null>(null);
+  /** 跟随光标的拖拽预览节点（位置用直接改 `style` 的方式更新，不走 React 重渲染） */
+  const dragGhostRef = useRef<HTMLDivElement | null>(null);
+  /** 拖拽预览的内容；`null` = 不显示 */
+  const [dragGhost, setDragGhost] = useState<{ label: string; path: string } | null>(null);
 
-  const endItemDrag = useCallback((): void => {
-    if (itemDragRef.current === null && looseDragRef.current === null) {
-      return;
-    }
+  /**
+   * 记下一个「可能成为拖拽」的会话。
+   *
+   * ⚠️ 这里**只是按下**，还没有进入拖拽态：条目的 `onMouseDown` 上同时挂着双击打开文件，
+   * 若按下即拖拽，双击会被抢掉。真正的拖拽在指针越过 [`DRAG_THRESHOLD`] 时才由
+   * 主循环启动（见下面的 `mousemove`）。
+   */
+  const beginDragSession = useCallback(
+    (seed: { item: GridItem | null; loose: LooseEntry | null }, event: React.MouseEvent): void => {
+      if (event.button !== 0) {
+        return;
+      }
+      dragSessionRef.current = {
+        startX: event.clientX,
+        startY: event.clientY,
+        x: event.clientX,
+        y: event.clientY,
+        active: false,
+        cancelled: false,
+        item: seed.item,
+        loose: seed.loose,
+      };
+      // ⚠️ 按下就显式保持可交互，**不能等越过阈值再做**：挂件窗平时是 `ignore_cursor_events`
+      // 穿透态，靠 Rust 的光标轮询在「指针进入盒子矩形」时临时开放。若指针在阈值内就滑出了
+      // 所有命中区，轮询会把窗口切回穿透 —— 那一刻之后 `mousemove` 全部落到下层桌面，
+      // 我们再也收不到，这次拖拽就**卡死在原地**。
+      // （盒子拖动 `startMove` 用的是同一句话，已被用户验证。）
+      void ipc.gridSetInteractive(true).catch(() => undefined);
+    },
+    [],
+  );
+
+  /** 格子里的条目按下：可能是单击 / 双击 / 拖拽，先记会话 */
+  const beginItemDrag = useCallback(
+    (item: GridItem, event: React.MouseEvent): void => {
+      beginDragSession({ item, loose: null }, event);
+    },
+    [beginDragSession],
+  );
+
+  /** 左侧「未归类」竖条的条目按下：拖进哪个格子就登记进哪个格子 */
+  const beginLooseDrag = useCallback(
+    (entry: LooseEntry, event: React.MouseEvent): void => {
+      beginDragSession({ item: null, loose: entry }, event);
+    },
+    [beginDragSession],
+  );
+
+  /** 收干净全部拖拽态（高亮 / 预览 / 可交互标记）—— 落点执行前、或中途作废时调 */
+  const resetDragVisuals = useCallback((): void => {
     itemDragRef.current = null;
     looseDragRef.current = null;
     setItemDragging(false);
     setDropTargetId(null);
+    setDockHot(false);
+    setDragGhost(null);
     // 交还命中轮询控制（光标若仍在盒子内会立即恢复可交互）
     void ipc.gridSetInteractive(false).catch(() => undefined);
   }, []);
 
-  // —— 文件拖放：drop 落点命中哪个盒子，就把文件登记为该盒子的引用 ——
+  // —— 文件拖放（来自资源管理器）：drop 落点命中哪个盒子，就把文件登记为该盒子的引用 ——
+  //
+  // 注意这条路**和上面那套指针拖拽是两回事**：拖的是真实文件，有 `CF_HDROP`，
+  // 由 Tauri 的 `onDragDropEvent` 送进来 —— 见 `DRAG_THRESHOLD` 上方的说明。
 
   /** 逻辑坐标 → 命中的盒子 id（后渲染的盒子优先，即数组尾部在上层） */
   const hitBoxId = useCallback((logicalX: number, logicalY: number): number | null => {
+    // V63：收纳区那层滚动容器有位移时，盒子在屏幕上的实际位置 = 桌面坐标 − `scrollTop`
+    // （容器左沿为 0，所以 x 不受影响）。传进来的是 `clientY`（屏幕坐标），换算回
+    // 「盒子自己的坐标」就要把位移加回去 —— 少了这一句，滚动之后拖放会认错格子。
+    const scrollTop = contentScrollRef.current?.scrollTop ?? 0;
+    const logicalYInCanvas = logicalY + scrollTop;
     const list = boxesRef.current;
     for (let i = list.length - 1; i >= 0; i -= 1) {
       const box = list[i];
@@ -1409,14 +2020,134 @@ export function GridOverlay(): React.JSX.Element {
       if (
         logicalX >= box.posX &&
         logicalX <= box.posX + box.width &&
-        logicalY >= box.posY &&
-        logicalY <= box.posY + box.height
+        logicalYInCanvas >= box.posY &&
+        logicalYInCanvas <= box.posY + box.height
       ) {
         return box.id;
       }
     }
     return null;
   }, []);
+
+  /**
+   * **指针拖拽主循环**（V59）：`mousemove` 算落点、`mouseup` 执行动作。
+   *
+   * 监听挂在 `window` 上而不是挂在被拖的元素上：指针会频繁跨出那个条目、跨出格子、
+   * 甚至掠过别的盒子 —— 挂元素上必然中途丢事件。盒子拖动（`startMove`）用的是同一套办法，
+   * 已被用户验证过可用。
+   *
+   * 常驻挂监听（而不是拖着才挂）：拖拽起点是「某个条目的 `mousedown`」，那是个普通事件
+   * 回调，没法从那里安全地挂全局监听。代价只是每个 `mousemove` 一次 `null` 判断。
+   */
+  useEffect(() => {
+    const onMove = (event: MouseEvent): void => {
+      const session = dragSessionRef.current;
+      if (session === null) {
+        return;
+      }
+      session.x = event.clientX;
+      session.y = event.clientY;
+      if (!session.active) {
+        const moved = Math.hypot(event.clientX - session.startX, event.clientY - session.startY);
+        if (moved < DRAG_THRESHOLD) {
+          return;
+        }
+        // 越过阈值 —— 到这一刻才是真的在拖：
+        // 进入拖拽态（根画布转可交互，由 `beginDragSession` 按下时就已置位）+ 出预览
+        session.active = true;
+        itemDragRef.current =
+          session.item === null
+            ? null
+            : { item: session.item, itemId: session.item.id, fromBoxId: session.item.boxId };
+        looseDragRef.current = session.loose;
+        setItemDragging(true);
+        setDragGhost(
+          session.item !== null
+            ? { label: session.item.displayName, path: session.item.filePath }
+            : session.loose === null
+              ? null
+              : { label: session.loose.name, path: session.loose.path },
+        );
+      }
+      // 预览位置直接改 `style`：每帧都 setState 会把整个挂件层重渲染一遍
+      const ghost = dragGhostRef.current;
+      if (ghost !== null) {
+        ghost.style.transform = `translate3d(${event.clientX + 14}px, ${event.clientY + 14}px, 0)`;
+      }
+      // 落点判定顺序与原生文件拖放那一套保持一致：快捷入口优先
+      const onDock = hitDock(event.clientX, event.clientY);
+      setDockHot(onDock);
+      setDropTargetId(onDock ? null : hitBoxId(event.clientX, event.clientY));
+    };
+
+    const onUp = (event: MouseEvent): void => {
+      const session = dragSessionRef.current;
+      if (session === null) {
+        return;
+      }
+      dragSessionRef.current = null;
+      session.x = event.clientX;
+      session.y = event.clientY;
+      const { active, cancelled, item, loose: looseEntry } = session;
+      resetDragVisuals();
+      // 没越过阈值 = 普通单击 / 双击；按过 Esc = 取消 —— 两种都什么都不做
+      if (!active || cancelled) {
+        return;
+      }
+      if (hitDock(event.clientX, event.clientY)) {
+        // 拖到右下角「快捷入口」= 收藏成一条快捷方式（文件本身不动）
+        if (item !== null) {
+          addDockLink(item.displayName, item.filePath);
+        } else if (looseEntry !== null) {
+          addDockLink(looseEntry.name, looseEntry.path);
+        }
+        return;
+      }
+      const boxId = hitBoxId(event.clientX, event.clientY);
+      if (item !== null) {
+        // 落在任何格子之外 = 移出格子 → 自动回到左侧「未归类」竖条
+        // （用户 V41 原话：「用户直接从格子里面移除自动规划到不整理的部分即可」）
+        if (boxId === null) {
+          removeItem(item);
+        } else {
+          moveItem({ item, itemId: item.id, fromBoxId: item.boxId }, boxId);
+        }
+      } else if (looseEntry !== null && boxId !== null) {
+        addItem(boxId, looseEntry.path);
+      }
+      // 竖条条目落在空白处 = 它本来就在竖条里，什么都不用做
+    };
+
+    /**
+     * 指针移出窗口时 `mouseup` 收不到 —— 会话必须作废，否则挂件层会永久卡在
+     * 「可交互 + 拖拽中」的状态（那正是 V48 注释里担心的脏状态）。
+     */
+    const onAbort = (): void => {
+      if (dragSessionRef.current === null) {
+        return;
+      }
+      dragSessionRef.current = null;
+      resetDragVisuals();
+    };
+
+    /** 拖拽中按 Esc = 取消本次拖拽 */
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape' && dragSessionRef.current !== null) {
+        dragSessionRef.current.cancelled = true;
+      }
+    };
+
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    window.addEventListener('keydown', onKey);
+    document.documentElement.addEventListener('mouseleave', onAbort);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      window.removeEventListener('keydown', onKey);
+      document.documentElement.removeEventListener('mouseleave', onAbort);
+    };
+  }, [addDockLink, addItem, hitBoxId, hitDock, moveItem, removeItem, resetDragVisuals]);
 
   useEffect(() => {
     if (!isTauri()) {
@@ -1428,8 +2159,8 @@ export function GridOverlay(): React.JSX.Element {
       try {
         const { getCurrentWebview } = await import('@tauri-apps/api/webview');
         const fn = await getCurrentWebview().onDragDropEvent((event) => {
-          // 挂件内部正在拖条目（HTML5 drag）：让路，避免系统拖放事件把状态搅乱
-          if (itemDragRef.current !== null) {
+          // 挂件内部正在拖条目（指针拖拽）：让路，避免系统拖放事件把状态搅乱
+          if (itemDragRef.current !== null || looseDragRef.current !== null) {
             return;
           }
           const payload = event.payload;
@@ -1555,30 +2286,71 @@ export function GridOverlay(): React.JSX.Element {
 
   // —— 工具栏动作 ——
 
-  const toggleEditMode = useCallback((): void => {
-    setEditMode((prev) => {
-      const next = !prev;
-      // 编辑态 = 布局操作密集期：整窗保持可交互，退出后交还命中轮询控制
-      void ipc.gridSetInteractive(next).catch(() => undefined);
+  /**
+   * 解锁**全部**格子 / 全部锁上。
+   *
+   * ⚠️ V56 修一个由 V52 引入的「静默空操作」：V52 把全局编辑态改成每格独立时留下了一个
+   * 兼容壳 `setEditMode(visible)` —— 它传 `true` 时只 `return new Set(prev)`，**什么都没解锁**。
+   * 而「新建格子」这条路径正是调它（`focusNewBox`），于是：
+   *   · 新加的格子其实**一直是锁着的**，提示却写着「已解锁，可以直接拖动 / 拉大小 / 改名」；
+   *   · 下面 `toggleEditMode` 的解锁分支也同样是 `new Set()` —— **只能锁、永远解不开**。
+   * 两处叠加，就是用户 09-20 反馈的「桌面上的是不能自己拖动调整的，
+   * 只能通过整理自动整理…后面用户不能自己新建格子然后手动拖动整理」。
+   *
+   * 现在把它拆成两个**名副其实**的接口，谁也不再假装。注意这两个必须定义在 `boxesRef`
+   * 之后（解锁全部要读当前格子表）。
+   */
+  const unlockAllBoxes = useCallback((): void => {
+    setUnlockedBoxes(new Set(boxesRef.current.map((box) => box.id)));
+    void ipc.gridSetInteractive(true).catch(() => undefined);
+  }, []);
+  const lockAllBoxes = useCallback((): void => {
+    setUnlockedBoxes(new Set());
+    void ipc.gridSetInteractive(false).catch(() => undefined);
+  }, []);
+  /** 只解锁某一个格子（新建 / 「我要摆它」这类明确意图用这个） */
+  const unlockBox = useCallback((boxId: number): void => {
+    setUnlockedBoxes((prev) => {
+      if (prev.has(boxId)) {
+        return prev;
+      }
+      const next = new Set(prev);
+      next.add(boxId);
       return next;
     });
+    void ipc.gridSetInteractive(true).catch(() => undefined);
   }, []);
 
+  const toggleEditMode = useCallback((): void => {
+    // V52：编辑态已从「全局」改成「每格独立」，所以这里读的是当前解锁集合：
+    // 只要有任意一格是解锁的，就把它们全部锁上；否则解锁全部。
+    if (unlockedBoxes.size > 0) {
+      lockAllBoxes();
+    } else {
+      unlockAllBoxes();
+    }
+  }, [lockAllBoxes, unlockAllBoxes, unlockedBoxes.size]);
+
   /**
-   * 把刚新建的格子「交给用户」：**自动解锁编辑态 + 高亮 2.4 秒**。
+   * 把刚新建的格子「交给用户」：**自动解锁 + 高亮 2.4 秒**。
    *
    * V38 用户原话：「新加的格子默认直接不显示操作，很不方便，应该是新加的自动给我锁定了，
    * 这不合理，我新加的就是要操作的，你直接锁定了还怎么操作」。
    * 新建是明确的「我要摆它」意图，此时还让他去找锁图标解锁，纯属添堵。
+   *
+   * ⚠️ V56：这里原本调的是 V52 那个空操作兼容壳 ⇒ **新格子其实没解锁**，
+   * 所以用户「新建格子然后手动拖动」的第二步永远失败。改调 [`unlockBox`]。
    */
-  const focusNewBox = useCallback((boxId: number): void => {
-    setEditMode(true);
-    void ipc.gridSetInteractive(true).catch(() => undefined);
-    setFocusBoxId(boxId);
-    window.setTimeout(() => {
-      setFocusBoxId((prev) => (prev === boxId ? null : prev));
-    }, 2400);
-  }, []);
+  const focusNewBox = useCallback(
+    (boxId: number): void => {
+      unlockBox(boxId);
+      setFocusBoxId(boxId);
+      window.setTimeout(() => {
+        setFocusBoxId((prev) => (prev === boxId ? null : prev));
+      }, 2400);
+    },
+    [unlockBox],
+  );
 
   /**
    * 一键整理桌面（V38）：把桌面条目按类型登记进格子，**再用同一套流布局全部重排**。
@@ -1647,50 +2419,14 @@ export function GridOverlay(): React.JSX.Element {
       });
   }, [refresh, refreshLoose, showHint]);
 
-  /**
-   * 切换「由格子接管桌面呈现」（V38）：开 = 隐藏原生图标，关 = 图标与格子共存。
-   *
-   * 为什么要给用户这个开关：隐藏桌面图标是接管别人的地盘，万一第三方桌面工具抢着
-   * 管，用户得有一键退回到「原桌面原样」的出口 —— 否则桌上一个文件都点不到。
-   *
-   * V40 补一种情形：偏好明明是「接管」、图标却露在外面（被系统或第三方工具恢复了）。
-   * 这时点按钮的意图显然是**按我说的藏回去**，而不是「改偏好成不接管」——
-   * 所以这里先修状态，只有状态本来就一致时才真的切偏好。
-   */
-  const toggleTakeover = useCallback((): void => {
-    const wanted = takeover?.enabled ?? false;
-    const mismatch = wanted && (takeover?.iconsVisible ?? false);
-    const next = mismatch ? true : !wanted;
-    void ipc
-      .gridTakeoverSet(next)
-      .then((hidden) => {
-        setTakeover({ enabled: next, iconsVisible: !hidden });
-        if (next && hidden) {
-          showHint(
-            mismatch
-              ? '已重新接管：原生图标再次收起（刚才它被系统或桌面工具显示回来了）'
-              : '桌面已交由格子接管：原生图标收起，格子就是桌面',
-          );
-        } else if (next) {
-          showHint('没能自动隐藏桌面图标，格子与原生图标会同时显示');
-        } else {
-          showHint('已恢复原生桌面图标');
-        }
-      })
-      .catch((error: Error) => {
-        reportOperation('切换桌面接管', error);
-        showHint(error.message);
-      });
-  }, [takeover, showHint]);
-
   const addBox = useCallback((): void => {
     const count = boxesRef.current.length;
     void ipc
       .gridBoxUpsert({
         name: `新格子 ${count + 1}`,
         kind: 'folder',
-        // 不指定落点 → 由 Rust 用同一套「左起流布局」算出一块**不与任何已有格子
-        // （含便签 / 日历）重叠**的空位，且不会跑出桌面之外
+        // 不指定落点 → 由 Rust 的布局引擎落位（V66：按内容定尺寸 + 列式填满，
+        // 不与任何已有格子重叠、也不会跑出桌面外）
         width: 320,
         height: 220,
       })
@@ -1698,13 +2434,16 @@ export function GridOverlay(): React.JSX.Element {
         setBoxes((prev) => [...prev, created]);
         setItems((prev) => ({ ...prev, [created.id]: [] }));
         focusNewBox(created.id);
+        // V66：新建 = 桌面内容变了 → 立刻重算整张布局
+        //（用户：「我添加了新的格子你要重新计算每个格子的大小等」）
+        relayoutSoon();
         showHint(`已新建收纳格：${created.name} —— 已解锁，可以直接拖动 / 拉大小 / 改名`);
       })
       .catch((error: Error) => {
         reportOperation('新建收纳格', error);
         showHint(error.message);
       });
-  }, [focusNewBox, showHint]);
+  }, [focusNewBox, relayoutSoon, showHint]);
 
   /**
    * 新建挂件（便签 / 日历）—— 桌面上直接可用的轻量小组件。
@@ -1715,35 +2454,19 @@ export function GridOverlay(): React.JSX.Element {
    *     （多个便签如果长得一模一样，桌面上根本分不清）——点标题栏的调色盘可随时改；
    *   - **日历仍然只有一个**：日历背后是同一份 `todos`，多开纯粹是重复信息。
    */
-  const addWidget = useCallback(
-    (kind: 'note' | 'calendar'): void => {
-      if (kind === 'calendar') {
-        const existing = boxesRef.current.find((box) => box.kind === 'calendar');
-        if (existing) {
-          showHint('日历挂件已经有一个了，直接用它就好');
-          return;
-        }
-      }
-      const sameKind = boxesRef.current.filter((box) => box.kind === kind).length;
-      const preset =
-        kind === 'note'
-          ? {
-              // 第 1 个叫「便签」，之后顺延编号 —— 名字是给人看的，不该出现「便签 1」
-              name: sameKind === 0 ? '便签' : `便签 ${sameKind + 1}`,
-              width: 260,
-              height: 220,
-              // 轮着给配色，保证相邻两个便签颜色不同
-              accent: ACCENT_ORDER[(sameKind % (ACCENT_ORDER.length - 1)) + 1] ?? 'amber',
-            }
-          : { name: '日历 · 今日计划', width: 360, height: 430, accent: '' as GridAccent };
-      void ipc
-        .gridBoxUpsert({
-          name: preset.name,
-          kind,
-          accent: kind === 'note' ? (preset.accent as GridAccent) : null,
-          width: preset.width,
-          height: preset.height,
-        })
+  const addNote = useCallback((): void => {
+    const sameKind = boxesRef.current.filter((box) => box.kind === 'note').length;
+    // 第 1 个叫「便签」，之后顺延编号 —— 名字是给人看的，不该出现「便签 1」
+    const name = sameKind === 0 ? '便签' : `便签 ${sameKind + 1}`;
+    void ipc
+      .gridBoxUpsert({
+        name,
+        kind: 'note',
+        // 轮着给配色，保证相邻两个便签颜色不同
+        accent: ACCENT_ORDER[(sameKind % (ACCENT_ORDER.length - 1)) + 1] ?? 'amber',
+        width: 260,
+        height: 220,
+      })
         .then(async (created) => {
           setBoxes((prev) => [...prev, created]);
           setItems((prev) => ({ ...prev, [created.id]: [] }));
@@ -1760,15 +2483,15 @@ export function GridOverlay(): React.JSX.Element {
             // 重排失败不影响「便签已经建出来」这个事实：留在默认坐标也能用，
             // 用户下次点「一键整理」同样会归位。这里刻意不打扰用户。
           }
-          showHint(
-            kind === 'note'
-              ? `已新建${created.name}（支持 Markdown，边写边渲染）`
-              : '已新建日历挂件（含今日计划，与工作台共用数据）',
-          );
+          // V56：新建的挂件也要**立刻可调**（与收纳格同一口径）。
+          // 之前只有 `addBox` 走 `focusNewBox`，新便签建出来是锁着的 —— 用户 09-20
+          // 「新建格子然后手动拖动整理」这条链在第 2 步就断了。
+          focusNewBox(created.id);
+          showHint(`已新建${created.name}（支持 Markdown，边写边渲染）`);
         })
         .catch((error: Error) => showHint(error.message));
     },
-    [refresh, showHint],
+    [focusNewBox, refresh, showHint],
   );
 
   /** 改格子配色（便签尤其需要：多个便签并存时要一眼分清） */
@@ -1809,17 +2532,26 @@ export function GridOverlay(): React.JSX.Element {
       Math.max(Math.round(natural + BOX_HEADER_H + BOX_BORDER_H), MIN_BOX_H),
       maxH,
     );
-    if (Math.abs(target - box.height) < 8) {
+    // V60：日历进工作台之后盒子里只剩便签，**宽度一律不回收** —— 便签可以被用户拉宽
+    // （正文跟着换行，那是合理的手工布局）。V49 那条「把日历的宽度收回自然宽度」
+    // 随日历盒子一起退场。
+    const targetW = box.width;
+    const widthChanged = targetW !== box.width;
+    if (!widthChanged && Math.abs(target - box.height) < 8) {
       return;
     }
     autoHeightBlockedRef.current.delete(boxId);
-    setBoxes((prev) => prev.map((item) => (item.id === boxId ? { ...item, height: target } : item)));
+    setBoxes((prev) =>
+      prev.map((item) =>
+        item.id === boxId ? { ...item, height: target, width: targetW } : item,
+      ),
+    );
     if (heightSaveTimerRef.current !== undefined) {
       window.clearTimeout(heightSaveTimerRef.current);
     }
     heightSaveTimerRef.current = window.setTimeout(() => {
       heightSaveTimerRef.current = undefined;
-      void ipc.gridBoxUpsert({ boxId, height: target }).catch(() => undefined);
+      void ipc.gridBoxUpsert({ boxId, height: target, width: targetW }).catch(() => undefined);
     }, 400);
   }, []);
 
@@ -1843,10 +2575,12 @@ export function GridOverlay(): React.JSX.Element {
           });
           // 该格子的登记全没了 → 条目集体回到左侧「未归类」竖条
           refreshLoose();
+          // V66：少了一个格子 → 剩下的重新分布（用户：「添加了新的格子你要重新计算每个格子的大小」）
+          relayoutSoon();
         })
         .catch((error: Error) => showHint(error.message));
     },
-    [refreshLoose, showHint],
+    [refreshLoose, relayoutSoon, showHint],
   );
 
   /**
@@ -1868,12 +2602,106 @@ export function GridOverlay(): React.JSX.Element {
       setMenuItem(null);
       setMenuLoose(null);
       setMenuDock(null);
+      setMenuDesktop(null);
       void ipc
         .gridOverlayHide()
         .then(() => setContentHidden(true))
         .catch(() => undefined);
     }
   }, [contentHidden]);
+
+  /**
+   * 执行一条**桌面背景右键菜单**动作（V60，见 `platform/desktop_menu.rs` 的 [`SUB_ITEMS`]）。
+   *
+   * 只有三个动作需要前端做（其余四项 Rust 侧就地完成：显示 / 收起整理层、备份 / 还原布局、
+   * 打开设置中心）。这三个都复用工作台底栏那排按钮的**同一批函数** —— 菜单不是第二条实现，
+   * 只是另一只按在同一批按钮上的手。
+   */
+  const runDesktopAction = useCallback(
+    (action: string): void => {
+      // —— 桌面面板动作（V63）——
+      // 托盘「打开工具箱」/「设置」、全局快捷键、顶部贴条的工具搜索，全都派到这里，
+      // 不再去开独立主窗口（用户：「工具线弹出框就够了吧…没有必要还有一个多一个界面」）。
+      // 常量在 Rust `commands/grid.rs`：`PANEL_ACTION_*` / `PANEL_OPEN_PREFIX`。
+      if (action === 'panel:toggle-tools') {
+        setSidePanel((prev) => (prev === null ? { tab: 'tools', entry: null } : null));
+        return;
+      }
+      if (action === 'panel:tools') {
+        openPanel('tools', null);
+        return;
+      }
+      if (action === 'panel:settings') {
+        openPanel('settings', null);
+        return;
+      }
+      if (action.startsWith('panel:open:')) {
+        openTarget(action.slice('panel:open:'.length));
+        return;
+      }
+
+      switch (action) {
+        case 'new-box':
+          addBox();
+          break;
+        case 'new-note':
+          addNote();
+          break;
+        case 'arrange':
+          arrangeDesktop();
+          break;
+        default:
+          // 菜单项与这里的取值都对不上 → 一定是有一边改了没同步另一边。
+          // 不静默吞掉（静默吞掉的表现就是「点了没反应」，最难查）。
+          showHint(`未处理的桌面右键动作：${action}`);
+      }
+    },
+    [addBox, addNote, arrangeDesktop, openPanel, openTarget, showHint],
+  );
+
+  /**
+   * 取一次待办动作并执行。
+   *
+   * 「取」是 Rust 侧的 `take()` 语义（`grid_take_pending_action`），所以下面两处都调它
+   * 也不会重复执行 —— 拿到的第二个 `null` 天然什么都不做：
+   *   · **挂载时**：兜住冷启动。`handy.exe --new-box` 时 Rust 在 `setup` 里就发事件了，
+   *     那一刻 WebView 还没加载完、监听还没注册，事件**必然丢**，只能靠队列。
+   *   · **收到唤醒事件时**：热路径（Handy 已在运行）的即时响应，用户点完马上见效。
+   */
+  const takeDesktopAction = useCallback((): void => {
+    if (!isTauri()) {
+      return;
+    }
+    void ipc
+      .gridTakePendingAction()
+      .then((action) => {
+        if (action !== null) {
+          runDesktopAction(action);
+        }
+      })
+      .catch(() => undefined);
+  }, [runDesktopAction]);
+
+  // 桌面右键菜单的唤醒事件。用 `getCurrentWindow().listen`（与 `grid:visibility` 同一套），
+  // 而不是全局 `listen`：前者在「Rust 用 `emit`（无目标过滤）」和「Rust 改成
+  // `emit_to(GRID_LABEL)`」两种写法下都收得到，后者只在头一种下稳妥。
+  useEffect(() => {
+    takeDesktopAction();
+    let unlisten: (() => void) | null = null;
+    void (async () => {
+      try {
+        const { getCurrentWindow } = await import('@tauri-apps/api/window');
+        unlisten = await getCurrentWindow().listen('handy://desktop-action', () => {
+          takeDesktopAction();
+        });
+      } catch {
+        /* 监听失败不影响其余功能：挂载那次取待办仍然有效 */
+      }
+    })();
+    return () => {
+      unlisten?.();
+    };
+  }, [takeDesktopAction]);
 
   /** 手动对账一次（清掉文件已不存在的失效登记，顺带刷新未归类竖条） */
   const syncNow = useCallback((): void => {
@@ -1890,12 +2718,6 @@ export function GridOverlay(): React.JSX.Element {
   }, [refresh, refreshLoose, showHint]);
 
   // —— 渲染 ——
-
-  /**
-   * 日历挂件仍然唯一（日历背后是同一份 `todos`，多开只是重复信息）；
-   * 便签 V35 起可以多个，所以不再置灰。
-   */
-  const hasCalendar = boxes.some((box) => box.kind === 'calendar');
 
   /**
    * 密码存储器（vault）的面板入口（V45）。
@@ -1987,6 +2809,7 @@ export function GridOverlay(): React.JSX.Element {
       setMenuItem(null);
       setMenuLoose(null);
       setMenuDock(null);
+      setMenuDesktop(null);
     };
     const onDown = (event: MouseEvent): void => {
       const target = event.target as Node;
@@ -2015,58 +2838,143 @@ export function GridOverlay(): React.JSX.Element {
 
   return (
     <div
+      /* ⚠️ 这里**必须**是 `overflow-hidden`，永远不要改成 `overflow-y-auto`（V59 踩过）。
+       *
+       * 用户 09-21：「桌面可以滚轮上下移动了……只有鼠标移动到图标或者格子上才可以移动，
+       * 在桌面空白的地方不能移动」。
+       *
+       * 根画布是 `fixed inset-0`（高度 = 窗口高度），格子 / 竖条都是它的**绝对定位子元素**
+       * —— 绝对定位元素会把自己的溢出算进包含块的**可滚动溢出区**。于是只要有任何一处
+       * 子元素比视口高出哪怕十几像素，这一层就变成了**可滚动容器**：
+       *   · 空白处 `pointerEvents: 'none'` → 事件穿透到桌面，滚不动（所以那一块正常）；
+       *   · 图标 / 格子上恢复了指针事件 → 滚轮冒泡到根画布 → **整个桌面跟着滚**。
+       * 这正是用户看到的「只有光标在图标或格子上时整层会动一点」。
+       *
+       * 盒内滚动是**内容区**的事（`flex-1 min-h-0 overflow-y-auto`），竖条过满是竖条自己的事
+       * （见下方竖条的 `overflow-y-auto`）。桌面层本身只负责「把东西画在屏幕上」，
+       * 它一旦能滚，用户就永远对不齐自己的桌面。 */
       className="fixed inset-0 select-none overflow-hidden"
       style={{ pointerEvents: itemDragging ? 'auto' : 'none' }}
-      onDragOver={(event) => {
-        // V47：两种拖拽源都要接住 —— 格子里的条目（itemDragRef）与左侧竖条的条目
-        // （looseDragRef）。此前只认前者，从竖条起拖时这里直接 return，
-        // 根画布不 preventDefault ⇒ 浏览器判定「此处不可放置」，光标画成禁止符号。
-        if (itemDragRef.current === null && looseDragRef.current === null) {
-          return;
-        }
-        // 拖出所有格子 = 移出（V41）：根画布必须能接住 dragover/drop，否则浏览器
-        // 会取消这次拖拽，用户「拖出去扔了」的意图就落空
-        event.preventDefault();
-        event.dataTransfer.dropEffect = 'move';
-      }}
-      onDrop={(event) => {
-        const loose = looseDragRef.current;
-        if (loose !== null) {
-          // 竖条条目拖到空白处松手 = 本来就在竖条里，什么都不用做（只是结束这次拖拽）。
-          // 必须 preventDefault，否则浏览器按「取消」处理，会连带触发一次幽灵 dragend。
+      onContextMenu={async (event) => {
+        // V53：桌面空白处右键 → 弹原生 Windows 右键菜单（不覆盖）。
+        // 用户 09-19：「桌面把原生桌面右键菜单都搞没有了」。
+        // 复用已有的 `ipc.shellContextMenu(path)` —— 传桌面文件夹路径，Shell 会弹出
+        // 原生桌面右键菜单（刷新/粘贴/新建/排序/个性化等）。
+        // V58：Shift 照样透传（在 Explorer 里 Shift + 空白处右键 = 扩展菜单），
+        // 与文件/文件夹那两处保持同一套语义 —— 不一致本身就是「改行为」。
+        if (contentHidden) {
           event.preventDefault();
-          endItemDrag();
-          return;
+          setMenuDesktop({ x: event.clientX, y: event.clientY });
+        } else {
+          event.preventDefault();
+          try {
+            await ipc.shellContextMenu('::{00021400-0000-0000-C000-000000000046}\\Desktop', event.shiftKey);
+          } catch {
+            setMenuDesktop({ x: event.clientX, y: event.clientY });
+          }
         }
-        const drag = itemDragRef.current;
-        if (drag === null) {
-          // 落在格子里的事件已由格子自己处理（处理完 endItemDrag 会清掉 ref）
-          return;
-        }
-        event.preventDefault();
-        // 落点不在任何格子上 = 移出格子 → 自动回到左侧「未归类」竖条
-        // （用户 V41 原话：「用户直接从格子里面移除自动规划到不整理的部分即可」）
-        removeItem(drag.item);
-        endItemDrag();
       }}
     >
-      {/* 盒子画布：每个盒子自身恢复指针事件（外层穿透不继承） */}
-      {!contentHidden && visibleBoxes.map((box) => {
+      {/* 拖拽预览（V59）：整个内部拖拽已改成指针拖拽，系统的拖拽预览（那个跟着光标跑的
+          半透明图标）在挂件窗里根本不会出现 —— 没有它，拖动全程没有任何反馈。
+          位置由主循环直接改 `style.transform`（每帧 setState 会把整层重渲染一遍）。 */}
+      {dragGhost !== null && (
+        <div
+          ref={(node) => {
+            dragGhostRef.current = node;
+            if (node !== null) {
+              const session = dragSessionRef.current;
+              if (session !== null) {
+                node.style.transform = `translate3d(${session.x + 14}px, ${session.y + 14}px, 0)`;
+              }
+            }
+          }}
+          className="pointer-events-none fixed left-0 top-0 z-[95] flex max-w-[220px] items-center gap-2 rounded-lg border border-white/15 bg-neutral-900/90 px-2 py-1.5 shadow-[0_12px_30px_rgba(0,0,0,0.55)] backdrop-blur-md"
+        >
+          <FileIcon path={dragGhost.path} size={18} />
+          <span className="truncate text-[11px] font-medium text-neutral-100">
+            {dragGhost.label.replace(/\.lnk$/i, '')}
+          </span>
+        </div>
+      )}
+      {/* V55：拖动格子时的对齐参考线 */}
+      {!contentHidden && (snapGuides.vertical.length > 0 || snapGuides.horizontal.length > 0) && (
+        <svg className="pointer-events-none absolute inset-0 z-[35]" width="100%" height="100%">
+          {snapGuides.vertical.map((x, i) => (
+            <line key={`v-${i}`} x1={x} y1={0} x2={x} y2={window.innerHeight}
+              stroke="rgba(91,140,255,0.5)" strokeWidth="1" strokeDasharray="4 4" />
+          ))}
+          {snapGuides.horizontal.map((y, i) => (
+            <line key={`h-${i}`} x1={0} y1={y} x2={window.innerWidth} y2={y}
+              stroke="rgba(91,140,255,0.5)" strokeWidth="1" strokeDasharray="4 4" />
+          ))}
+        </svg>
+      )}
+      {/* 盒子画布：每个盒子自身恢复指针事件（外层穿透不继承）。
+          V63：收纳格住在一层**可滚动**容器里，挂件（便签）用 `fixed` 挂在容器之外 ——
+          于是「格子放不下」时只有收纳区滚动，便签列与左侧竖条纹丝不动。
+          容器宽度 = 收纳区右沿（`contentZoneRight`），滚动条正好落在收纳区与便签列之间
+          那道缝里，不会压住便签。
+          ⚠️ 容器**不带** `pointer-events`（继承根画布的 `none`）：滚轮事件靠盒子的冒泡
+          到达它，而空白处照旧穿透到桌面。没有溢出时 `scrollTop` 恒为 0 —— 一切与以前一致。 */}
+      {!contentHidden && (
+        <div
+          ref={contentScrollRef}
+          className="absolute left-0 top-0 bottom-0 overflow-y-auto overflow-x-hidden"
+          style={{ width: contentZoneRight }}
+        >
+          {visibleBoxes.map((box) => {
         const boxItems = items[box.id] ?? [];
         const isDropTarget = dropTargetId === box.id;
-        const isWidget = box.kind === 'note' || box.kind === 'calendar';
+        const isWidget = box.kind === 'note';
+        // V52：每格子独立锁定——shadow 外层 editMode 为本格子是否解锁
+        const editMode = unlockedBoxes.has(box.id);
         return (
           <section
             key={box.id}
             style={{
               left: box.posX,
               top: box.posY,
+              // V63：**便签（挂件）用 `fixed` 挂出滚动层外**。
+              //
+              // 盒子整体住在一层 `overflow-y-auto` 容器里（收纳区放不下时滚它）；而便签是
+              // 「常驻的一列」，绝不能跟着收纳区一起滚走 —— 所以它在视口上定位（`fixed`
+              // 相对视口，而那一层正好铺在视口里，`left/top` 一个像素都不用改）。
+              //
+              // 固定的不只是视觉效果：`fixed` 元素不参与容器的可滚动溢出区计算，
+              // 所以「便签比屏幕高」也不会让收纳区平白多出一截可滚高度。
+              position: isWidget ? 'fixed' : undefined,
+              // ★ **一律用后端布局引擎算出的高度，任何格子都不例外**（V59 修）。
+              //
+              // 这里原本是 `height: isWidget ? box.height : undefined` —— 于是**收纳格**
+              // 的高度是 auto（由内容决定），而引擎是按「条目数 ÷ 每行列数」估算的。
+              // 两者只要不一致就出事，而且是最难看的那种事：
+              //   · 前端渲染得比引擎高 → 盒子长出去，**压住下面那个格子**（用户 09-21：
+              //     「你看图片中红圈的位置高度方向还是有点重叠」）；
+              //   · 同时因为盒子自己长高了，内容区的 `overflow-y-auto` 永远不触发 ——
+              //     它跟内容一样高，没有可滚的余量（用户：「我列表展开格子装不下了
+              //     应该自动出滚动条哇」）。
+              // 切成列表视图时最容易撞上：引擎按图标网格估高（8 个条目 = 2 行），
+              // 列表视图是一行一个（8 行），差出一倍还多。
+              //
+              // 绑定之后：**渲染几何 == 引擎几何**，盒子之间不可能重叠；内容超出时
+              // 由内容区滚（见下面的 `flex-1 min-h-0 overflow-y-auto`）。
               width: box.width,
               height: box.height,
+              // ⚠️ 这里**不再加 `max-height`**。曾经给挂件加过 `80vh` 的上限，那是在
+              // 高度还没绑死、允许 auto 的时候防「一个便签顶穿整个桌面」的。
+              // 现在高度就是引擎给的值，而引擎本来就会把格子夹进工作区
+              // （`box_height_at` 的 `max_h` + `fit_column_heights` 的列内压缩）——
+              // 再压一层上限只会让渲染高度小于引擎高度，又变回「盒子压住下面那个格子」。
               pointerEvents: 'auto',
               // 非编辑态：给卡片铺一层**深色磨砂底**。为什么用内联 style 而不是
               // Tailwind 类：底色要跟着 `accent` 走（7 种组合），内联渐变最直白，
               // 也不必担心 JIT 扫不到动态拼出来的类名。
+              //
+              // V48：日历格**保留**这层底。日历自己那套主题只画在挂件画布上
+              // （见 `CALENDAR_THEMES`），而卡片顶部还有一条标题栏（格子名 / 调色盘 /
+              // 删除）—— 浅色主题下标题栏若也变成浅色，白字就看不见了。
+              // 深色卡片底 + 浅色日历画布 = 标题栏永远可读，视觉上也是「带标题的卡片」。
               background: editMode ? undefined : cardBackground(box.accent),
             }}
             /* 观感目标（用户原话）：「桌面就是一个大容器，格子就是大容器里面的小容器，
@@ -2078,7 +2986,7 @@ export function GridOverlay(): React.JSX.Element {
             className={`absolute flex flex-col overflow-hidden rounded-2xl text-neutral-100 ${
               editMode
                 ? 'border border-dashed bg-neutral-900/55 backdrop-blur-md'
-                : 'shadow-[0_10px_30px_rgba(0,0,0,0.34),inset_0_1px_0_rgba(255,255,255,0.09)] backdrop-blur-lg backdrop-saturate-150'
+                : BOX_SHELL_CLASS
             } ${
               // V38：新建的格子先给一圈高亮（新的不一定在视线的位置上），胜过暗示用户去找
               focusBoxId === box.id
@@ -2089,32 +2997,22 @@ export function GridOverlay(): React.JSX.Element {
                     ? accentRing(box.accent)
                     : ''
             }`}
-            onDragOver={(event) => {
-              // 内部条目拖拽（含未归类竖条拖回来）：允许作为放点（系统文件拖放走
-              // webview 级事件，不经过这里）
-              if (itemDragRef.current !== null || looseDragRef.current !== null) {
-                event.preventDefault();
-                event.dataTransfer.dropEffect = 'move';
-                setDropTargetId(box.id);
-              }
-            }}
-            onDrop={(event) => {
-              event.preventDefault();
-              if (itemDragRef.current !== null) {
-                moveItem(itemDragRef.current, box.id);
-              } else if (looseDragRef.current !== null) {
-                addItem(box.id, looseDragRef.current.path);
-              } else {
-                return;
-              }
-              endItemDrag();
-            }}
+            /* V59：这里原本挂着 onDragOver / onDragLeave / onDrop 三个 HTML5 拖放处理器，
+               全部删掉 —— 内部拖拽已改成指针拖拽（落点由主循环的 mouseup 算），
+               留着它们只会：① 永远不触发（见 `DRAG_THRESHOLD` 上方的根因）；② 让下一个
+               读代码的人以为「拖放是 HTML5 在管」。落点高亮仍然靠 `dropTargetId`。 */
             onMouseDown={(event) => {
-              // 编辑态：**从格子任意空白处都能拖动**（不只是 32px 高的标题栏）。
-              // 条目元素带 data-grid-item，交给它们自己的拖拽/双击逻辑。
-              if (!editMode) {
-                return;
-              }
+              // **从格子任意空白处都能拖动**（不只是 36px 高的标题栏）。
+              //
+              // ⚠️ V56：这里原本有一道 `if (!editMode) return;` —— 于是「锁着的格子只能拖标题栏」，
+              // 而用户的本能动作是抓格子空白处 / 卡片边缘。配合上一处「新建格子其实没解锁」的
+              // bug，结果就是「格子完全拖不动，只能点整理」。用户 09-20 原话：
+              // 「现在桌面上的是不能自己拖动调整的，只能通过整理自动整理」。
+              //
+              // 现在的口径：**移动是桌面上的第一等交互，任何时候都可用**；
+              // 锁只用来收/放「编辑类」能力（改名 / 配色 / 删除 / 拉大小），不再拦移动。
+              // 条目元素带 data-grid-item，交给它们自己的拖拽 / 双击逻辑；
+              // 按钮与输入框各自 stopPropagation。
               const target = event.target as HTMLElement | null;
               if (target?.closest('[data-grid-item="1"]')) {
                 return;
@@ -2142,7 +3040,7 @@ export function GridOverlay(): React.JSX.Element {
                 setAccentBoxId(null);
                 setMenuBox({ id: box.id, x: event.clientX, y: event.clientY });
               }}
-              className="flex h-8 shrink-0 cursor-move items-center gap-1 px-2 active:cursor-grabbing"
+              className="flex h-9 shrink-0 cursor-move items-center gap-1.5 px-3 active:cursor-grabbing bg-gradient-to-b from-white/[0.04] to-transparent border-b border-white/[0.06]"
               title="拖拽移动 · 双击重命名标题"
             >
               {renamingId === box.id ? (
@@ -2158,17 +3056,29 @@ export function GridOverlay(): React.JSX.Element {
                       setRenamingId(null);
                     }
                   }}
-                  className="w-full rounded bg-neutral-800 px-1 text-xs text-neutral-100 outline-none ring-1 ring-sky-400"
+                  className="w-full rounded-lg bg-neutral-800/90 px-2 py-1 text-xs text-white outline-none ring-1 ring-sky-400/60 shadow-inner"
                 />
               ) : (
                 <span
-                  className={`min-w-0 flex-1 truncate text-xs font-semibold [text-shadow:0_1px_2px_rgba(0,0,0,0.75)] ${
-                    editMode ? 'opacity-95' : 'opacity-85'
+                  className={`min-w-0 flex-1 truncate text-[11px] font-semibold uppercase tracking-wider [text-shadow:0_1px_2px_rgba(0,0,0,0.8)] ${
+                    editMode ? 'opacity-95 text-white' : 'opacity-80 text-neutral-200'
                   }`}
                 >
                   {box.name}
                 </span>
               )}
+              {/* V52：每格子独立锁定/解锁按钮 */}
+              <button
+                type="button"
+                title={editMode ? '锁定此格子' : '解锁此格子（可编辑）'}
+                onMouseDown={(event) => event.stopPropagation()}
+                onClick={() => toggleBoxLock(box.id)}
+                className={`shrink-0 rounded p-0.5 transition hover:bg-white/20 ${
+                  editMode ? 'text-sky-300 opacity-100' : 'opacity-50 hover:opacity-100'
+                }`}
+              >
+                {editMode ? <LockOpen className="h-3.5 w-3.5" /> : <Lock className="h-3.5 w-3.5" />}
+              </button>
               {/* 配色（便签最爱用：多个便签靠颜色区分） */}
               {editMode ? (
                 <button
@@ -2204,20 +3114,34 @@ export function GridOverlay(): React.JSX.Element {
                 </button>
               ) : null}
               {isWidget ? (
-                box.kind === 'note' ? (
-                  <StickyNote
-                    className="h-3.5 w-3.5 shrink-0"
-                    style={{ color: NOTE_ACCENTS[box.accent]?.hex ?? NOTE_ACCENTS[''].hex }}
-                  />
-                ) : (
-                  <CalendarDays className="h-3.5 w-3.5 shrink-0 opacity-60" />
-                )
-              ) : (
-                <span className="shrink-0 text-[10px] opacity-55">{boxItems.length}</span>
-              )}
+                <StickyNote
+                  className="h-3.5 w-3.5 shrink-0"
+                  style={{ color: NOTE_ACCENTS[box.accent]?.hex ?? NOTE_ACCENTS[''].hex }}
+                />
+              ) : null}
+              {/* V51：格子视图切换——图标网格 ⇄ 列表。只在普通收纳格显示（便签不切换）。
+                  参考 Windows 右键菜单「查看 → 大图标/列表」。 */}
+              {box.kind !== 'note' ? (
+                <button
+                  type="button"
+                  title={getBoxViewMode(box.id) === 'grid' ? '切换为列表视图' : '切换为图标视图'}
+                  onMouseDown={(event) => event.stopPropagation()}
+                  onClick={() => toggleBoxViewMode(box.id)}
+                  className="shrink-0 rounded p-0.5 opacity-60 transition hover:bg-white/15 hover:opacity-100"
+                >
+                  {getBoxViewMode(box.id) === 'grid' ? (
+                    <List className="h-3.5 w-3.5" />
+                  ) : (
+                    <LayoutGrid className="h-3.5 w-3.5" />
+                  )}
+                </button>
+              ) : null}
             </header>
 
-            {/* 配色选择器（编辑态点调色盘展开） */}
+            {/* 配色选择器（编辑态点调色盘展开）。
+                V60：日历并进工作台后，盒子里只剩便签，这里**只给便签配色**了 ——
+                原来那套「日历换整套主题」的图例跟着 `CalendarWidget` 搬进了工作台
+                （主题状态仍在 `GridOverlay`，见 `calendarTheme`）。 */}
             {editMode && accentBoxId === box.id ? (
               <div
                 className="flex shrink-0 items-center gap-1 border-b border-white/15 px-2 py-1"
@@ -2230,20 +3154,21 @@ export function GridOverlay(): React.JSX.Element {
                     title={NOTE_ACCENTS[key].label}
                     onClick={() => setAccent(box.id, key)}
                     style={{ background: NOTE_ACCENTS[key].hex }}
-                    className={`h-4 w-4 rounded-full transition hover:scale-110 ${
-                      box.accent === key
-                        ? 'ring-2 ring-sky-300'
-                        : 'ring-1 ring-white/30'
-                    }`}
+                    className={cn(
+                      'h-4 w-4 rounded-full transition hover:scale-110',
+                      box.accent === key ? 'ring-2 ring-sky-300' : 'ring-1 ring-white/30',
+                    )}
                   />
                 ))}
-                <span className="ml-1 text-[10px] opacity-75">{NOTE_ACCENTS[box.accent].label}</span>
+                <span className="ml-1 text-[10px] opacity-75">
+                  {NOTE_ACCENTS[box.accent].label}
+                </span>
               </div>
             ) : null}
 
-            {/* 挂件（便签 / 日历）：内容自管，不参与收纳对账 */}
+            {/* V55：便签内容区可滚动，超出格子高度时内部滚动，不覆盖下一个格子 */}
             {box.kind === 'note' ? (
-              <div className="min-h-0 flex-1" data-grid-item="1">
+              <div className="min-h-0 flex-1 overflow-y-auto grid-scroll" data-grid-item="1">
                 <NoteWidget
                   boxId={box.id}
                   content={box.content}
@@ -2251,23 +3176,27 @@ export function GridOverlay(): React.JSX.Element {
                   onSave={saveBoxContent}
                 />
               </div>
-            ) : box.kind === 'calendar' ? (
-              <div className="min-h-0 flex-1" data-grid-item="1">
-                {/* 日历上报内容自然高度 → 盒子跟着撑开/收拢（用户要求：计划条数多少
-                    动态扩展高度，不再把计划压成一个要滚的小窗口）。 */}
-                <CalendarWidget
-                  onContentHeight={(natural) => applyWidgetHeight(box.id, natural)}
-                />
-              </div>
             ) : (
               /* 收纳格条目网格：双击打开原文件；悬停把文件从格子移出（文件不动）。
                  列宽跟着**系统桌面图标尺寸**走（V37）：图标多大，格子就留多宽 ——
-                 这样格子里和桌面上看起来才是同一套图标。 */
+                 这样格子里和桌面上看起来才是同一套图标。
+
+                 V59：必须是 `flex-1 min-h-0`。盒子高度现在**严格等于引擎给的 `box.height`**
+                 （见上面 section 的 height），内容装不下时靠这里滚。少了 `min-h-0`，
+                 flex 子项默认 `min-height: auto`（不小于内容高），它就会顶着父容器长出去，
+                 `overflow-y-auto` 形同虚设 —— 用户看到的「装不下了却没有滚动条」就是它。
+                 同时去掉了原来的 `max-h-[60vh]`：高度上限已由盒子本身决定，再压一层
+                 只会在高盒子里留出一截空白。 */
               <div
-                className="grid min-h-0 flex-1 content-start gap-1 overflow-y-auto p-2"
-                style={{
-                  gridTemplateColumns: `repeat(auto-fill, minmax(${iconSize + 36}px, 1fr))`,
-                }}
+                className={getBoxViewMode(box.id) === 'list'
+                  ? "flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto px-2 py-1.5 grid-scroll"
+                  : "grid min-h-0 flex-1 content-start gap-1.5 overflow-y-auto px-2.5 py-2 grid-scroll"}
+                style={getBoxViewMode(box.id) === 'grid'
+                  ? {
+                      gridTemplateColumns: `repeat(auto-fill, minmax(${iconSize + 32}px, 1fr))`,
+                      gridAutoRows: `${iconSize + 36}px`,
+                    }
+                  : undefined}
               >
               {addingBoxId === box.id ? (
                 <div className="col-span-full flex items-center gap-1">
@@ -2289,51 +3218,59 @@ export function GridOverlay(): React.JSX.Element {
                   />
                 </div>
               ) : null}
-              {boxItems.map((item) => (
+              {boxItems.map((item) => {
+                const isListView = getBoxViewMode(box.id) === 'list';
+                return (
                 <div
                   key={item.id}
                   data-grid-item="1"
-                  title={`${item.displayName}\n${item.filePath}\n双击打开 · 拖到其他格子 · 拖出格子移入左侧「未归类」竖条 · 右键更多操作`}
-                  draggable
-                  onDragStart={(event) => startItemDrag(item, event)}
-                  onDragEnd={endItemDrag}
+                  title={`${item.displayName}\n${item.filePath}\n双击打开 · 拖到其他格子 · 拖出格子移入左侧「未归类」竖条 · Ctrl+右键更多操作`}
+                  onMouseDown={(event) => {
+                    // 不许冒泡：否则会同时触发「拖动整个格子」（V56 起格子任意空白处可拖）
+                    event.stopPropagation();
+                    // V59：改成指针拖拽 —— 这里只记起点，越过阈值才算拖拽，
+                    // 单击 / 双击照旧。见 `DRAG_THRESHOLD` 上方的根因说明。
+                    beginItemDrag(item, event);
+                  }}
                   onDoubleClick={() => openItem(item)}
                   onContextMenu={(event) => {
-                    // V43：**普通右键 = 系统原生菜单**。
-                    //
-                    // 用户原话：「你的格子把我图标原始的右键功能全部覆盖了，这个科学吗」——
-                    // 接管桌面后原生图标被隐藏，右键落到了挂件窗上，所以我们必须替 Shell
-                    // 把它的菜单原样弹出来（打开 / 打开方式 / 发送到 / 复制 / 删除 /
-                    // 重命名 / 属性 + 第三方扩展项），对标腾讯桌面整理。
-                    //
-                    // 按住 **Shift** 才弹我们自己的精简菜单：那是 Shell 给不了的操作
-                    // （「移出格子」—— 纯粹是我们呈现层的概念）。拖出格子同样能移出。
                     event.preventDefault();
                     event.stopPropagation();
                     setMenuBox(null);
                     setMenuLoose(null);
-                    if (!event.shiftKey) {
+                    // V58：**Shift 是系统的语义**（Explorer 的扩展菜单），我们不抢 ——
+                    // 按了 Shift 就把 CMF_EXTENDEDVERBS 传给 Shell，让它多出
+                    // 「在此处打开 PowerShell 窗口」那几项。Handy 自己的条目菜单
+                    // （打开文件位置 / 移出格子）**改用 Ctrl + 右键**：Ctrl + 右键
+                    // 在 Explorer 里没有任何含义，抢它不改变任何原生行为。
+                    if (!event.ctrlKey) {
                       setMenuItem(null);
                       void ipc
-                        .shellContextMenu(item.filePath)
+                        .shellContextMenu(item.filePath, event.shiftKey)
                         .catch((error: Error) => showHint(error.message));
                       return;
                     }
                     setMenuItem({ item, x: event.clientX, y: event.clientY });
                   }}
-                  className="group relative flex cursor-pointer flex-col items-center gap-1 rounded-lg p-1.5 transition hover:bg-white/15"
+                  className={isListView
+                    ? "group relative flex cursor-pointer items-center gap-2.5 rounded-xl px-2 py-1.5 transition-all duration-200 hover:bg-white/10 hover:shadow-[0_0_0_1px_rgba(255,255,255,0.08)]"
+                    : "group relative flex cursor-pointer flex-col items-center justify-center gap-1 overflow-hidden rounded-xl p-1.5 transition-all duration-300 hover:bg-white/10 hover:shadow-[0_6px_18px_rgba(91,140,255,0.2),0_0_0_1px_rgba(255,255,255,0.1),inset_0_1px_0_rgba(255,255,255,0.08)] hover:scale-[1.02]"
+                  }
+                  style={isListView ? undefined : { aspectRatio: '1 / 1', minHeight: iconSize + 32 }}
                 >
-                  <FileIcon path={item.filePath} size={iconSize} />
-                  <span className="w-full truncate text-center text-[11px] font-medium leading-tight text-white [text-shadow:0_1px_3px_rgba(0,0,0,0.95)]">
-                    {item.displayName}
+                  <FileIcon path={item.filePath} size={isListView ? Math.round(iconSize * 0.5) : iconSize} />
+                  <span className={isListView
+                    ? "min-w-0 flex-1 truncate text-left text-[12px] font-medium text-white [text-shadow:0_1px_3px_rgba(0,0,0,0.95)]"
+                    : "w-full truncate text-center text-[10px] font-medium leading-tight text-neutral-200 [text-shadow:0_1px_2px_rgba(0,0,0,0.9)]"
+                  }>
+                    {item.displayName.replace(/\.lnk$/i, '')}
                   </span>
                 </div>
-              ))}
+                );
+              })}
               {boxItems.length === 0 && (
-                <p className="col-span-full py-3 text-center text-[11px] leading-relaxed opacity-55">
-                  把桌面上的文件拖到这里
-                  <br />
-                  只是归拢显示，文件不会移动
+                <p className="col-span-full py-4 text-center text-[11px] leading-relaxed text-neutral-400/60">
+                  拖文件到这里
                 </p>
               )}
               </div>
@@ -2365,6 +3302,8 @@ export function GridOverlay(): React.JSX.Element {
           </section>
         );
       })}
+        </div>
+      )}
 
       {/* 左侧「未归类」竖条（V42）：系统入口 + 快捷方式 + 落单条目都排在这里。
           用户原话「不整理的和快捷方式别整理到格子了，他们就是自动在桌面左上角从上往下
@@ -2392,31 +3331,35 @@ export function GridOverlay(): React.JSX.Element {
             )}, ${loose.iconSize + STRIP_CELL_EXTRA_H}px)`,
           }}
           title="未归类：系统入口 · 快捷方式 · 没进格子的文件；拖进任意格子即可收纳"
-          onDragOver={(event) => {
-            // 条目拖到竖条上 = 移出格子（与拖到空白处同义）
-            if (itemDragRef.current !== null) {
-              event.preventDefault();
-              event.dataTransfer.dropEffect = 'move';
-            }
-          }}
-          onDrop={(event) => {
-            const drag = itemDragRef.current;
-            if (drag !== null) {
-              event.preventDefault();
-              removeItem(drag.item);
-              endItemDrag();
-            }
-          }}
-          className="absolute grid content-start gap-1"
+          /* V59：竖条的 onDragOver / onDrop 也一并删掉 —— 拖到竖条 = 移出格子，
+             这条现在由指针拖拽主循环在 mouseup 里处理（落点在所有格子之外即移出），
+             不需要竖条自己再接一层。落点高亮仍然靠 `dropTargetId`。 */
+
+          /* ⚠️ `overflow-y-auto` 不是装饰，是**必须**的（V59 追加）。
+           *
+           * Rust `loose_strip_rect` 的行数是这么定的：先按「一列放得下几行」(`rows_per_col`)
+           * 反推需要几列，再把列数**夹在 `LOOSE_MAX_COLUMNS = 4`**（再多就把桌面左半边吃掉了，
+           * 分类格会没地方站）。列数一旦被夹住，`rows = ceil(n / 4)` 就会大于 `rows_per_col`
+           * —— 此时 Rust 把高度 `h` 夹到 `avail_h` 封顶（不允许越出工作区下边界），
+           * 而**前端渲染的行数仍然是 `ceil(n / columns)`**，于是内容天然比区域高。
+           *
+           * 没有这个 `overflow-y-auto`，多出来的那几行就会**从竖条里溢出去**，被上面根画布的
+           * 可滚动溢出区收走 —— 又会把整个桌面变成可滚的。小屏上 `avail_h` 更小、
+           * `rows_per_col` 更少，更容易撞到这条，这就是用户说的「另一个电脑有问题」。
+           *
+           * 口径与收纳格一致：**装不下就在容器内部滚**（用户 09-21 第 ③ 条要的就是这个行为），
+           * 而不是把抽屉撑破。 */
+          className="absolute grid content-start gap-1.5 overflow-y-auto grid-scroll"
         >
           {loose.items.map((entry) => (
             <div
               key={entry.path}
               data-grid-item="1"
-              title={`${entry.name}\n${entry.path}\n双击打开 · 拖进格子收纳 · 右键更多操作`}
-              draggable
-              onDragStart={(event) => startLooseDrag(entry, event)}
-              onDragEnd={endItemDrag}
+              title={`${entry.name}\n${entry.path}\n双击打开 · 拖进格子收纳 · Ctrl+右键更多操作`}
+              onMouseDown={(event) => {
+                event.stopPropagation();
+                beginLooseDrag(entry, event);
+              }}
               onDoubleClick={() =>
                 void ipc.gridOpenPath(entry.path).catch((error: Error) => showHint(error.message))
               }
@@ -2426,20 +3369,23 @@ export function GridOverlay(): React.JSX.Element {
                 event.stopPropagation();
                 setMenuBox(null);
                 setMenuItem(null);
-                if (!event.shiftKey && !entry.isSystem) {
+                // V58：Shift 让回系统的扩展菜单（CMF_EXTENDEDVERBS），Handy 自己的
+                // 菜单改用 Ctrl + 右键。系统图标（此电脑 / 回收站）没有文件路径，
+                // Shell 给不了菜单，只能走我们自己的。
+                if (!event.ctrlKey && !entry.isSystem) {
                   setMenuLoose(null);
                   void ipc
-                    .shellContextMenu(entry.path)
+                    .shellContextMenu(entry.path, event.shiftKey)
                     .catch((error: Error) => showHint(error.message));
                   return;
                 }
                 setMenuLoose({ entry, x: event.clientX, y: event.clientY });
               }}
-              className="flex cursor-pointer flex-col items-center gap-1 rounded-lg p-1.5 transition hover:bg-white/15"
+              className="group flex cursor-pointer flex-col items-center gap-1 rounded-xl p-1.5 transition-all duration-200 hover:bg-white/10 hover:shadow-[0_4px_16px_rgba(0,0,0,0.3),0_0_0_1px_rgba(255,255,255,0.08)]"
             >
               <LooseIcon entry={entry} size={loose.iconSize} />
               <span className="w-full truncate text-center text-[11px] font-medium leading-tight text-white [text-shadow:0_1px_3px_rgba(0,0,0,0.95)]">
-                {entry.name}
+                {entry.name.replace(/\.lnk$/i, '')}
               </span>
             </div>
           ))}
@@ -2451,7 +3397,7 @@ export function GridOverlay(): React.JSX.Element {
         <div
           ref={emptyRef}
           style={{ pointerEvents: 'auto' }}
-          className="absolute left-1/2 top-1/2 flex -translate-x-1/2 -translate-y-1/2 flex-col items-center gap-3 rounded-xl bg-neutral-900/75 px-6 py-5 text-center shadow-2xl backdrop-blur"
+          className="absolute left-1/2 top-1/2 flex -translate-x-1/2 -translate-y-1/2 flex-col items-center gap-4 rounded-2xl border border-white/15 bg-gradient-to-b from-neutral-900/85 to-neutral-950/90 px-8 py-7 text-center shadow-[0_30px_80px_rgba(0,0,0,0.6),0_0_0_1px_rgba(255,255,255,0.05),inset_0_1px_0_rgba(255,255,255,0.12)] backdrop-blur-2xl"
         >
           <p className="text-sm font-medium text-neutral-100">桌面上还没有格子</p>
           <p className="max-w-sm text-xs leading-relaxed text-neutral-300">
@@ -2460,7 +3406,7 @@ export function GridOverlay(): React.JSX.Element {
             双击图标用默认程序打开；把图标拖出格子（或右键选「移出格子」）它就回到左侧
             「未归类」竖条——不是删除文件。
             <br />
-            也可以直接加一个便签或日历挂件，桌面随手记、随手看计划。
+            也可以直接加一个便签，桌面随手记；日历在右侧常驻的「工作台」里。
           </p>
           <div className="flex items-center gap-2">
             <button
@@ -2472,17 +3418,10 @@ export function GridOverlay(): React.JSX.Element {
             </button>
             <button
               type="button"
-              onClick={() => addWidget('note')}
+              onClick={addNote}
               className="rounded-lg bg-white/15 px-3 py-1.5 text-xs font-medium text-neutral-100 transition hover:bg-white/25"
             >
               便签
-            </button>
-            <button
-              type="button"
-              onClick={() => addWidget('calendar')}
-              className="rounded-lg bg-white/15 px-3 py-1.5 text-xs font-medium text-neutral-100 transition hover:bg-white/25"
-            >
-              日历 + 计划
             </button>
           </div>
         </div>
@@ -2496,8 +3435,7 @@ export function GridOverlay(): React.JSX.Element {
             return null;
           }
           const isFolder = box.kind === 'folder';
-          const rowClass =
-            'flex w-full items-center gap-2 px-2.5 py-1.5 text-left transition hover:bg-white/10';
+          const rowClass = menuItemRowClass;
           return (
             <div
               key="grid-box-menu"
@@ -2505,7 +3443,9 @@ export function GridOverlay(): React.JSX.Element {
               style={{ left: menuBox.x, top: menuBox.y, pointerEvents: 'auto' }}
               onMouseEnter={cancelMenuLeave}
               onMouseLeave={() => scheduleMenuLeave(() => setMenuBox(null))}
-              className="absolute z-50 w-48 overflow-hidden rounded-lg bg-neutral-900 py-1 text-xs text-neutral-100 shadow-2xl ring-1 ring-white/15"
+              /* V59：`fixed` 而不是 `absolute` —— 坐标是 `clientX/clientY`（视口坐标），
+                 而且根画布带 `overflow-hidden`，`absolute` 会被它裁掉半截。 */
+              className="fixed z-50 w-48 overflow-hidden rounded-xl bg-neutral-900/95 py-1 text-[13px] text-neutral-100 shadow-2xl ring-1 ring-white/15 backdrop-blur-xl"
             >
               <div className="truncate px-2.5 pb-1 pt-0.5 text-[10px] text-neutral-400">
                 {box.name}
@@ -2539,12 +3479,28 @@ export function GridOverlay(): React.JSX.Element {
                   className={rowClass}
                   onClick={() => {
                     setMenuBox(null);
-                    addWidget(box.kind === 'note' ? 'note' : 'calendar');
+                    addNote();
                   }}
                 >
-                  {box.kind === 'note' ? '再加一个便签' : '日历只有一个'}
+                  再加一个便签
                 </button>
               )}
+              {/* V56：**全局解锁入口** —— `toggleEditMode` 从 V52 起就定义了却**从未接到任何
+                  UI 上**（grep 全仓只有定义处），于是「解锁」只剩标题栏那个 50% 透明度的小锁，
+                  用户根本发现不了。09-20 反馈「桌面上的是不能自己拖动调整的」正是这条链路的终点。
+                  格子右键菜单是用户 V41 指定的「格子操作面板唯一入口」，开关放这里最顺手。 */}
+              <button
+                type="button"
+                className={rowClass}
+                onClick={() => {
+                  setMenuBox(null);
+                  toggleEditMode();
+                }}
+              >
+                {unlockedBoxes.size > 0
+                  ? '锁定全部格子（收起操作按钮）'
+                  : '自由摆放（解锁全部格子）'}
+              </button>
               <div className="px-2.5 pb-0.5 pt-1.5 text-[10px] text-neutral-400">配色</div>
               <div className="flex flex-wrap gap-1 px-2.5 pb-1.5">
                 {ACCENT_ORDER.map((key) => (
@@ -2557,9 +3513,10 @@ export function GridOverlay(): React.JSX.Element {
                       setAccent(box.id, key);
                     }}
                     style={{ background: NOTE_ACCENTS[key].hex }}
-                    className={`h-4 w-4 rounded-full ring-1 ring-white/25 transition hover:scale-110 ${
-                      box.accent === key ? 'ring-2 ring-sky-300' : ''
-                    }`}
+                    className={cn(
+                      'h-4 w-4 rounded-full ring-1 ring-white/25 transition hover:scale-110',
+                      box.accent === key ? 'ring-2 ring-sky-300' : '',
+                    )}
                   />
                 ))}
               </div>
@@ -2582,7 +3539,9 @@ export function GridOverlay(): React.JSX.Element {
           );
         })()}
 
-      {/* 条目右键菜单（V41）：接管模式下给不了原生 shell 菜单，先补最高频的三件事 */}
+      {/* 条目右键菜单（V41；V58 起挂在 **Ctrl + 右键** 上）：接管模式下普通右键已经
+          弹系统原生 shell 菜单（V43），Shift + 右键让给系统的扩展菜单（V58），
+          这里只补原生菜单里给不了的 Handy 自己的两件事。 */}
       {menuItem !== null && !contentHidden && (
         <div
           key="grid-item-menu"
@@ -2590,7 +3549,7 @@ export function GridOverlay(): React.JSX.Element {
           style={{ left: menuItem.x, top: menuItem.y, pointerEvents: 'auto' }}
           onMouseEnter={cancelMenuLeave}
           onMouseLeave={() => scheduleMenuLeave(() => setMenuItem(null))}
-          className="absolute z-50 w-44 overflow-hidden rounded-lg bg-neutral-900 py-1 text-xs text-neutral-100 shadow-2xl ring-1 ring-white/15"
+          className={menuShellClass}
         >
           <div className="truncate px-2.5 pb-1 pt-0.5 text-[10px] text-neutral-400">
             {menuItem.item.displayName}
@@ -2643,7 +3602,7 @@ export function GridOverlay(): React.JSX.Element {
           style={{ left: menuLoose.x, top: menuLoose.y, pointerEvents: 'auto' }}
           onMouseEnter={cancelMenuLeave}
           onMouseLeave={() => scheduleMenuLeave(() => setMenuLoose(null))}
-          className="absolute z-50 w-44 overflow-hidden rounded-lg bg-neutral-900 py-1 text-xs text-neutral-100 shadow-2xl ring-1 ring-white/15"
+          className={menuShellClass}
         >
           <div className="truncate px-2.5 pb-1 pt-0.5 text-[10px] text-neutral-400">
             {menuLoose.entry.name}
@@ -2677,7 +3636,10 @@ export function GridOverlay(): React.JSX.Element {
       )}
 
       {/* 提示条（非交互文本） */}
-      {hint && (        <div className="absolute left-1/2 top-4 -translate-x-1/2 rounded-md bg-neutral-900/80 px-3 py-1.5 text-xs text-neutral-100 shadow-lg backdrop-blur">
+      {hint && (
+        <div
+          className="absolute left-1/2 top-5 max-w-[560px] -translate-x-1/2 rounded-2xl border border-white/15 bg-gradient-to-b from-neutral-900/90 to-neutral-950/95 px-5 py-2 text-center text-[13px] font-medium leading-snug text-neutral-100 shadow-[0_10px_40px_rgba(0,0,0,0.5),0_0_0_1px_rgba(255,255,255,0.06),inset_0_1px_0_rgba(255,255,255,0.12)] backdrop-blur-xl animate-[fadeIn_0.2s_ease-out]"
+        >
           {hint}
         </div>
       )}
@@ -2690,11 +3652,17 @@ export function GridOverlay(): React.JSX.Element {
           这样面板开着的时候，桌面其余部分照样能点、能拖。
           `key` 让「换页签 / 换目标」时重新挂载，面板内部状态（搜索词 / 当前工具）随之重置。 */}
       {sidePanel !== null && (
-        <div ref={sidePanelRef} style={{ pointerEvents: 'none' }} className={SIDE_PANEL_SHELL}>
+        <div
+          ref={sidePanelRef}
+          style={{ pointerEvents: 'none' }}
+          className={sidePanelShell(panelWide ? 'full' : 'half')}
+        >
           <DesktopSidePanel
             key={`${sidePanel.tab}:${sidePanel.entry?.id ?? ''}`}
             initialTab={sidePanel.tab}
             initialEntry={sidePanel.entry}
+            wide={panelWide}
+            onToggleWidth={() => setPanelWide((prev) => !prev)}
             onClose={closePanel}
             onLaunch={openTarget}
             onOpenLink={(link) => openDockLink(link)}
@@ -2703,121 +3671,172 @@ export function GridOverlay(): React.JSX.Element {
         </div>
       )}
 
-      {/* 桌面快捷条 Dock（V42）：底部居中，像 mac 的 Dock —— 点一下就开；
-          把桌面图标 / 格子条目 / 未归类条目拖上来即可收成一条快捷方式。
-          数据就是工作台那份 `quicklinks`（localStorage 同源），两边实时一致。
-          只在「接管桌面」时出现 —— 接管关着时桌面上本来就是原生图标，不必再来一条。 */}
-      {takeover?.enabled === true && !contentHidden && (
-        <div
-          ref={dockRef}
-          style={{ pointerEvents: 'auto' }}
-          onDragOver={(event) => {
-            // 两路都认：① 我们在拖拽期记着对象（同窗口拖动）；② 只是带着我们的类型标记
-            // 路过（比如拖拽被中断过、ref 已经清了）—— 认出来就让光标显示「可放下」。
-            const types = Array.from(event.dataTransfer.types);
-            const ours =
-              types.includes('application/x-handy-item') ||
-              types.includes('application/x-handy-loose');
-            if (itemDragRef.current !== null || looseDragRef.current !== null || ours) {
-              event.preventDefault();
-              event.dataTransfer.dropEffect = 'copy';
-              setDockHot(true);
-            }
-          }}
-          onDragLeave={() => setDockHot(false)}
-          onDrop={(event) => {
-            const drag = itemDragRef.current;
-            const looseDrag = looseDragRef.current;
-            if (drag === null && looseDrag === null) {
-              return;
-            }
-            // 停在这里：别让根画布把这次 drop 当成「拖出格子 = 移出」
-            event.preventDefault();
-            event.stopPropagation();
-            if (drag !== null) {
-              addDockLink(drag.item.displayName, drag.item.filePath);
-            } else if (looseDrag !== null) {
-              addDockLink(looseDrag.name, looseDrag.path);
-            }
-            setDockHot(false);
-            endItemDrag();
-          }}
-          title="桌面快捷条：点一下打开；把桌面图标拖到这里收成快捷方式（与工作台共用一份数据）"
-          className={`absolute bottom-5 left-1/2 flex max-w-[60vw] -translate-x-1/2 items-center gap-1.5 overflow-x-auto rounded-2xl border border-white/10 px-2.5 py-2 shadow-2xl transition ${
-            dockHot
-              ? 'bg-sky-600/60 ring-1 ring-sky-300/60'
-              : 'bg-neutral-900/95 ring-1 ring-white/10'
-          }`}
-        >
-          {dockActions.length === 0 && dockLinks.length === 0 ? (
-            <span className="whitespace-nowrap px-3 text-[11px] text-neutral-300">
-              把桌面图标拖到这里 → 收成快捷条上的一条
-            </span>
-          ) : (
-            <>
-              {/* 左半：系统快捷入口（编辑 hosts / 任务管理器 / 管理员终端…） */}
-              {dockActionList.map((action) => {
-                const Icon = ACTION_ICONS[action.id] ?? Wrench;
-                return (
+      {/* —— 桌面右侧常驻「工作台」（V60）——
+          用户 09-21（附腾讯桌面整理截图）：「日历可以修改为工作台，把快捷入口这些都可以
+          整合到工作台里面，整合成一个整体的模块，现在还缺少添加便签的按钮 还有整理
+          关闭整理等，工作台这个可以常驻，不跟桌面整理一起退出等」。
+
+          于是「右下角快捷入口格子」（V56）+「日历盒子」合并成**这一个模块**：
+            · 日历（含整套主题切换）
+            · 快捷入口（应用入口 / 系统入口 / 我的快捷方式）
+            · 操作按钮条（便签 / 格子 / 整理 / 显示·收起格子）
+
+          ⚠️ 它在 `contentHidden` 时**照样渲染** —— 这正是「常驻，不跟桌面整理一起退出」，
+          也是它必须是浮窗而不是格子的原因（所有盒子都会在退出整理时被一起收起）。
+          Rust 侧 `workstation_rect()` 把工作区右侧一整列当禁区。
+
+          外壳 / 标题栏 / 条目网格仍与收纳格共用同一套类名（`BOX_SHELL_CLASS` +
+          `cardBackground`）—— 用户 09-20「将右下角这个快捷入口改造成格子样式」的要求不变。
+
+          拖动仍然有效：把桌面图标 / 格子条目拖进来即收藏成「我的快捷方式」
+          （由指针拖拽主循环在 mouseup 里判定，入口优先于格子）。 */}
+      <DesktopWorkstation
+        shellRef={dockRef}
+        shellClassName={BOX_SHELL_CLASS}
+        background={cardBackground('')}
+        hot={dockHot}
+        collapsed={dockCollapsed}
+        onToggleCollapsed={toggleDockCollapsed}
+        hidden={contentHidden}
+        onAddBox={addBox}
+        onAddNote={addNote}
+        onArrange={arrangeDesktop}
+        onToggleOverlay={toggleOverlay}
+        onOpenSettings={() => openPanel('settings', null)}
+        headerExtra={
+          /* 换日历主题（V48 起日历是**整套换色**：底 / 字 / 今天 / 选中 / 节日 / 输入框，
+             一眼可辨）。主题键与展开态都落 localStorage，与折叠态同一套做法。 */
+          <button
+            type="button"
+            onClick={() => setShowThemePicker((prev) => !prev)}
+            title="换个日历主题"
+            className="shrink-0 rounded p-1 opacity-60 transition hover:bg-white/15 hover:opacity-100"
+          >
+            <Palette className="h-3.5 w-3.5" />
+          </button>
+        }
+        calendar={
+          <div className="flex flex-col gap-1.5">
+            {showThemePicker ? (
+              <div className="flex flex-wrap items-center gap-1.5 rounded-xl bg-black/25 px-2 py-1.5">
+                {ACCENT_ORDER.map((key) => (
                   <button
-                    key={`act-${action.id}`}
+                    key={key || 'default'}
                     type="button"
+                    title={CALENDAR_THEMES[key].label}
+                    onClick={() => setCalendarTheme(key)}
+                    className={cn(
+                      'h-4 w-4 rounded-full transition hover:scale-110',
+                      CALENDAR_THEMES[key].swatch,
+                      calendarTheme === key ? 'ring-2 ring-sky-300' : 'ring-1 ring-white/30',
+                    )}
+                  />
+                ))}
+              </div>
+            ) : null}
+            <CalendarWidget accent={calendarTheme} />
+          </div>
+        }
+      >
+            {/* V61：整段改用「段头 + 胶囊网格」的统一语言 —— 段头与工作台的
+                「我的快捷方式」共用 `WorkstationSectionLabel`，两段读起来是一套东西。
+                段内**不再有分隔线**（原先「应用入口 / 系统入口 / 我的快捷方式」之间
+                各有一条 `border-t`，三段板子摞在一起正是用户说的「拼接」）。
+
+                应用入口那排同时瘦身：原来并排的「工具箱 / 整理 / 设置」里，
+                「整理」与底栏那颗、《设置》与标题栏那颗**都是同一件事**，
+                摆两遍只会让人犹豫点哪个。这里只留「工具箱」（工作台唯一的对外主入口）。 */}
+            <div className="flex flex-col gap-2.5">
+              <div>
+                <WorkstationSectionLabel
+                  action={
+                    <button
+                      type="button"
+                      onClick={() => openPanel('quick')}
+                      title="增删入口：在右侧「快捷」面板展开「全部系统入口」，点右侧图钉即固定到这里"
+                      className="shrink-0 rounded p-0.5 opacity-50 transition hover:bg-white/15 hover:opacity-100"
+                    >
+                      <Plus className="h-3 w-3" />
+                    </button>
+                  }
+                >
+                  快捷入口
+                </WorkstationSectionLabel>
+                <div className="grid grid-cols-2 gap-1">
+                  <DockChip
+                    icon={Wrench}
+                    label="工具箱"
+                    title="工具箱：搜索并使用全部本地小工具（在右侧面板里就地打开）"
                     onClick={() => {
-                      void ipc
-                        .sysActionRun(action.id)
-                        .catch((error: Error) => showHint(`执行失败：${error.message}`));
+                      if (sidePanel !== null && sidePanel.tab === 'tools') {
+                        closePanel();
+                      } else {
+                        openPanel('tools');
+                      }
                     }}
-                    onContextMenu={(event) => {
-                      event.preventDefault();
-                      event.stopPropagation();
-                      setMenuBox(null);
-                      setMenuItem(null);
-                      setMenuLoose(null);
-                      setMenuDock({ kind: 'action', action, x: event.clientX, y: event.clientY });
-                    }}
-                    title={`${action.name}\n${action.description}${action.elevated ? '\n（需要管理员权限）' : ''}\n单击打开 · 右键更多`}
-                    className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl transition hover:-translate-y-0.5 hover:bg-white/15"
-                  >
-                    <Icon className="h-6 w-6 text-neutral-100" />
-                  </button>
-                );
-              })}
-              {dockActionList.length > 0 && dockLinks.length > 0 && (
-                <span className="mx-1 h-8 w-px shrink-0 bg-white/20" />
-              )}
-              {/* 右半：自定义快捷方式（拖进来的桌面图标 / 工作台加的链接） */}
-              {dockLinks.map((link) => (
-              <button
-                key={link.id}
-                type="button"
-                onClick={() => openDockLink(link)}
-                onContextMenu={(event) => {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  setMenuBox(null);
-                  setMenuItem(null);
-                  setMenuLoose(null);
-                  setMenuDock({ kind: 'link', link, x: event.clientX, y: event.clientY });
-                }}
-                title={`${link.name}\n${link.value}\n单击打开 · 右键更多`}
-                className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl transition hover:-translate-y-0.5 hover:bg-white/15"
-              >
-                {link.type === 'url' ? (
-                  <Link2 className="h-6 w-6 text-sky-200" />
-                ) : (
-                  <FileIcon path={link.value} size={32} />
-                )}
-              </button>
-              ))}
-            </>
-          )}
-        </div>
-      )}
+                  />
+                  {dockActionList.map((action) => (
+                    <DockChip
+                      key={`act-${action.id}`}
+                      icon={ACTION_ICONS[action.id] ?? Wrench}
+                      label={action.name}
+                      title={`${action.name}\n${action.description}${action.elevated ? '\n（需要管理员权限）' : ''}\n单击打开 · 右键从快捷入口移除`}
+                      onClick={() => {
+                        void ipc
+                          .sysActionRun(action.id)
+                          .catch((error: Error) => showHint(`执行失败：${error.message}`));
+                      }}
+                      onContextMenu={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        setMenuBox(null);
+                        setMenuItem(null);
+                        setMenuLoose(null);
+                        setMenuDock({ kind: 'action', action, x: event.clientX, y: event.clientY });
+                      }}
+                    />
+                  ))}
+                </div>
+              </div>
+
+              {/* —— 我的快捷方式：拖进来的桌面图标 / 工作台加的链接 —— */}
+              {dockLinks.length > 0 ? (
+                <div>
+                  <WorkstationSectionLabel>我的快捷方式</WorkstationSectionLabel>
+                  <div className="grid grid-cols-2 gap-1">
+                    {dockLinks.map((link) => (
+                      <DockChip
+                        key={link.id}
+                        iconNode={
+                          link.type === 'url' ? (
+                            <Link2 className="h-3.5 w-3.5" />
+                          ) : (
+                            <FileIcon path={link.value} size={14} />
+                          )
+                        }
+                        label={link.name}
+                        title={`${link.name}\n${link.value}\n单击打开 · 右键从快捷入口移除`}
+                        onClick={() => openDockLink(link)}
+                        onContextMenu={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          setMenuBox(null);
+                          setMenuItem(null);
+                          setMenuLoose(null);
+                          setMenuDock({ kind: 'link', link, x: event.clientX, y: event.clientY });
+                        }}
+                      />
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+      </DesktopWorkstation>
 
       {/* V45：中部搜索浮层已并入右侧统一面板（见上方 `sidePanel` 那段渲染），
           这里不再有独立的搜索框与结果列表。 */}
 
-      {/* 快捷条条目右键菜单（V42）：打开 / 从快捷条移除 */}
+      {/* 快捷入口条目右键菜单（V42）：打开 / 从快捷入口移除 */}
       {menuDock !== null && (
         <div
           key="grid-dock-menu"
@@ -2825,7 +3844,7 @@ export function GridOverlay(): React.JSX.Element {
           style={{ left: menuDock.x, top: menuDock.y, pointerEvents: 'auto' }}
           onMouseEnter={cancelMenuLeave}
           onMouseLeave={() => scheduleMenuLeave(() => setMenuDock(null))}
-          className="absolute z-50 w-44 overflow-hidden rounded-lg bg-neutral-900 py-1 text-xs text-neutral-100 shadow-2xl ring-1 ring-white/15"
+          className={menuShellClass}
         >
           <div className="truncate px-2.5 pb-1 pt-0.5 text-[10px] text-neutral-400">
             {menuDock.kind === 'link' ? menuDock.link.name : menuDock.action.name}
@@ -2857,20 +3876,25 @@ export function GridOverlay(): React.JSX.Element {
                 const id = menuDock.link.id;
                 setMenuDock(null);
                 removeDockLink(id);
-                showHint('已从快捷条移除（只是快捷方式，文件还在原处）');
+                showHint('已从快捷入口移除（只是快捷方式，文件还在原处）');
               } else {
                 // 系统入口的「移除」= 取消勾选：改的是 settings.quickActionIds，
                 // 工作台的快捷入口栏同步少一个（同一份数据，永远不会两边不一致）
+                //
+                // V56：同时打上「用户亲手改过」的标记 —— 否则下一次读设置又会按默认口径
+                // 算回去（默认里就含这几项），用户会发现「删了又回来」。见
+                // `core/settings.ts` 的 `resolveQuickActionIds`。
                 const id = menuDock.action.id;
                 setMenuDock(null);
                 void updateSettings({
                   quickActionIds: quickActionIds.filter((item) => item !== id),
+                  quickActionsCustomized: true,
                 }).catch((error: Error) => showHint(error.message));
-                showHint('已从快捷条移除（可在桌面「快捷」面板里重新固定）');
+                showHint('已从快捷入口移除（可在桌面「快捷」面板里重新固定）');
               }
             }}
           >
-            从快捷条移除
+            从快捷入口移除
           </button>
           <p className="px-2.5 pb-1 pt-0.5 text-[10px] leading-relaxed text-neutral-500">
             与桌面「快捷」面板共享同一份数据
@@ -2878,169 +3902,25 @@ export function GridOverlay(): React.JSX.Element {
         </div>
       )}
 
-      {/* 浮动工具栏（V42 重做）：图标+文字标签,三组分栏,桌面上一眼可懂 */}
-      <div
-        ref={toolbarRef}
-        style={{ pointerEvents: 'auto' }}
-        className="absolute bottom-5 right-5 flex flex-col gap-1.5 rounded-2xl bg-neutral-900/95 px-2 py-2 shadow-2xl ring-1 ring-white/15"
-      >
-        {/* 组 0：面板入口（工具 / 快捷）—— V45：桌面上只有“一块面板”，两个按钮分别落到
-            它的两个页签；搜索框就在面板顶部，打开即用，不再有第二处搜索框。 */}
-        <div className="flex items-center gap-0.5">
+      {/* V53：右键菜单——仅在桌面整理隐藏时显示，只一个开关按钮。
+          用户 09-19：「右键菜单只有开启桌面整理，如果我开启了那么右键就应该
+          变成退出桌面整理」。显示时右键弹原生 Windows 菜单，不弹这个。 */}
+      {menuDesktop ? (
+        <div
+          className="fixed z-50 min-w-[140px] rounded-xl border border-white/15 bg-neutral-900/95 p-1 shadow-2xl backdrop-blur-xl"
+          style={{ left: menuDesktop.x, top: menuDesktop.y }}
+          onMouseDown={(e) => e.stopPropagation()}
+        >
           <button
             type="button"
-            onClick={() => {
-              if (sidePanel !== null && sidePanel.tab === 'tools') {
-                closePanel();
-              } else {
-                openPanel('tools');
-              }
-            }}
-            title="工具面板：在右侧搜索并直接使用任意工具 / 页面（密码存储器、工作台、桌面整理都在这）"
-            className={`flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[11px] font-medium transition hover:bg-white/10 ${
-              sidePanel !== null && sidePanel.tab === 'tools' ? 'text-sky-300' : 'text-neutral-200'
-            }`}
+            onClick={() => { toggleOverlay(); setMenuDesktop(null); }}
+            className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-[12px] font-medium text-neutral-200 transition hover:bg-white/10"
           >
-            <Search className="h-3.5 w-3.5" />
-            工具
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              if (sidePanel !== null && sidePanel.tab === 'quick') {
-                closePanel();
-              } else {
-                openPanel('quick');
-              }
-            }}
-            title="快捷面板：应用入口 / 我的快捷方式 / 系统入口（hosts 编辑、服务、证书…）"
-            className={`flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[11px] font-medium transition hover:bg-white/10 ${
-              sidePanel !== null && sidePanel.tab === 'quick' ? 'text-sky-300' : 'text-neutral-200'
-            }`}
-          >
-            <Zap className="h-3.5 w-3.5" />
-            快捷
-          </button>
-          <button
-            type="button"
-            onClick={() => openPanel('tools', vaultEntry)}
-            disabled={vaultEntry === null}
-            title="密码存储器：在右侧面板里直接打开（它是工具箱里的一个工具，不再单占模块）"
-            className={`flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[11px] font-medium transition hover:bg-white/10 ${
-              sidePanel?.entry?.id === 'vault' ? 'text-sky-300' : 'text-neutral-200'
-            }`}
-          >
-            <KeyRound className="h-3.5 w-3.5" />
-            密码箱
+            {contentHidden ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
+            {contentHidden ? '开启桌面整理' : '退出桌面整理'}
           </button>
         </div>
-        {/* 组 1：布局 */}
-        <div className="flex items-center gap-0.5">
-        <button
-          type="button"
-          onClick={toggleEditMode}
-          title={editMode ? '锁定布局，避免误拖' : '解锁布局（编辑模式）'}
-          className={`flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[11px] font-medium transition hover:bg-white/10 ${
-            editMode ? 'text-sky-300' : 'text-neutral-200'
-          }`}
-        >
-          {editMode ? <Lock className="h-3.5 w-3.5" /> : <LockOpen className="h-3.5 w-3.5" />}
-          {editMode ? '已解锁' : '编辑'}
-        </button>
-        <button
-          type="button"
-          onClick={arrangeDesktop}
-          title="整理桌面：重新扫一遍桌面，文件/文件夹按类型登记进格子（自右侧流布、高度自动撑开），快捷方式与系统图标留左侧竖条（不移动任何文件）"
-          className="flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[11px] font-medium text-neutral-200 transition hover:bg-white/10"
-        >
-          <Sparkles className="h-3.5 w-3.5" />
-          整理
-        </button>
-        </div>
-        {/* 组 2：添加 */}
-        <div className="flex items-center gap-0.5">
-        <button
-          type="button"
-          onClick={addBox}
-          title="添加收纳格"
-          className="flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[11px] font-medium text-neutral-200 transition hover:bg-white/10"
-        >
-          <Plus className="h-3.5 w-3.5" />
-          格子
-        </button>
-        <button
-          type="button"
-          onClick={() => addWidget('note')}
-          title="添加便签（Markdown 边写边渲染，自动保存；可以加多个，各选一种颜色）"
-          className="flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[11px] font-medium text-neutral-200 transition hover:bg-white/10"
-        >
-          <StickyNote className="h-3.5 w-3.5" />
-          便签
-        </button>
-        <button
-          type="button"
-          onClick={() => addWidget('calendar')}
-          disabled={hasCalendar}
-          title={
-            hasCalendar
-              ? '日历挂件已经有一个了'
-              : '添加日历挂件（农历 · 节气 · 节假日，点某天加计划，与工作台共用数据）'
-          }
-          className="flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[11px] font-medium text-neutral-200 transition hover:bg-white/10 disabled:opacity-30 disabled:hover:bg-transparent"
-        >
-          <CalendarDays className="h-3.5 w-3.5" />
-          日历
-        </button>
-        </div>
-        {/* 组 3：接管 / 对账 / 隐藏 */}
-        <div className="flex items-center gap-0.5">
-        <button
-          type="button"
-          onClick={toggleTakeover}
-          title={
-            takeover?.enabled && takeover.iconsVisible
-              ? '桌面接管失效：偏好仍是接管，但原生图标此刻露在外面（系统或桌面工具恢复了它）—— 点这里立刻重新隐藏'
-              : takeover?.enabled
-                ? '桌面已由格子接管（原生图标隐藏）—— 点这里恢复原生图标'
-                : '由格子接管桌面呈现：隐藏原生桌面图标，避免桌面上出现两份相同内容'
-          }
-          className={`flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[11px] font-medium transition hover:bg-white/10 ${
-            takeover?.enabled && takeover.iconsVisible
-              ? 'text-amber-300'
-              : takeover?.enabled
-                ? 'text-emerald-300'
-                : 'text-neutral-200'
-          }`}
-        >
-          {takeover?.enabled ? <MonitorOff className="h-3.5 w-3.5" /> : <Monitor className="h-3.5 w-3.5" />}
-          {takeover?.enabled ? '原生图标隐藏' : '接管图标'}
-        </button>
-        <button
-          type="button"
-          onClick={syncNow}
-          title="立即对账：把格子目录里的真实内容刷新进来"
-          className="flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[11px] font-medium text-neutral-200 transition hover:bg-white/10"
-        >
-          <Wand2 className="h-3.5 w-3.5" />
-          对账
-        </button>
-        <button
-          type="button"
-          onClick={toggleOverlay}
-          title={
-            contentHidden
-              ? '显示桌面整理：把格子 / 未归类 / Dock 重新摆回桌面（原生图标再次接管）'
-              : '收起桌面整理：只留这个工具栏，桌面恢复原生图标（随时可再显示）'
-          }
-          className={`flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[11px] font-medium transition hover:bg-white/10 ${
-            contentHidden ? 'text-sky-300' : 'text-neutral-200'
-          }`}
-        >
-          {contentHidden ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
-          {contentHidden ? '显示' : '隐藏'}
-        </button>
-        </div>
-      </div>
+      ) : null}
     </div>
   );
 }

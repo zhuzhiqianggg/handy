@@ -10,7 +10,6 @@ use tauri::{
 };
 
 use crate::commands;
-use crate::window;
 
 const TRAY_ID: &str = "main-tray";
 
@@ -46,11 +45,12 @@ pub fn setup(app: &AppHandle) -> Result<(), String> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "open" => {
-                let _ = window::show_main_palette(app);
+                commands::grid::dispatch_panel_action(app, commands::grid::PANEL_ACTION_TOOLS);
             }
             "settings" => {
-                // TODO(V13)：打开设置窗口 window_open("settings")
-                let _ = window::show_main_palette(app);
+                // V63 落地（原 TODO(V13) 的「打开设置窗口」）：设置就在桌面面板里，
+                // 不再另开一个窗口。
+                commands::grid::dispatch_panel_action(app, commands::grid::PANEL_ACTION_SETTINGS);
             }
             "autostart" => {
                 // TODO(V14)：调用 tauri-plugin-autostart 切换自启状态（读 settings 回显）
@@ -84,7 +84,11 @@ pub fn setup(app: &AppHandle) -> Result<(), String> {
             } = event
             {
                 let app = tray.app_handle();
-                let _ = window::toggle_main_palette(app);
+                // V63：左键单击 = 开 / 关桌面右侧面板（原来是开 / 关主窗口）
+                commands::grid::dispatch_panel_action(
+                    app,
+                    commands::grid::PANEL_ACTION_TOGGLE_TOOLS,
+                );
             }
         });
 

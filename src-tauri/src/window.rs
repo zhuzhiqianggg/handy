@@ -36,6 +36,11 @@ pub fn show_main_palette(app: &AppHandle) -> Result<(), String> {
         let _ = win.unminimize();
     }
     win.show().map_err(|e| format!("显示主窗口失败：{e}"))?;
+    // V50：每次唤出都在所在屏幕内居中，保证上/下/左/右边距相等。
+    // tauri.conf `center:true` 只在窗口首次创建时居中；此后 show/hide 会记住
+    // 上次位置，用户可能挪动过或贴在不同屏边，导致再开时偏斜。
+    // `center()` 以**当前窗口所在显示器**为基准居中，逻辑像素与 DPI 缩放都正确。
+    win.center().map_err(|e| format!("主窗口居中失败：{e}"))?;
     win.set_focus().map_err(|e| format!("聚焦主窗口失败：{e}"))?;
     Ok(())
 }

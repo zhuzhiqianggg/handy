@@ -47,6 +47,13 @@ export interface GridBox {
   width: number;
   height: number;
   sort: number;
+  /**
+   * **用户手工摆过**（V50）：用户拖过 / 拉过这个格子 ⇒ `true`。
+   *
+   * 布局引擎据此分两种归属：`false`（引擎摆的）每次整理都按当前列网格重新对齐；
+   * `true` 原地不动（只要不重叠、不越界、不跨进挂件带）。「重新重置整理」会把它清回 false。
+   */
+  manual: boolean;
   itemCount: number;
   createdAt: string;
   updatedAt: string;
@@ -110,6 +117,12 @@ export interface GridBoxInput {
   width?: number | null;
   height?: number | null;
   sort?: number | null;
+  /**
+   * **用户手工摆过**（V50）：只有「用户自己拖动 / 缩放的落库」才传 `true`。
+   *
+   * 缺省 `null` = 不动这个标记（自动高度、改名、配色、抬层都不该把它标成手工）。
+   */
+  manual?: boolean | null;
 }
 
 /** 挂件层真实状态（管理页据此对齐「显示 / 隐藏格子」开关） */

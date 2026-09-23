@@ -15,7 +15,7 @@
 //! 数据来源：贴条是独立 WebView，但它经 `tauri-plugin-sql` 直连同一个 `handy.db`，
 //! 前端 `useTodosStore` 在贴条窗里同样可用 —— 不需要为「给贴条传数据」再造 IPC。
 
-use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
 /// 贴条窗 label（与 capabilities `windows` / `main.tsx` 的 `?window=workstation-bar` 对应）。
 pub const BAR_LABEL: &str = "workstation-bar";
@@ -35,9 +35,6 @@ const BAR_MIN_WIDTH: f64 = 560.0;
 const BAR_MAX_WIDTH: f64 = 980.0;
 /// 距工作区顶部的间距（留出一点呼吸感，不贴死屏幕边缘）。
 const BAR_TOP_GAP: f64 = 10.0;
-
-/// 主窗口 label（与 `window.rs` / `tauri.conf.json` 一致）。
-const MAIN_LABEL: &str = "main";
 
 /// 贴条几何：主显示器工作区顶部居中；读不到显示器时兜底 720×44 @ (280, 10)。
 fn bar_geometry(app: &AppHandle) -> (f64, f64, f64, f64) {
@@ -163,36 +160,34 @@ pub async fn bar_set_pinned(app: AppHandle, pinned: bool) -> Result<(), String> 
         .map_err(|err| format!("切换贴条置顶失败：{err}"))
 }
 
-/// 从贴条唤出主窗口并切到「工作台」模块。
+/// 从贴条唤出「工作台」。
 ///
-/// 视图状态是**每个窗口各持一份**的（见 ARCHITECTURE ADR-8），贴条无法直接改主窗口的
-/// store，因此这里走「显示主窗口 + 发导航事件」，由主窗口的 `handy:navigate` 监听响应。
+/// V63：**不再是主窗口**。贴条自己改不了挂件窗的 store，所以走「派发面板动作 +
+/// 挂件窗取走执行」（见 `commands/grid.rs` 的 [`dispatch_panel_action`]），与
+/// `bar_open_command` 同一条路。
 #[tauri::command]
 pub async fn bar_open_workstation(app: AppHandle) -> Result<(), String> {
-    crate::window::show_main_palette(&app)?;
-    if let Some(win) = app.get_webview_window(MAIN_LABEL) {
-        win.emit("handy:navigate", "module:notes")
-            .map_err(|err| format!("通知主窗口失败：{err}"))?;
-    }
+    crate::commands::grid::dispatch_panel_action(
+        &app,
+        &format!("{}module:notes", crate::commands::grid::PANEL_OPEN_PREFIX),
+    );
     Ok(())
 }
 
 /// 从贴条搜索框直接打开指定工具（V28，用户反馈）。
 ///
-/// 与 `bar_open_workstation` 同一套导航机制：显示主窗口 + `handy:navigate` 事件，
-/// payload 为**工具 id**（主窗口侧非 `module:` 前缀的 payload 一律按命令视图处理）。
-/// 工具 id 来自贴条前端的 `registry.commandsOf('toolbox')`，非法 id 由主窗口
-/// `CommandView` 的未知命令兜底处理，这里不做白名单校验（保持命令薄）。
+/// V63：**在桌面右侧面板里就地打开**，不再唤主窗口（用户：「工具线弹出框就够了吧」）。
+/// 工具 id 来自贴条前端的 `registry.commandsOf('toolbox')`；面板里找不到对应项时由
+/// 前端 `openTarget` 兜底（提示未找到）。
 #[tauri::command]
 pub async fn bar_open_command(app: AppHandle, command_id: String) -> Result<(), String> {
     let id = command_id.trim().to_string();
     if id.is_empty() {
         return Err("工具 id 不能为空".to_string());
     }
-    crate::window::show_main_palette(&app)?;
-    if let Some(win) = app.get_webview_window(MAIN_LABEL) {
-        win.emit("handy:navigate", id)
-            .map_err(|err| format!("通知主窗口失败：{err}"))?;
-    }
+    crate::commands::grid::dispatch_panel_action(
+        &app,
+        &format!("{}{}", crate::commands::grid::PANEL_OPEN_PREFIX, id),
+    );
     Ok(())
 }

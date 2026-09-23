@@ -96,8 +96,192 @@ export const NOTE_ACCENTS: Record<GridAccent, { label: string; paper: string; sw
 export const ACCENT_ORDER: GridAccent[] = ['', 'amber', 'rose', 'sky', 'emerald', 'violet', 'slate'];
 
 /** 取便签配色（未知键回落默认） */
-function noteAccent(accent: GridAccent | undefined): { label: string; paper: string; swatch: string; hex: string } {
+export function noteAccent(accent: GridAccent | undefined): { label: string; paper: string; swatch: string; hex: string } {
   return NOTE_ACCENTS[accent ?? ''] ?? NOTE_ACCENTS[''];
+}
+
+// —— 日历主题（V48） ——
+
+/**
+ * 日历挂件的**可切换主题**。
+ *
+ * # 为什么要有这张表
+ *
+ * 用户 09-19 原话：「这个日历样式是不是缺少点什么东西，我们不用非要跟桌面透明样式，
+ * 我们可以设计自己的非常漂亮的样式，可以多设置风格让用户自己选择风格」。
+ *
+ * V47 及以前，日历与便签共用 `accent` 那一套**卡片磨砂底**（`cardBackground`），
+ * 差别只是一层几乎看不出的色相偏移 —— 用户的实际感受就是「这个格子里面的配置变化
+ * 没什么用，没有什么明显变化」。根因是**同一套配色用在了两种完全不同的画布上**：
+ * 便签要的是「浅色纸 + 深字」，日历要的是「一整块自洽的日历版面」（深底浅字或
+ * 浅底深字成套配齐），只改一层半透明底色当然看不出区别。
+ *
+ * 所以这里的主题是**整套**的：外壳底色、主字色、次级字色、今天 / 选中的高亮、
+ * 节日与节气的强调色、计划清单的分隔与输入框 —— 一次换掉，一眼就能看出区别。
+ * 键沿用 `GridAccent`（`grid_boxes.accent` 这一列已经在库里、已有选择器 UI），
+ * 所以**不需要数据库迁移**：对日历格来说，`accent` 的语义就是「主题」。
+ *
+ * ⚠️ 主题必须是**自洽的**（底色与字色成套），不要在这里混用便签的 `NOTE_ACCENTS`
+ * —— 那张表的字色是给浅底准备的，配到深底主题上会直接看不见。
+ */
+export interface CalendarTheme {
+  /** 选择器里的名字 */
+  label: string;
+  /** 外壳：底色 + 主字色（整块挂件的画布） */
+  shell: string;
+  /** 星期行 */
+  week: string;
+  /** 日期格非选中态悬停 */
+  hover: string;
+  /** 今天（未选中） */
+  today: string;
+  /** 选中日 */
+  selected: string;
+  /** 农历 / 节气那一行 */
+  sub: string;
+  /** 节日 / 休息日强调 */
+  festival: string;
+  /** 休 / 班角标 */
+  badgeOff: string;
+  badgeMakeup: string;
+  /** 计划清单行悬停 */
+  rowHover: string;
+  /** 新增计划的输入框 */
+  input: string;
+  /** 分隔线（顶部标题下 / 底部） */
+  divider: string;
+  /** 主题预览用的色点 */
+  swatch: string;
+}
+
+/**
+ * 七套主题。默认那套（`''`）走**深色玻璃**：任何壁纸上都读得清，也是用户最熟悉的观感；
+ * 另外六套是明确的浅色纸感，各配一种色相 —— 想要「漂亮一点」的用户可以直接换。
+ */
+export const CALENDAR_THEMES: Record<GridAccent, CalendarTheme> = {
+  '': {
+    label: '深色玻璃（默认）',
+    // V61：外壳不再自带「深色底 + 描边」。它现在住在**工作台的卡片里**，再叠一层
+    // `neutral-950/72` 加一圈 ring，读起来就是「一张卡片里贴了另一张卡片」——
+    // 用户 09-21 说的「样式不够自然……要融为几个整体」有一半来自这里。
+    // V62 再压一档（0.18 → 0.12）：工作台加宽后日历成了主角，底越淡它越像**长在卡片上
+    // 的一段**而不是卡片里的一块。⚠️ 六套浅色主题的 shell **不动** —— 它们的底本身
+    // 就是主题的一部分（浅底 + 深字），去掉就看不见字了。
+    shell: 'bg-black/[0.12] text-neutral-100',
+    week: 'text-neutral-300/70',
+    hover: 'hover:bg-white/15',
+    today: 'bg-white/[0.07] ring-1 ring-inset ring-sky-400/80',
+    selected: 'bg-sky-500 font-semibold text-white shadow-sm',
+    sub: 'text-neutral-300/70',
+    festival: 'text-red-300',
+    badgeOff: 'bg-red-500/35 text-red-200',
+    badgeMakeup: 'bg-white/25 text-neutral-200',
+    rowHover: 'hover:bg-white/15',
+    input: 'bg-white/15 text-neutral-100 ring-1 ring-white/10 placeholder:text-neutral-300/60 focus:ring-sky-400/70',
+    divider: 'border-white/10',
+    swatch: 'bg-neutral-800',
+  },
+  amber: {
+    label: '暖纸',
+    shell: 'bg-gradient-to-b from-amber-50 to-amber-100 text-amber-950 ring-1 ring-amber-900/15',
+    week: 'text-amber-900/70',
+    hover: 'hover:bg-amber-900/10',
+    today: 'bg-amber-900/10 ring-1 ring-inset ring-amber-600/50',
+    selected: 'bg-amber-600 font-semibold text-white shadow-sm',
+    sub: 'text-amber-900/65',
+    festival: 'text-red-600',
+    badgeOff: 'bg-red-500/20 text-red-700',
+    badgeMakeup: 'bg-amber-900/15 text-amber-900',
+    rowHover: 'hover:bg-amber-900/10',
+    input: 'bg-white/70 text-amber-950 ring-1 ring-amber-900/20 placeholder:text-amber-900/45 focus:ring-amber-600/70',
+    divider: 'border-amber-900/15',
+    swatch: 'bg-amber-300',
+  },
+  rose: {
+    label: '樱粉',
+    shell: 'bg-gradient-to-b from-rose-50 to-rose-100 text-rose-950 ring-1 ring-rose-900/15',
+    week: 'text-rose-900/70',
+    hover: 'hover:bg-rose-900/10',
+    today: 'bg-rose-900/10 ring-1 ring-inset ring-rose-500/50',
+    selected: 'bg-rose-600 font-semibold text-white shadow-sm',
+    sub: 'text-rose-900/65',
+    festival: 'text-red-600',
+    badgeOff: 'bg-red-500/20 text-red-700',
+    badgeMakeup: 'bg-rose-900/15 text-rose-900',
+    rowHover: 'hover:bg-rose-900/10',
+    input: 'bg-white/70 text-rose-950 ring-1 ring-rose-900/20 placeholder:text-rose-900/45 focus:ring-rose-500/70',
+    divider: 'border-rose-900/15',
+    swatch: 'bg-rose-300',
+  },
+  sky: {
+    label: '天蓝',
+    shell: 'bg-gradient-to-b from-sky-50 to-sky-100 text-sky-950 ring-1 ring-sky-900/15',
+    week: 'text-sky-900/70',
+    hover: 'hover:bg-sky-900/10',
+    today: 'bg-sky-900/10 ring-1 ring-inset ring-sky-500/50',
+    selected: 'bg-sky-600 font-semibold text-white shadow-sm',
+    sub: 'text-sky-900/65',
+    festival: 'text-red-600',
+    badgeOff: 'bg-red-500/20 text-red-700',
+    badgeMakeup: 'bg-sky-900/15 text-sky-900',
+    rowHover: 'hover:bg-sky-900/10',
+    input: 'bg-white/70 text-sky-950 ring-1 ring-sky-900/20 placeholder:text-sky-900/45 focus:ring-sky-500/70',
+    divider: 'border-sky-900/15',
+    swatch: 'bg-sky-300',
+  },
+  emerald: {
+    label: '薄荷',
+    shell: 'bg-gradient-to-b from-emerald-50 to-emerald-100 text-emerald-950 ring-1 ring-emerald-900/15',
+    week: 'text-emerald-900/70',
+    hover: 'hover:bg-emerald-900/10',
+    today: 'bg-emerald-900/10 ring-1 ring-inset ring-emerald-600/50',
+    selected: 'bg-emerald-600 font-semibold text-white shadow-sm',
+    sub: 'text-emerald-900/65',
+    festival: 'text-red-600',
+    badgeOff: 'bg-red-500/20 text-red-700',
+    badgeMakeup: 'bg-emerald-900/15 text-emerald-900',
+    rowHover: 'hover:bg-emerald-900/10',
+    input: 'bg-white/70 text-emerald-950 ring-1 ring-emerald-900/20 placeholder:text-emerald-900/45 focus:ring-emerald-600/70',
+    divider: 'border-emerald-900/15',
+    swatch: 'bg-emerald-300',
+  },
+  violet: {
+    label: '藕紫',
+    shell: 'bg-gradient-to-b from-violet-50 to-violet-100 text-violet-950 ring-1 ring-violet-900/15',
+    week: 'text-violet-900/70',
+    hover: 'hover:bg-violet-900/10',
+    today: 'bg-violet-900/10 ring-1 ring-inset ring-violet-500/50',
+    selected: 'bg-violet-600 font-semibold text-white shadow-sm',
+    sub: 'text-violet-900/65',
+    festival: 'text-red-600',
+    badgeOff: 'bg-red-500/20 text-red-700',
+    badgeMakeup: 'bg-violet-900/15 text-violet-900',
+    rowHover: 'hover:bg-violet-900/10',
+    input: 'bg-white/70 text-violet-950 ring-1 ring-violet-900/20 placeholder:text-violet-900/45 focus:ring-violet-500/70',
+    divider: 'border-violet-900/15',
+    swatch: 'bg-violet-300',
+  },
+  slate: {
+    label: '素白',
+    shell: 'bg-gradient-to-b from-slate-50 to-slate-200 text-slate-900 ring-1 ring-slate-900/15',
+    week: 'text-slate-600',
+    hover: 'hover:bg-slate-900/10',
+    today: 'bg-slate-900/10 ring-1 ring-inset ring-slate-600/50',
+    selected: 'bg-slate-800 font-semibold text-white shadow-sm',
+    sub: 'text-slate-600',
+    festival: 'text-red-600',
+    badgeOff: 'bg-red-500/20 text-red-700',
+    badgeMakeup: 'bg-slate-900/15 text-slate-900',
+    rowHover: 'hover:bg-slate-900/10',
+    input: 'bg-white/80 text-slate-900 ring-1 ring-slate-900/20 placeholder:text-slate-500 focus:ring-slate-700/70',
+    divider: 'border-slate-900/15',
+    swatch: 'bg-slate-300',
+  },
+};
+
+/** 取日历主题（未知键回落默认） */
+export function calendarTheme(accent: GridAccent | undefined): CalendarTheme {
+  return CALENDAR_THEMES[accent ?? ''] ?? CALENDAR_THEMES[''];
 }
 
 // —— 便签 ——
@@ -187,7 +371,19 @@ export function NoteWidget({
     <div
       // select-none 是浮层容器的默认样式，而 contentEditable 需要真实可选中
       // （否则光标落不进去、压根没法编辑）→ 这里显式恢复文本可选。
-      className={`h-full w-full select-text bg-gradient-to-b ${noteAccent(accent).paper}`}
+      // V63：`min-h-[90px]` → **`min-h-full`**。用户 09-21 附截图：「新建的便签格子为什么
+      // 是这样的，一半有白色背景 一半是黑色」—— 便签纸是一张只铺到 90px 的纸条，而格子
+      // 比它高（新建格子默认 244 高），下面那截就露出卡片的深色磨砂底，看起来像「卡坏了」。
+      //
+      // 现在纸**铺满整个内容区**：格子比内容高时纸跟着拉满（`min-h-full`），内容更长时纸
+      // 继续往下长（外层 `overflow-y-auto` 接管滚动）。90px 保底挪到内层 `RichMarkdown`
+      // 上 —— 盒子被用户拉到极扁时，纸至少还有一行的高度可以点。
+      // V64：纸还要是**一根 flex 列** —— 光 `min-h-full` 只保证「纸」铺满卡片，里面那层
+      // 编辑器（`RichMarkdown`）的高度仍是 auto（内容撑开），于是空便签只有**第一行**
+      // 落在编辑器里：鼠标划过下面是默认箭头、点下去也不落光标（用户 09-21：「便签整个
+      // 内容区域鼠标应该都变成光标形状，而不是只有顶部一行才能变成光标输入形状」）。
+      // 现在纸自己是一列、编辑器拿 `flex-1`，编辑区就**铺满整张纸**。
+      className={`flex w-full min-h-full select-text flex-col bg-gradient-to-b ${noteAccent(accent).paper} shadow-[0_8px_30px_rgba(0,0,0,0.25),0_0_0_1px_rgba(0,0,0,0.05),inset_0_1px_0_rgba(255,255,255,0.7)]`}
       // 便签内部的一切鼠标操作都不该触发盒子的「拖动标题」逻辑
       onMouseDown={(event) => event.stopPropagation()}
     >
@@ -196,7 +392,8 @@ export function NoteWidget({
         onChange={handleChange}
         placeholder="随手写点什么…支持 Markdown，边写边渲染"
         ariaLabel="桌面便签"
-        className="note-markdown h-full w-full px-2.5 py-2 text-xs leading-relaxed"
+        // `flex-1 min-h-[90px]`：跟着纸的高度铺满整张便签（见上面那段 V64 说明）。
+        className="note-markdown w-full min-h-[90px] flex-1 px-3 py-2.5 text-[13px] leading-relaxed"
         onBlur={() => flush(draftRef.current)}
       />
     </div>
@@ -228,11 +425,16 @@ const PLAN_ROW_H = 20;
  * tooltip 列出当天全部计划与纪念日。
  */
 export function CalendarWidget({
+  accent,
   onContentHeight,
 }: {
+  /** 主题键（V48）：见 [`CALENDAR_THEMES`] —— 对日历格来说 `accent` 就是「主题」 */
+  accent?: GridAccent;
   /** 上报「内容自然高度」（逻辑像素）；父级据此把盒子调到刚好装下 */
   onContentHeight?: (naturalHeight: number) => void;
 }): React.JSX.Element {
+  /** 主题（V48）：整套换色，而不是只换一层底 */
+  const theme = calendarTheme(accent);
   const [todos, setTodos] = useState<Todo[]>([]);
   const [anniversaries, setAnniversaries] = useState<readonly Anniversary[]>([]);
   const [selected, setSelected] = useState(() => startOfDay(Date.now()));
@@ -386,24 +588,24 @@ export function CalendarWidget({
     <div
       ref={rootRef}
       // overflow-hidden + 子元素全部 auto 高度 = scrollHeight 量得到「自然高度」
-      className="flex h-full min-h-0 flex-col gap-1.5 overflow-hidden p-2 text-neutral-100"
+      className={`flex h-full min-h-0 flex-col gap-1.5 overflow-hidden rounded-lg p-1 ${theme.shell}`}
       onMouseDown={(event) => event.stopPropagation()}
     >
       <div className="flex shrink-0 items-center gap-1">
-        <CalendarDays className="h-3.5 w-3.5 opacity-70" />
-        <span className="text-[12px] font-semibold [text-shadow:0_1px_2px_rgba(0,0,0,0.7)]">
+        <CalendarDays className="h-4 w-4 opacity-70" />
+        <span className="text-[13px] font-semibold">
           {view.year} 年 {view.month + 1} 月
         </span>
-        <span className="rounded bg-white/15 px-1 py-px text-[9px] font-medium">
+        <span className="rounded bg-black/10 px-1 py-px text-[10px] font-medium">
           {gz.ganZhi}年 · 属{gz.zodiac}
         </span>
         <button
           type="button"
           title="上个月"
           onClick={() => shiftMonth(-1)}
-          className="ml-auto rounded p-0.5 opacity-75 transition hover:bg-white/20 hover:opacity-100"
+          className={`ml-auto rounded p-0.5 opacity-75 transition hover:opacity-100 ${theme.hover}`}
         >
-          <ChevronLeft className="h-3.5 w-3.5" />
+          <ChevronLeft className="h-4 w-4" />
         </button>
         <button
           type="button"
@@ -414,7 +616,7 @@ export function CalendarWidget({
             setView({ year: now.getFullYear(), month: now.getMonth() });
             setSelected(parts);
           }}
-          className="rounded px-1 py-px text-[10px] font-medium opacity-75 transition hover:bg-white/20 hover:opacity-100"
+          className={`rounded px-1 py-px text-[11px] font-medium opacity-75 transition hover:opacity-100 ${theme.hover}`}
         >
           今天
         </button>
@@ -422,20 +624,33 @@ export function CalendarWidget({
           type="button"
           title="下个月"
           onClick={() => shiftMonth(1)}
-          className="rounded p-0.5 opacity-75 transition hover:bg-white/20 hover:opacity-100"
+          className={`rounded p-0.5 opacity-75 transition hover:opacity-100 ${theme.hover}`}
         >
-          <ChevronRight className="h-3.5 w-3.5" />
+          <ChevronRight className="h-4 w-4" />
         </button>
       </div>
 
+      {/* —— 月历（V48：**正方形日期格**） ——
+          用户原话：「貌似日期格子宽度太宽都在浪费快速空间，反而让日历格子左右不均衡，
+          正常不应该每个字是正方形更好看吗」。
+          V47 及以前是 `grid-cols-7` 撑满整条盒子宽度，盒子一宽（360px）单格就变成
+          约 48×30 的扁矩形 —— 横向浪费、纵向挤，左右还因为标题行而显得不齐。
+          现在给每格 `aspect-square`：日期格永远是正方形。
+
+          **V62：去掉 `max-w-[288px]`。** 那个上限是当年「日历格子」时代留下的 ——
+          盒子被用户拉到 460 宽，日历本体却只占 288，多出来的全是两侧留白（09-19
+          「日历这里总宽度没有收回来」）。但工作台是**固定 400 宽**的常驻列，不存在
+          「被拉宽」这回事；限宽反而把日期格锁死在 41px、字号压到 12px，正是用户
+          09-21 说的「日历等都不清晰」。现在网格随卡片宽度自适应（400 → 每格约 54px）。 */}
       <div className="shrink-0">
-        <div className="grid grid-cols-7 text-center text-[10px] font-medium opacity-55">
-          {WEEKDAYS.map((day) => (
-            <span key={day}>{day}</span>
-          ))}
-        </div>
-        <div className="mt-0.5 grid grid-cols-7 gap-px">
-          {cells.map((dayMs) => {
+        <div className="mx-auto w-full">
+          <div className={`grid grid-cols-7 text-center text-[11px] font-medium ${theme.week}`}>
+            {WEEKDAYS.map((day) => (
+              <span key={day}>{day}</span>
+            ))}
+          </div>
+          <div className="mt-0.5 grid grid-cols-7 gap-px">
+            {cells.map((dayMs) => {
             const date = new Date(dayMs);
             const inMonth = date.getMonth() === view.month && date.getFullYear() === view.year;
             const meta = dayMeta.get(dayMs);
@@ -472,50 +687,50 @@ export function CalendarWidget({
                 type="button"
                 title={tooltip}
                 onClick={() => setSelected(dayMs)}
-                className={`relative flex flex-col items-center rounded-md px-0.5 py-1 leading-none transition ${
-                  isSelected
-                    ? 'bg-sky-500 font-semibold text-white shadow-sm'
-                    : isToday
-                      ? 'bg-white/[0.07] ring-1 ring-inset ring-sky-400/80'
-                      : 'hover:bg-white/15'
-                } ${inMonth ? '' : 'opacity-30'}`}
+                // `aspect-square`（V48）：不管盒子多宽，日期格永远是正方形（用户要求）
+                className={`relative flex aspect-square flex-col items-center justify-start rounded-md px-0.5 py-0.5 leading-none transition ${
+                  isSelected ? theme.selected : isToday ? theme.today : theme.hover
+                } ${inMonth ? '' : 'opacity-35'}`}
               >
-                {/* 第 1 行：公历日 + 休/班角标（贴在右上角，字号比 V34 大一档） */}
+                {/* 第 1 行：公历日（V48：改成与格子同宽的方阵里居中，字号随方块走；
+                    V62 随工作台加宽 12 → 13px） */}
                 <span
-                  className={`text-[12px] font-medium tabular-nums ${
-                    isSelected ? 'text-white' : isOff ? 'text-red-300' : ''
+                  className={`text-[13px] font-medium tabular-nums ${
+                    isSelected ? '' : isOff ? theme.festival : ''
                   }`}
                 >
                   {date.getDate()}
                 </span>
-                {/* 第 2 行：农历 / 节气 / 节日 */}
+                {/* 第 2 行：农历 / 节气 / 节日（V62：9 → 10px，在 54px 的方格里才站稳） */}
                 <span
-                  className={`mt-0.5 w-full truncate text-center text-[9px] leading-none ${
+                  className={`mt-0.5 w-full truncate text-center text-[10px] leading-none ${
                     isSelected
-                      ? 'text-white/85'
+                      ? 'opacity-85'
                       : festival !== null
-                        ? 'font-medium text-red-300'
+                        ? `font-medium ${theme.festival}`
                         : term !== null
-                          ? 'font-medium text-sky-300'
-                          : 'opacity-60'
+                          ? 'font-medium opacity-90'
+                          : theme.sub
                   }`}
                 >
                   {meta?.info.badge ?? ''}
                 </span>
                 {/* 第 3 行：**标记行** —— 计划（琥珀点，一个点代表有、两个代表 3 条以上）
-                    与生日纪念日（蛋糕粉标）；放在专属一行才看得清，不再和休/班挤角落。 */}
-                <span className="mt-0.5 flex h-[7px] items-center justify-center gap-0.5">
+                    与生日纪念日（蛋糕粉标）；放在专属一行才看得清，不再和休/班挤角落。
+                    V62：点 4→5px、蛋糕 7→9px —— 日期格变大后原来那点显得太小、看不清
+                    「这天到底有没有事」。 */}
+                <span className="mt-auto flex h-[9px] items-center justify-center gap-0.5">
                   {pending > 0 ? (
                     <>
                       <span
-                        className={`h-[4px] w-[4px] rounded-full ${
-                          isSelected ? 'bg-white' : 'bg-amber-300'
+                        className={`h-[5px] w-[5px] rounded-full ${
+                          isSelected ? 'bg-white' : 'bg-amber-500'
                         }`}
                       />
                       {pending > 2 ? (
                         <span
-                          className={`h-[4px] w-[4px] rounded-full ${
-                            isSelected ? 'bg-white/70' : 'bg-amber-300/70'
+                          className={`h-[5px] w-[5px] rounded-full ${
+                            isSelected ? 'bg-white/70' : 'bg-amber-500/60'
                           }`}
                         />
                       ) : null}
@@ -523,20 +738,16 @@ export function CalendarWidget({
                   ) : null}
                   {marks.length > 0 ? (
                     <Cake
-                      className={`h-[7px] w-[7px] ${isSelected ? 'text-white' : 'text-pink-400'}`}
+                      className={`h-[9px] w-[9px] ${isSelected ? 'text-white' : 'text-pink-500'}`}
                       strokeWidth={2.5}
                     />
                   ) : null}
                 </span>
-                {/* 休 / 班：右上角小方标 */}
+                {/* 休 / 班：右上角小方标（V62：8 → 9px，随日期格一起放大） */}
                 {isOff || isMakeup ? (
                   <span
-                    className={`absolute right-0 top-0 rounded-sm px-[3px] text-[8px] font-medium leading-[10px] ${
-                      isSelected
-                        ? 'bg-white/25 text-white'
-                        : isOff
-                          ? 'bg-red-500/35 text-red-200'
-                          : 'bg-white/25 text-neutral-200'
+                    className={`absolute right-0 top-0 rounded-sm px-[3px] text-[9px] font-medium leading-[11px] ${
+                      isSelected ? 'bg-black/25 text-white' : isOff ? theme.badgeOff : theme.badgeMakeup
                     }`}
                   >
                     {isOff ? '休' : '班'}
@@ -545,11 +756,12 @@ export function CalendarWidget({
               </button>
             );
           })}
+          </div>
         </div>
       </div>
 
       {nextHolidays.length > 0 ? (
-        <p className="shrink-0 text-[10px] opacity-60">
+        <p className={`shrink-0 text-[11px] ${theme.sub}`}>
           {nextHolidays[0]!.inDays === 0
             ? `正在放「${nextHolidays[0]!.name}」`
             : `下个假期：${nextHolidays[0]!.name}（${nextHolidays[0]!.inDays} 天后 · ${nextHolidays[0]!.days} 天）`}
@@ -557,7 +769,7 @@ export function CalendarWidget({
       ) : null}
 
       <div className="shrink-0">
-        <p className="mb-0.5 text-[10px] font-medium opacity-70">
+        <p className={`mb-0.5 text-[11px] font-medium ${theme.sub}`}>
           {dayLabel(selected)}
           {isSameDay(selected, todayMs) ? '（今天）' : ''} 的计划
         </p>
@@ -571,38 +783,36 @@ export function CalendarWidget({
               }
             }}
             placeholder={`给 ${dayLabel(selected)} 加一条计划`}
-            className="min-w-0 flex-1 rounded bg-white/15 px-1.5 py-1 text-[11px] text-neutral-100 outline-none ring-1 ring-white/10 placeholder:text-neutral-300/60 focus:ring-sky-400/70"
+            className={`min-w-0 flex-1 rounded px-1.5 py-1.5 text-[12px] outline-none ${theme.input}`}
           />
           <button
             type="button"
             title="添加计划"
             onClick={add}
-            className="shrink-0 rounded p-1 opacity-80 transition hover:bg-white/20 hover:opacity-100"
+            className={`shrink-0 rounded p-1 opacity-80 transition hover:opacity-100 ${theme.hover}`}
           >
-            <Plus className="h-3.5 w-3.5" />
+            <Plus className="h-4 w-4" />
           </button>
         </div>
       </div>
 
       {/* 计划清单：**不做滚动容器**（不做 flex-1 / overflow-auto）—— 让父级按自然
           高度把盒子撑开；真的超出屏幕上限时才由父级兜底裁切。 */}
-      <div className="shrink-0 space-y-0.5">
+      <div className={`shrink-0 space-y-0.5 border-t pt-1 ${theme.divider}`}>
         {rows.length === 0 ? (
-          <p className="py-2 text-center text-[10px] opacity-50">这一天没有计划，轻松一下</p>
+          <p className={`py-2 text-center text-[11px] ${theme.sub}`}>这一天没有计划，轻松一下</p>
         ) : (
           rows.map((todo) => (
             <div
               key={todo.id}
               onClick={() => toggle(todo)}
               style={{ minHeight: PLAN_ROW_H }}
-              className="group flex cursor-pointer items-center gap-1.5 rounded px-1 py-0.5 text-[11px] leading-tight transition hover:bg-white/15"
+              className={`group flex cursor-pointer items-center gap-1.5 rounded px-1 py-0.5 text-[12px] leading-tight transition ${theme.rowHover}`}
               title={todo.detail.trim().length > 0 ? todo.detail : `${todo.title}（点击完成）`}
             >
               <span
-                className={`flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border text-[8px] transition ${
-                  todo.done
-                    ? 'border-sky-300/80 bg-sky-400/40 text-white'
-                    : 'border-white/50 group-hover:border-sky-300'
+                className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border text-[9px] transition ${
+                  todo.done ? 'border-sky-500/70 bg-sky-500/40 text-white' : 'border-current opacity-60'
                 }`}
               >
                 {todo.done ? '✓' : ''}
@@ -612,8 +822,8 @@ export function CalendarWidget({
               </span>
               {todo.priority >= 2 ? (
                 <span
-                  className={`shrink-0 rounded px-1 text-[9px] ${
-                    todo.priority === 3 ? 'bg-red-500/70' : 'bg-amber-500/70'
+                  className={`shrink-0 rounded px-1 text-[10px] text-white ${
+                    todo.priority === 3 ? 'bg-red-500/80' : 'bg-amber-500/80'
                   }`}
                 >
                   {todo.priority === 3 ? '紧急' : '重要'}

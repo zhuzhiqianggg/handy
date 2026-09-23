@@ -14,7 +14,17 @@ import { RichMarkdown } from '@/components/RichMarkdown';
  * 生产包里它会随主 chunk 之外按需加载，**不影响正常用户路径**。
  */
 export default function RichMarkdownDemo(): React.JSX.Element {
-  const [markdown, setMarkdown] = useState<string>('');
+  // `?md=<百分号编码的 markdown>` 直接灌一份初值。
+  //
+  // 为什么必须能灌初值：真机上便签的内容是从 SQLite 读回来、走
+  // `root.innerHTML = renderMarkdown(value)` **挂载**进去的 —— 那条路与「用户一个字一个字
+  // 敲出来」的路完全不同（前者产出的 `<code>` 以 `\n` 收尾，后者不会）。
+  // 自动化脚本若只把 innerHTML 直接抄进去，就绕过了 React 与挂载 effect，
+  // 等于测了个假场景（V68 的「回车换行自己消失」正是挂在挂载那条路上）。
+  const [markdown, setMarkdown] = useState<string>(() => {
+    const raw: string | null = new URLSearchParams(window.location.search).get('md');
+    return raw ?? '';
+  });
 
   return (
     <div className="mx-auto flex h-screen max-w-2xl flex-col gap-4 p-8">

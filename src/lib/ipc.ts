@@ -2,14 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { isTauri } from '@/platform/detect';
 import { diagLog } from '@/lib/diag';
 import type { PlatformInfo } from '@/types/platform';
-import type {
-  OrganizerApplyReport,
-  OrganizerPlan,
-  OrganizerPlanItem,
-  OrganizerRules,
-  OrganizerScanResult,
-  OrganizerUndoReport,
-} from '@/types/organizer';
+import type { OrganizerScanResult } from '@/types/organizer';
 import type { BackupReport, ImportOutcome } from '@/types/backup';
 import type {
   AutoArrangeReport,
@@ -126,26 +119,14 @@ export const ipc = {
   openNoteWindow: (noteId: string): Promise<string> =>
     call<string>('open_note_window', { noteId }),
 
-  // —— 桌面整理（M2 / V12）——
+  // —— 桌面整理（M2 / V12；V48 起只剩只读扫描）——
+  //
+  // preview / apply / undo / list_plans 已删除：桌面整理不移动用户文件。
+  // 见 `src-tauri/src/commands/organizer.rs` 头部说明。
 
-  /** 枚举桌面条目（dir 缺省 = 用户真实桌面；显式目录仅供测试 / 自定义场景） */
+  /** 枚举桌面条目（只读；dir 缺省 = 用户真实桌面，显式目录仅供测试 / 自定义场景） */
   organizerScanDesktop: (dir?: string): Promise<OrganizerScanResult> =>
     call<OrganizerScanResult>('organizer_scan_desktop', { dir: dir ?? null }),
-  /** 按规则生成整理计划（只算不搬；dir 缺省 = 用户真实桌面） */
-  organizerPreviewPlan: (rules: OrganizerRules, dir?: string): Promise<OrganizerPlan> =>
-    call<OrganizerPlan>('organizer_preview_plan', { rules, dir: dir ?? null }),
-  /** 前端勾选排除后回写计划条目（仅 applied=0 的计划可改） */
-  organizerUpdatePlanItems: (planId: string, items: OrganizerPlanItem[]): Promise<OrganizerPlan> =>
-    call<OrganizerPlan>('organizer_update_plan_items', { planId, items }),
-  /** 执行移动（前端二次确认后调用；Rust 侧再校验 applied=0） */
-  organizerApply: (planId: string): Promise<OrganizerApplyReport> =>
-    call<OrganizerApplyReport>('organizer_apply', { planId }),
-  /** 逆序撤销已应用计划 */
-  organizerUndo: (planId: string): Promise<OrganizerUndoReport> =>
-    call<OrganizerUndoReport>('organizer_undo', { planId }),
-  /** 历史计划列表（含 applied / undone 状态） */
-  organizerListPlans: (): Promise<OrganizerPlan[]> =>
-    call<OrganizerPlan[]>('organizer_list_plans'),
 
   // —— 设置中心 / 备份（M7 / V13）——
 
@@ -210,6 +191,7 @@ export const ipc = {
       width: input.width ?? null,
       height: input.height ?? null,
       sort: input.sort ?? null,
+      manual: input.manual ?? null,
     }),
   gridTakeoverGet: (): Promise<TakeoverState> => call<TakeoverState>('grid_takeover_get'),
   /**
@@ -245,6 +227,14 @@ export const ipc = {
    * （32,32）上，正好压住左侧「不整理」竖条那条禁区。
    */
   gridRelayout: (): Promise<void> => call<void>('grid_relayout'),
+  /**
+   * **重新重置整理**（V48）：按「便签一列 / 日志一大列 / 收纳两列」全量重排。
+   *
+   * 与 `gridRelayout` / 一键归类的区别是口径：那两条是**增量补齐**（用户摆好的格子不动），
+   * 这条会覆盖用户手动调整过的位置 —— 用户原话「除非后面用户重新重置整理，
+   * 我们又按照我们自己的规律整理」。
+   */
+  gridLayoutReset: (): Promise<void> => call<void>('grid_layout_reset'),
   /** 导出当前桌面布局快照（备份用；只含几何与路径引用，不含文件内容） */
   gridLayoutExport: (): Promise<GridLayout> => call<GridLayout>('grid_layout_export'),
   /** 从布局快照还原（替换式：先清空现有格子，再按快照重建） */
@@ -304,6 +294,18 @@ export const ipc = {
   gridOverlayHide: (): Promise<void> => call<void>('grid_overlay_hide'),
   /** 查询挂件层**真实状态**（唯一真相来源：窗口本身，而非前端局部 state） */
   gridOverlayStatus: (): Promise<OverlayStatus> => call<OverlayStatus>('grid_overlay_status'),
+  /**
+   * 取走（并清空）待办的**桌面背景右键菜单动作**（V60）。
+   *
+   * Rust 侧把菜单点下的动作入队（`new-box` / `new-note` / `arrange` / `toggle-notes`）
+   * **并且**向挂件窗发一次唤醒事件。前端两处都调本方法：
+   *   · 挂载时 —— 兜住冷启动那条路（`handy.exe --new-box` 时事件早于前端监听发出，必丢）；
+   *   · 收到 `handy://desktop-action` 唤醒时 —— 热路径的即时响应。
+   *
+   * 因为「取」是 `take()` 语义，两条路都走通也不会重复执行 —— 拿到 `null` 就什么都不做。
+   */
+  gridTakePendingAction: (): Promise<string | null> =>
+    call<string | null>('grid_take_pending_action'),
   /** 打开条目原文件（Rust 侧 shell 插件 open；本地路径不受前端 open 作用域限制） */
   gridOpenPath: (path: string): Promise<void> => call<void>('grid_open_path', { path }),
   /** 在资源管理器中定位该文件（V41 条目右键「打开文件位置」，explorer /select） */
@@ -312,11 +314,15 @@ export const ipc = {
    * 弹出**系统原生右键菜单**（V43）。
    *
    * 接管桌面之后原生图标被隐藏，右键落到了我们的挂件窗上 —— 这个方法把 Shell 的原生
-   * 菜单（打开 / 打开方式 / 发送到 / 复制 / 删除 / 重命名 / 属性 + 第三方扩展项）原样
+   * 菜单（打开 / 打开方式 / 发送到 / 剪切 / 复制 / 删除 / 属性 + 第三方扩展项）原样
    * 弹出来，`path` 对应的对象由 Shell 自己操作。坐标不用传：菜单出现在光标处。
+   *
+   * `extended`（V58）：true = Shift + 右键 的原生扩展菜单（`CMF_EXTENDEDVERBS`），
+   * 会多出「在此处打开 PowerShell 窗口」这类项。**Shift 是系统的语义，别抢** ——
+   * Handy 自己的条目菜单改用 Ctrl + 右键。
    */
-  shellContextMenu: (path: string): Promise<void> =>
-    call<void>('shell_context_menu', { path }),
+  shellContextMenu: (path: string, extended = false): Promise<void> =>
+    call<void>('shell_context_menu', { path, extended }),
   /** 左侧「未归类」竖条当前状态（V42）：几何 + 分几列 + 条目；width=0 表示没有条目 */
   gridLooseList: (): Promise<LooseArea> => call<LooseArea>('grid_loose_list'),
   /** 提取文件/文件夹的系统真实图标（RGBA base64）；失败或不支持返回 null */

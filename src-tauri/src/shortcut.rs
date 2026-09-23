@@ -15,7 +15,6 @@ use tauri_plugin_global_shortcut::{
 };
 use tauri_plugin_store::StoreExt;
 
-use crate::window;
 
 /// 快捷键呼出事件名（前端 `useHotkeyOpen` 监听）。
 pub const HOTKEY_OPEN_EVENT: &str = "handy://hotkey-open";
@@ -44,10 +43,12 @@ fn now_ms() -> i64 {
 /// 快捷键触发回调（首次注册与重注册共用）。
 fn on_hotkey_pressed(app: &AppHandle, _shortcut: &Shortcut, event: ShortcutEvent) {
     if event.state() == ShortcutState::Pressed {
-        // 切换主面板显隐
-        if let Err(err) = window::toggle_main_palette(app) {
-            eprintln!("[Handy] 快捷键切换主窗失败：{err}");
-        }
+        // V63：全局快捷键呼出的是**桌面右侧面板**，不是独立主窗口（用户：「工具线弹出框
+        // 就够了吧」）。面板的开关状态只有前端知道，所以这里只派发「切换」动作。
+        crate::commands::grid::dispatch_panel_action(
+            app,
+            crate::commands::grid::PANEL_ACTION_TOGGLE_TOOLS,
+        );
         // 广播事件，供前端聚焦并清空搜索框
         let _ = app.emit(HOTKEY_OPEN_EVENT, serde_json::json!({ "at": now_ms() }));
     }

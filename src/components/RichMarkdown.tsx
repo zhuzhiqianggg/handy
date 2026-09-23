@@ -65,8 +65,32 @@ import '@/styles/markdown.css';
  *
  * 1. **只有一行** —— 浏览器在 `<pre>` 里按回车默认会**跑出代码块**（另起一个
  *    `<div>`），于是代码块永远只有一行。现在回车改为**手工插入 `\n` 文本节点**
- *    留在块内；在「末行本来就是空行」时按回车才跳出（与三引号收尾的习惯一致），
- *    `Esc` 也随时可跳出。
+ *    留在块内；`Esc` 随时可跳出，块尾空行上**连按两下回车**才收尾（V67 收紧，
+ *    见下）。
+ *
+ * # V67：便签里「回车不能换行」的两个真根因（用户 09-22 附截图）
+ *
+ * 用户原话「便签中的 markdown 编辑器有问题 …… 不能回车只能写一行，而且样式很丑」。
+ * 用 `agent-browser` 真实按键复现（把库里那份 ```` ```shell ```` 内容按挂载态造出来），
+ * 两条独立病根：
+ *
+ * 1. **换行插在了「上一行的行尾」而不是「下一行的行首」。** 旧写法
+ *    `range.insertNode(createTextNode('\n'))` 之后 DOM 是 `T["AB"] + T["\n"]`、
+ *    光标停在第二个节点的开头 —— 浏览器把「独立 `\n` 节点开头」当成上一行的行尾，
+ *    接着敲的字符**全被插到换行之前**，屏上永远只有一行。
+ *    ⇒ 改成把 `\n` **就地写进光标所在的那个文本节点**（光标挂在元素上时先锚一颗
+ *    `ZWSP` 把光标规范化进文本节点），同节点内的偏移不会有歧义。
+ *    → [`insertNewlineInPre`]
+ * 2. **「末行是空行就收尾跳出」这条规则把第一下回车也吃掉了。** 从库里读回来的
+ *    代码块内容本身就以 `\n` 收尾（围栏的常态），于是用户坐下敲的**第一下**回车就被
+ *    判成收尾：不换行、还把那个 `\n` 删掉、并把光标扔到块外的空段落里 ——
+ *    「写着写着跑到框外面」。
+ *    ⇒ 收紧为「块尾**连着两个**换行 + 光标在块尾」才收尾（连按两下回车），
+ *      单次回车**永远只换行**。→ [`handlePreEnter`] 规则 ②
+ *
+ * 顺带修好：[`handlePreEnter`] 规则 ① 的语言名判据从「块里不能有换行」放宽为
+ * 「块里只剩一行非空内容且那行是语言名」—— 否则「``` ⏎ shell ⏎」这条 V21 习惯
+ * 永远不生效（第一次回车已经把 `\n` 带进块里了）。
  * 2. **没有语言** —— 围栏规则从只认裸 ``` ``` ``` 扩展为 ```` ```lang ````，
  *    语言记在 `pre.dataset.lang`；顺手支持「先起块、再敲 `shell` 回车」的写法
  *    （仅当该词是**内置高亮语言**时才认，避免把一行 `ls` 吃掉）。
@@ -142,6 +166,10 @@ interface BlockRule {
 
 const BLOCK_RULES: readonly BlockRule[] = [
   { re: /^(#{1,6})\s$/, kind: 'h' },
+  // 分割线：独占一行的 `---` / `***` / `___`（连字符 / 星号 / 下划线三连及以上）。
+  // 渲染侧 `markdown.ts` 的 `normalizeHorizontalRules` 早就把 `---` 落成 `<hr>`，这里只补
+  // 「输入期转换」—— 用户敲完第三个 `-` 当场看到一条线，而不是等到下次重渲染。
+  { re: /^\s{0,3}(-{3,}|\*{3,}|_{3,})\s*$/, kind: 'hr' },
   // 围栏代码块：裸 ``` ``` ``` 与带语言的 ```` ```shell ```` 都认；语言由捕获组带出
   { re: /^```([A-Za-z0-9+#._-]*)$/, kind: 'pre' },
   { re: /^>\s$/, kind: 'quote' },
@@ -281,6 +309,108 @@ function stripZwsp(value: string): string {
 }
 
 /**
+ * 零宽锚点在**可见文本**里的插入位（V68）。
+ *
+ * `ZWSP` 不占可见宽度，所以它只记「插在第几个可见字符之前」；文本末尾的锚点记成 `text.length`
+ * 之后那位（= 可见长度）。
+ *
+ * 用途：高亮要重建 `pre > code` 的 `innerHTML`，而重建只能喂**剥掉锚点**的纯文本 ——
+ * 于是锚点必须先在重建前记下来、重建后按位塞回去（[`reapplyZwsp`]）。
+ */
+function zwspOffsets(text: string): number[] {
+  const out: number[] = [];
+  let visible = 0;
+  for (const ch of text) {
+    if (ch === ZWSP) {
+      out.push(visible);
+    } else {
+      visible += 1;
+    }
+  }
+  return out;
+}
+
+/**
+ * 把零宽锚点按偏移表塞回一段（刚被重建过的）DOM（V68）。
+ *
+ * ⚠️ **这是「代码块换行不会自己消失」的命门**，别删。
+ *
+ * 真机症状（用户 09-22）：「markdown code 里面我有时候回车换行，自己又删除换行到上一行后面了」。
+ * 根因链：
+ *   ① 代码块里回车 → `insertNewlineInPre` 往光标所在文本节点写 `\n` + 一颗 `ZWSP`，
+ *      光标落在 `ZWSP` 之后 —— 那一行"空的第二行"其实是**靠这颗 ZWSP 撑着的**；
+ *   ② 输入停下 400ms（`HIGHLIGHT_DEBOUNCE_MS`）→ `applyHighlight` 重建 `codeEl.innerHTML`，
+ *      而它喂进去的是 `stripZwsp(textContent)` —— **锚点全被抹掉**；
+ *   ③ 于是节点变成以 `\n` 收尾：那一行不显示了、光标也被并回上一行 → 用户看到的就是
+ *      「换行自己没了，字跑到上一行后面」。
+ *
+ * 高亮本身必须保留（用户要的就是所见即所得），所以解法不是「编辑期别重建」，而是
+ * **重建完把锚点按原位置塞回去**：`ZWSP` 零宽，塞回去不影响任何可见文本与高亮 token。
+ *
+ * @param root 刚被重建 innerHTML 的元素（`pre > code`）
+ * @param offsets [`zwspOffsets`] 在**重建前**记录下来的偏移表
+ */
+function reapplyZwsp(root: HTMLElement, offsets: number[]): void {
+  if (offsets.length === 0) {
+    return;
+  }
+  const walker: TreeWalker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let pending = 0;
+  let seen = 0;
+  let node: Node | null = walker.nextNode();
+  while (node !== null) {
+    const text: string = (node as Text).nodeValue ?? '';
+    let out = '';
+    for (const ch of text) {
+      while (pending < offsets.length && offsets[pending] === seen) {
+        out += ZWSP;
+        pending += 1;
+      }
+      out += ch;
+      seen += 1;
+    }
+    // 末尾锚点（`offsets` 里等于可见总长的那几位）要落在最后一个节点之后
+    while (pending < offsets.length && offsets[pending] === seen) {
+      out += ZWSP;
+      pending += 1;
+    }
+    if (out !== text) {
+      (node as Text).nodeValue = out;
+    }
+    node = walker.nextNode();
+  }
+}
+
+/**
+ * 给每个「以换行收尾」的代码块补一颗**尾锚**（V68）。
+ *
+ * 为什么还要单独补：挂载 / 外部换值时走的是 `root.innerHTML = renderMarkdown(value)`，
+ * 那条路不经过 [`reapplyZwsp`]，而 `marked` 产出的 `<code>` 内容就是**以 `\n` 收尾**的
+ * （markdown 围栏的天然形状）。少了尾锚，用户点到最后一行末尾接着敲，字就被并回上一行 ——
+ * 与「回车换行自己消失」是同一个病、同一条根因。
+ */
+function ensureTrailingZwsp(root: HTMLElement): void {
+  const pres: NodeListOf<HTMLElement> = root.querySelectorAll<HTMLElement>('pre');
+  pres.forEach((pre: HTMLElement): void => {
+    const codeEl: HTMLElement = ensureCodeChild(pre);
+    const text: string = codeEl.textContent ?? '';
+    if (!text.endsWith('\n')) {
+      return;
+    }
+    const last: Node | null = codeEl.lastChild;
+    if (
+      last !== null &&
+      last.nodeType === Node.TEXT_NODE &&
+      (last.nodeValue ?? '').endsWith(ZWSP)
+    ) {
+      return;
+    }
+    // 最后一个子节点是元素（高亮后的 `<span>`）也没关系：尾锚接在它后面同样管用
+    codeEl.appendChild(document.createTextNode(ZWSP));
+  });
+}
+
+/**
  * 造一个「自带零宽种子」的空块。
  *
  * 直接给空元素 `placeCaretAtEnd` 是没用的：空块里没有文本节点，Chrome 的选区
@@ -345,11 +475,36 @@ function caretOffsetIn(scope: HTMLElement): number | null {
 }
 
 /**
- * 把光标放回 `scope` 内的第 `offset` 个可见字符处（高亮重建后调用）。
+ * 光标是不是正待在 `scope` 内容的**最末尾**（折叠选区、且后面再无任何内容）。
+ *
+ * 用途：判定「代码块收尾」（见 `handlePreEnter` 规则 ②）。少了这道检查，
+ * 光标停在代码块中间、而块**尾部**恰好是空行时，按回车会把用户从块里踢出去。
+ */
+function caretAtEndOf(scope: HTMLElement): boolean {
+  const selection: Selection | null = window.getSelection();
+  if (!selection || selection.rangeCount === 0 || !selection.isCollapsed) {
+    return false;
+  }
+  const range: Range = selection.getRangeAt(0);
+  if (!scope.contains(range.startContainer)) {
+    return false;
+  }
+  const probe: Range = document.createRange();
+  probe.selectNodeContents(scope);
+  probe.setStart(range.startContainer, range.startOffset);
+  return stripZwsp(probe.toString()) === '';
+}
+
+/**
+ * 把光标放回 `scope` 内的第 `offset` 个**可见**字符处（高亮重建后调用）。
  *
  * 边界情况（偏移 0 或等于总长）不能直接落在已有文本节点里 —— 浏览器会按
  * 「紧邻前一个行内元素」延续样式，接着敲的字就染成上一个 token 的颜色。
  * 这两种情况一律插一颗 `ZWSP` 哨兵再落光标（与 `convertInline` 同一套办法）。
+ *
+ * ⚠️ V68：计数必须**跳过零宽锚点**。以前重建后的 DOM 里从来没有 `ZWSP`，所以「节点长度」
+ * 与「可见长度」恰好相等；现在重建后会把锚点按位塞回去（[`reapplyZwsp`]），两个长度不再相等，
+ * 再按节点长度算就会**把光标整体推偏**（真机上表现为「回车插到了行首、文本倒着长」）。
  */
 function restoreCaretIn(scope: HTMLElement, offset: number): void {
   const selection: Selection | null = window.getSelection();
@@ -377,13 +532,24 @@ function restoreCaretIn(scope: HTMLElement, offset: number): void {
   let last: Text | null = null;
   while (node) {
     const text: Text = node as Text;
-    const length: number = (text.nodeValue ?? '').length;
+    const cells: string[] = Array.from(text.nodeValue ?? '');
     last = text;
-    if (remaining <= length) {
-      place(text, remaining);
+    let visible = 0;
+    let at = -1;
+    for (let i = 0; i <= cells.length; i += 1) {
+      if (visible === remaining) {
+        at = i;
+        break;
+      }
+      if (i < cells.length && cells[i] !== ZWSP) {
+        visible += 1;
+      }
+    }
+    if (at >= 0) {
+      place(text, at);
       return;
     }
-    remaining -= length;
+    remaining -= visible;
     node = walker.nextNode();
   }
 
@@ -632,18 +798,34 @@ export function RichMarkdown({
     const pres: HTMLElement[] = Array.from(root.querySelectorAll<HTMLElement>('pre'));
     pres.forEach((pre: HTMLElement): void => {
       const codeEl: HTMLElement = ensureCodeChild(pre);
-      const raw: string = stripZwsp(codeEl.textContent ?? '');
+      const text: string = codeEl.textContent ?? '';
+      const raw: string = stripZwsp(text);
       const lang: string = fenceLangOf(pre, codeEl);
-      const key = `${lang}\u0000${raw}`;
+      // ★ V68：重建前先把零宽锚点记账 —— `innerHTML` 一重建它们就全没了，
+      // 而「回车换出来的那个空行」正是靠锚点撑着的（见 [`reapplyZwsp`] 的长注释）。
+      // 另外给「以换行收尾」的块补一颗尾锚：光标停在末尾时不会被并回上一行。
+      const anchors: number[] = zwspOffsets(text);
+      if (raw.endsWith('\n') && !anchors.includes(raw.length)) {
+        anchors.push(raw.length);
+      }
+      // 锚点也要进指纹：只变锚点、不变文本时同样需要重建（否则空行照样丢）
+      const key = `${lang}\u0000${raw}\u0000${anchors.join(',')}`;
       if (highlightedKeys.get(pre) === key) {
         return;
       }
       highlightedKeys.set(pre, key);
       if (!isSupportedLang(lang) || raw.trim() === '') {
+        // 不做高亮 ⇒ 不重建 ⇒ 锚点原样还在，**绝不能**在这里再塞一遍（会翻倍）
         return;
       }
       const offset: number | null = caretOffsetIn(pre);
       codeEl.innerHTML = highlightCodeHtml(raw, lang);
+      // ⚠️ 顺序不能换：**先补锚点、再落光标**。
+      //
+      // [`reapplyZwsp`] 靠改 `Text.nodeValue` 插锚点，而 Chrome 在改这个属性时会把**落在该
+      // 文本节点内的选区**归零 —— 光标当场跳到行首。真机上就是「回车换行跑到最前面、
+      // 文字倒着长」。所以锚点必须在光标落定**之前**塞完，让最后一步是 `restoreCaretIn`。
+      reapplyZwsp(codeEl, anchors);
       if (offset !== null) {
         restoreCaretIn(codeEl, offset);
       }
@@ -677,6 +859,9 @@ export function RichMarkdown({
       return;
     }
     root.innerHTML = renderMarkdown(value);
+    // V68：`marked` 产出的 `<code>` 内容天然**以 `\n` 收尾** ⇒ 先补尾锚再上色，
+    // 否则光标落到最后一行末尾接着敲，字会被并回上一行（见 [`ensureTrailingZwsp`]）。
+    ensureTrailingZwsp(root);
     setEmpty(isVisuallyEmpty(root));
     applyHighlight();
     // 仅初始化执行一次：后续同步由 value 变更的 effect 负责
@@ -696,6 +881,7 @@ export function RichMarkdown({
       return;
     }
     root.innerHTML = renderMarkdown(value);
+    ensureTrailingZwsp(root);
     setEmpty(isVisuallyEmpty(root));
     applyHighlight();
   }, [value, applyHighlight]);
@@ -758,24 +944,34 @@ export function RichMarkdown({
   // 围栏代码块：换行 / 认语言 / 跳出
   // ————————————————————————————————————————————————————————————
 
-  /** 光标所在的直接块（`root` 的孩子）；不在编辑器里返回 null */
-  const blockAtCaret = useCallback((): HTMLElement | null => {
+  /**
+   * 光标所在的围栏代码块（不在代码块里返回 null）。
+   *
+   * 从光标**向上走到根**，沿途只要碰到 `<pre>` 就认 —— 不再用 `directBlockOf`
+   * 只看 `root` 的**直接孩子**（V64 修正）。旧写法下，代码块一旦被嵌进
+   * `<li>` / `<blockquote>`（例如用户在列表项里写 ``` ``` `），`directBlockOf` 返回的是
+   * 外层 `<li>` / `<blockquote>` 而非 `<pre>`，`preAtCaret` 拿到 `null`，于是回车走浏览器
+   * 默认行为「跑出代码块另起一个 `<div>`」，代码块永远只有一行。现在沿祖先链找 `<pre>`，
+   * 嵌多深都认得出来。
+   */
+  const preAtCaret = useCallback((): HTMLElement | null => {
     const root = rootRef.current;
     const selection: Selection | null = window.getSelection();
     if (!root || !selection || selection.rangeCount === 0) {
       return null;
     }
-    return directBlockOf(root, selection.getRangeAt(0).startContainer);
-  }, []);
-
-  /** 光标所在的围栏代码块（不在代码块里返回 null） */
-  const preAtCaret = useCallback((): HTMLElement | null => {
-    const block: HTMLElement | null = blockAtCaret();
-    if (!block) {
-      return null;
+    let current: Node | null = selection.getRangeAt(0).startContainer;
+    while (current && current !== root) {
+      if (
+        current.nodeType === Node.ELEMENT_NODE &&
+        (current as HTMLElement).tagName.toLowerCase() === 'pre'
+      ) {
+        return current as HTMLElement;
+      }
+      current = current.parentNode;
     }
-    return block.tagName.toLowerCase() === 'pre' ? block : null;
-  }, [blockAtCaret]);
+    return null;
+  }, []);
 
   /**
    * 在光标处插入一个**真实换行**。
@@ -783,6 +979,24 @@ export function RichMarkdown({
    * 不用 `<br>`、也不用 `execCommand('insertLineBreak')` —— 前者在
    * `textContent` 里不产出 `\n`，序列化后代码块就还是「一行的」。
    * 这里直接落一个含 `\n` 的文本节点，markdown 与渲染两侧都一致。
+   *
+   * # ⚠️ 为什么必须写进**光标自己那个文本节点**，而不能另插一个新节点（V67 修）
+   *
+   * 用户 09-22 报「便签里不能回车，只能写一行」。实测（`agent-browser` 真实按键）：
+   * 原来 `range.insertNode(createTextNode('\n'))` 之后 DOM 是
+   * `T["AB"] + T["\n"] + T[""]`、光标停在**第二个节点**里；看着没错，但浏览器下一次
+   * `insertText` 会把字符**放回第一个节点**——
+   *
+   * ```
+   * 敲 C 之后： T["ABC"] + T["\n"]      → 文本 "ABC\n" → 屏上仍然只有一行
+   * ```
+   *
+   * 因为「落在独立 `\n` 节点开头」这个位置对 Chrome 来说等价于「上一行的行尾」，
+   * 于是新字符全被插到换行**之前**，用户看到的就是「回车没用、只能写一行」。
+   *
+   * 现在改成把 `\n` **就地插进光标所在的文本节点**（`before + '\n' + after`），
+   * 光标落在**同一个节点**的 `offset + 1`：同节点内的偏移不会有歧义，后续输入必然
+   * 落在换行**之后**，新行这才真的成立。
    */
   const insertNewlineInPre = useCallback((): void => {
     const selection: Selection | null = window.getSelection();
@@ -791,10 +1005,29 @@ export function RichMarkdown({
     }
     const range: Range = selection.getRangeAt(0);
     range.deleteContents();
-    const newline: Text = document.createTextNode('\n');
-    range.insertNode(newline);
+    let node: Node = range.startContainer;
+    let offset: number = range.startOffset;
+    if (node.nodeType !== Node.TEXT_NODE) {
+      // 光标挂在**元素**上（块还是空的、里面只有一颗种子或什么都没有）——
+      // 这里不能直接 `insertNode('\n')`：那样光标会停在「独立 `\n` 节点的开头」，
+      // 对浏览器来说等价于「上一行的行尾」，接着敲的字全被插到换行**之前**
+      // （正是本函数注释里说的那个坑，实测「``` ⏎ shell」里 shell 会跑回第一行）。
+      // 先锚一颗零宽哨兵把光标**规范化进文本节点**，后面两类光标就只有一条路径。
+      // 必须用 `ZWSP` 而不是空串：空文本节点会被浏览器在选区规范化时回收（坑 ②）。
+      const anchor: Text = document.createTextNode(ZWSP);
+      range.insertNode(anchor);
+      node = anchor;
+      offset = ZWSP.length;
+    }
+    const value: string = node.nodeValue ?? '';
+    // `\n` 之后**必须补一颗零宽锚点**并把光标放到它后面（V67 实测）：
+    // 文本节点以 `\n` 收尾时，Chrome 会把「节点末尾」这个位置判成**上一行的行尾**，
+    // 于是紧接着敲的字被插到换行**之前** —— 表现就是「回车没用、两行粘成一行」。
+    // 有了一颗零宽字符垫在换行后面，「行尾」这个歧义就不存在了；序列化与高亮两侧
+    // 都会把 `ZWSP` 剥掉（`stripZwsp`），不进 Markdown、不进高亮结果。
+    node.nodeValue = `${value.slice(0, offset)}\n${ZWSP}${value.slice(offset)}`;
     const after: Range = document.createRange();
-    after.setStart(newline, 1);
+    after.setStart(node, offset + 1 + ZWSP.length);
     after.collapse(true);
     selection.removeAllRanges();
     selection.addRange(after);
@@ -813,30 +1046,64 @@ export function RichMarkdown({
   );
 
   /**
+   * 「上一次对代码块的操作，就是我们自己插的那次换行」。
+   *
+   * 收尾判据（规则 ②）用它，而不是去看「文本末尾是不是空行」—— 后者会把**从库里读回来的
+   * 代码块**误判成「用户刚换过行」（围栏内容的末尾本来就带 `\n`），于是用户坐下敲的
+   * 第一下回车就被当成收尾。见下面规则 ② 的说明。
+   */
+  const pendingBreakRef = useRef<boolean>(false);
+
+  /**
    * 代码块里按回车的三种去向：
-   *   ① 首行是**内置高亮语言名** → 认成围栏语言并清空内容（```` ```sh ⏎ ```` 的写法）；
-   *   ② 末行本来就是空行 → 收尾跳出（三引号写法的直觉）；
+   *   ① 块里**只有一行有内容、且那行是内置高亮语言名** → 认成围栏语言并清空内容
+   *      （```` ```sh ⏎ ```` 与「先起块、再敲语言名回车」两种写法都算）；
+   *   ② 光标停在块尾的空行上、且**上一步就是我们插的那次换行** → 收尾跳出
+   *      （＝连按两下回车，三引号写法的直觉；V67 收紧）；
    *   ③ 其余情况 → 插一个真实换行，留在代码块里继续写。
    */
   const handlePreEnter = useCallback(
     (pre: HTMLElement, shift: boolean): void => {
       const codeEl: HTMLElement = ensureCodeChild(pre);
       const text: string = stripZwsp(codeEl.textContent ?? '');
-      const token: string = text.trim();
-      if (!shift && text.indexOf('\n') < 0 && isSupportedLang(token)) {
-        pre.dataset.lang = normalizeLang(token);
+      // ① 语言名（V67 放宽判据）：把每行 trim 后丢掉空行，**只剩一行**且那行是内置语言就认。
+      //    旧判据是「块里不能有换行」，而用户按「``` ⏎ shell ⏎」的节奏写时，第一次回车
+      //    已经把光标带到第二行、块里必然带着一个 `\n` —— 于是那条 V21 习惯其实一直是坏的
+      //    （实测：`shell` 反而被当成普通代码留在块里）。
+      //    `isSupportedLang` 继续把普通文字挡在外面：`ls`、一行中文都不会被吃掉。
+      const named: string[] = text
+        .split('\n')
+        .map((line: string) => line.trim())
+        .filter((line: string) => line !== '');
+      const onlyLine: string = named[0] ?? '';
+      if (!shift && named.length === 1 && isSupportedLang(onlyLine)) {
+        pre.dataset.lang = normalizeLang(onlyLine);
         codeEl.textContent = ZWSP;
         placeCaretAtEnd(codeEl);
         emit();
         return;
       }
       const lastBreak: number = text.lastIndexOf('\n');
-      if (!shift && lastBreak >= 0 && text.slice(lastBreak + 1).trim() === '') {
+      // ② 收尾跳出：光标就在**块尾**的空行上，而且**上一步操作就是我们插的那次换行**
+      //    —— 也就是「写完一行，连按两下回车」，与「三引号写法」的直觉一致。
+      //
+      // ⚠️⚠️ V67 修（这条是用户那句「不能回车、只能写一行」的直接病因）。旧判据只看
+      // 「末行是不是空的」。可**从库里读回来的代码块**内容本身就以 `\n` 收尾（markdown
+      // 围栏的常态），于是用户坐下敲的**第一下**回车就被判成收尾：它不但不换行，还顺手
+      // 把那个 `\n` 删掉（`replace(/\n+$/,'')`）、把光标扔到块外的空段落里 —— 用户看到的
+      // 就是「回车没反应 / 写着写着跑到框外面」（09-22 便签 6 那份 ```` ```shell ````）。
+      // 改成看 `pendingBreakRef` 之后：**只有连着两下回车**才收尾，单次回车永远只换行。
+      const blankTail: boolean =
+        !shift && lastBreak >= 0 && text.endsWith('\n') && caretAtEndOf(codeEl) &&
+        pendingBreakRef.current;
+      if (blankTail) {
         codeEl.textContent = text.replace(/\n+$/, '');
+        pendingBreakRef.current = false;
         exitPre(pre);
         return;
       }
       insertNewlineInPre();
+      pendingBreakRef.current = true;
       emit();
     },
     [emit, exitPre, insertNewlineInPre],
@@ -911,6 +1178,8 @@ export function RichMarkdown({
     let replacement: HTMLElement;
     /** 光标最终要落进去的元素（列表是 `li`、代码块是 `code`） */
     let caretTarget: HTMLElement;
+    /** 替换块之后还要追加的兄弟块（如分割线后面的空段落），无则 null */
+    let afterBlock: HTMLElement | null = null;
     switch (rule.kind) {
       case 'h': {
         const level: number = marker.trim().length;
@@ -957,17 +1226,32 @@ export function RichMarkdown({
         caretTarget = li;
         break;
       }
+      case 'hr': {
+        // 分隔线后面补一个空段落，光标落进去接着写下一行
+        // （否则分割线后没有可落光标的文本节点，紧接着敲的字没处去）
+        replacement = document.createElement('hr');
+        const afterP: HTMLElement = document.createElement('div');
+        afterP.appendChild(document.createElement('br'));
+        afterBlock = afterP;
+        caretTarget = afterP;
+        break;
+      }
       default:
         return false;
     }
 
     block.replaceWith(replacement);
+    if (afterBlock) {
+      replacement.after(afterBlock);
+    }
     placeCaretAtEnd(caretTarget);
     return true;
   }, []);
 
   /** 输入事件：先清空壳，再尝试两类转换，最后同步内容出去 */
   const handleInput = useCallback((): void => {
+    // 用户真的打字/粘贴了 → 「上一步是我们插的换行」这个前提失效，收尾判据作废
+    pendingBreakRef.current = false;
     // 代码块内部一律按裸文本处理：不做行内 / 块级转换，
     // 否则一段代码只要恰好长得像标记（例如整块就是一个 `- `）就会被「吃掉」。
     if (preAtCaret() === null) {
@@ -981,6 +1265,11 @@ export function RichMarkdown({
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>): void => {
+      // 不是回车的任何按键（退格 / 方向键 / 打字）都意味着「上一次换行之后用户动过手」，
+      // 于是「连按两下回车收尾」的前提不成立 → 作废。见 `pendingBreakRef`。
+      if (event.key !== 'Enter') {
+        pendingBreakRef.current = false;
+      }
       if (singleLine && event.key === 'Enter') {
         event.preventDefault();
         onEnter?.();
@@ -1053,7 +1342,12 @@ export function RichMarkdown({
   );
 
   return (
-    <div className={cn('relative min-h-0', className)}>
+    // V64：外层是**一根 flex 列**。以前它是普通块级容器，`h-full` 在父容器高度为 auto
+    // 时会退化成 auto —— 于是空内容（或只有一行）时编辑区就只有一行高，鼠标划过下面
+    // 是默认箭头、点下去也不落光标（用户 09-21：「便签整个内容区域鼠标应该都变成光标
+    // 形状，而不是只有顶部一行才能变成光标输入形状」）。改成 flex 列、内层 `flex-1`
+    // 之后，父容器给了高度的地方编辑区就撑满（便签纸），没给的地方仍按内容走。
+    <div className={cn('relative flex min-h-0 flex-col', className)}>
       <div
         ref={rootRef}
         role="textbox"
@@ -1079,12 +1373,19 @@ export function RichMarkdown({
         className={cn(
           // `h-full` 在父容器高度为 auto 时自然退化为 auto（内容撑开），
           // 父容器有确定高度（如笔记正文）时则撑满并自行滚动 —— 一套样式两种场景通吃。
-          'md-preview wysiwyg scrollbar-thin h-full min-h-0 overflow-auto outline-none',
+          // V64：`flex-1` 让它跟着 flex 列父容器撑满（同一豆腐块的每个角落都是 I-beam）；
+          // 保留 `h-full` 是为了那些父容器**不是** flex、但给了确定高度的场合
+          // （`NotesPanel` 的 `h-full`、`NoteWindow` 的 `flex-1`）—— 两条路取其一，谁生效都行。
+          // `cursor-text`：即使光标下面没有文字（空行 / 大片留白）也显示工字光标。
+          'md-preview wysiwyg scrollbar-thin h-full min-h-0 flex-1 cursor-text overflow-auto outline-none',
           readOnly && 'pointer-events-none',
         )}
       />
       {empty && placeholder !== '' && (
-        <span className="pointer-events-none absolute left-0 top-0 select-none text-muted-foreground/60">
+        <span className={cn(
+          'pointer-events-none absolute left-0 top-0 w-full select-none text-muted-foreground/50',
+          className,
+        )}>
           {placeholder}
         </span>
       )}

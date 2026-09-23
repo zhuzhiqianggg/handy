@@ -434,27 +434,70 @@ function ModuleToggles(): React.JSX.Element {
  * （Pro 门控灰化）、历史记录、备份（导出 / 导入）、
  * 以及各模块经扩展点 `settings.section` 贡献的分区与「关于」。
  */
-export function SettingsCenter(): React.JSX.Element {
+export interface SettingsCenterProps {
+  /**
+   * 内嵌模式（V63）：作为**桌面右侧面板的一个页签**渲染，而不是主窗口的一整页。
+   *
+   * `true` 时不画自己的 header（返回箭头 + 「设置」标题）—— 面板顶栏已经有页签和
+   * 关闭按钮，再来一个「返回到命令面板」会把用户带去一个不该再出现的界面。
+   */
+  embedded?: boolean;
+  /**
+   * 打开后**直接定位到某一项**（V63，用户：「快捷键设置直接弹出工具箱弹窗」）。
+   *
+   * 只有 `'hotkey'` 一种取值：把快捷键那一行提到最上面并高亮，省得在一长串设置里翻。
+   */
+  focus?: 'hotkey' | null;
+}
+
+export function SettingsCenter({
+  embedded = false,
+  focus = null,
+}: SettingsCenterProps = {}): React.JSX.Element {
   const showPalette = useAppStore((state) => state.showPalette);
   const theme = useAppStore((state) => state.settings.theme);
   const setTheme = useAppStore((state) => state.setTheme);
   const sections = React.useMemo(() => registry.settingsSections(), []);
   const { isPro } = useLicense();
+  const hotkeyRef = React.useRef<HTMLElement | null>(null);
 
   // 设置面板内也应用主题（首帧一致）
   useTheme();
 
+  // 「快捷键」直达：滚到那一行并让高亮先亮一下（高亮本身由下方 ring 表达）
+  React.useEffect(() => {
+    if (focus === 'hotkey') {
+      hotkeyRef.current?.scrollIntoView({ block: 'center' });
+    }
+  }, [focus]);
+
   return (
     <div className="flex h-full flex-col">
-      <header className="flex items-center gap-3 px-4 py-3">
-        <Button variant="ghost" size="icon" aria-label="返回" onClick={showPalette}>
-          <ArrowLeft className="h-4 w-4" />
-        </Button>
-        <h2 className="text-sm font-semibold text-foreground">设置</h2>
-      </header>
-      <Separator />
+      {embedded ? null : (
+        <>
+          <header className="flex items-center gap-3 px-4 py-3">
+            <Button variant="ghost" size="icon" aria-label="返回" onClick={showPalette}>
+              <ArrowLeft className="h-4 w-4" />
+            </Button>
+            <h2 className="text-sm font-semibold text-foreground">设置</h2>
+          </header>
+          <Separator />
+        </>
+      )}
 
       <div className="min-h-0 flex-1 scrollbar-thin overflow-auto px-4 py-2">
+        {/* 快捷键（仅 `focus='hotkey'` 时提前到最前并高亮 —— 用户从「快捷键」入口进来
+            要的就是这一行，不该让他自己在「通用」里找） */}
+        {focus === 'hotkey' ? (
+          <section
+            ref={hotkeyRef}
+            className="my-2 rounded-lg bg-sky-400/10 px-3 py-1 ring-2 ring-sky-400/60"
+          >
+            <h3 className="py-1 text-xs font-medium text-muted-foreground">快捷键</h3>
+            <HotkeyRow />
+          </section>
+        ) : null}
+
         {/* 通用 */}
         <section className="py-2">
           <h3 className="py-1 text-xs font-medium text-muted-foreground">通用</h3>
@@ -472,7 +515,7 @@ export function SettingsCenter(): React.JSX.Element {
               </SelectContent>
             </Select>
           </Row>
-          <HotkeyRow />
+          {focus === 'hotkey' ? null : <HotkeyRow />}
           <AutoLaunchRow />
           <BooleanRow
             title="关闭窗口时最小化到托盘"

@@ -161,6 +161,50 @@ ALTER TABLE grid_boxes ADD COLUMN category TEXT NOT NULL DEFAULT '';
 DELETE FROM grid_items;
 ";
 
+/// v10：格子「手工摆放」标记（`manual`）—— 收纳列对齐的前提（V50）。
+///
+/// 用户 09-19 原话：「便签一个独立的列，因为他的宽度不一样，不要跟格子挤在一起影响整理
+/// 美观」+「你自己看图片继续重构结构并优化吧」。
+///
+/// V49 及以前，普通整理（Fill）会原样保留一切「不重叠、不越界」的格子 —— 于是真机库里
+/// 残留着**上一版算法算出来的死坐标**：`安装包 (397,320)` / `图片 (386,462)` 既不在当前
+/// 列网格上（与 707 那条列差 40px，肉眼一眼就看歪了），又被当成障碍物，把后来要摆的格子
+/// 一路往下顶（真机 18:52 日志：「空间不足 2 个」，两个格子被顶到 y>912 的屏幕外）。
+///
+/// V50 起区分归属：
+///   · `manual = 0`（引擎摆的）→ 每次整理都按当前列网格**重新对齐**（列网格 = 由挂件带
+///     左沿与可用宽度算出的等宽列，见 `content_columns`）；
+///   · `manual = 1`（用户自己拖过 / 拉过）→ 原地不动，只要不重叠、不越界、不进挂件带。
+///
+/// 前端在 `persistBoxGeometry`（拖拽 / 缩放落库）里显式带 `manual: true`；
+/// 「重新重置整理」会把全表 `manual` 清回 0 —— 对应的正是用户那句
+/// 「除非后面用户重新重置整理，我们又按照我们自己的规律整理」。
+pub const V10_GRID_MANUAL: &str = "
+ALTER TABLE grid_boxes ADD COLUMN manual INTEGER NOT NULL DEFAULT 0;
+";
+
+/// v11：**日历盒子退场** —— 日历并进常驻「工作台」浮窗（V60）。
+///
+/// 用户 09-21：「日历可以修改为工作台，把快捷入口这些都可以整合到工作台里面，整合成一个
+/// 整体的模块」「工作台这个可以常驻，不跟桌面整理一起退出」。
+///
+/// 于是 `kind = 'calendar'` 的盒子不再由任何产品路径创建，前端也不再渲染它 —— 留着的话
+/// 它会继续占着布局引擎里一条**固定 320 宽的竖列**（`widget_natural_width` 的返回值），
+/// 白白把收纳区挤窄一块；而用户既看不见也点不动它（没有渲染就没有命中区）。
+///
+/// **不丢任何用户数据**：日历盒子不参与条目登记（`is_content_kind("calendar") == false`），
+/// 它承载的「今日计划」在 `todos` 表里、与盒子无关；主题（`accent`）在 V60 随工作台一起
+/// 走前端本地配置。这里的 `DELETE grid_items` 只是防御 —— 正常库里日历盒子本来就没有条目
+/// （`grid_items.box_id` 虽声明了 `ON DELETE CASCADE`，但 SQLite 的外键约束默认不生效，
+/// 所以显式删一遍，绝不留下悬挂行）。
+///
+/// 引擎对 `calendar` kind 的几何支持**刻意保留**（`flow_placer_tests` 仍覆盖它）：
+/// 万一用户从旧备份恢复出一个含日历盒子的库，布局不会因为遇到未知 kind 而错乱。
+pub const V11_GRID_DROP_CALENDAR: &str = "
+DELETE FROM grid_items WHERE box_id IN (SELECT id FROM grid_boxes WHERE kind = 'calendar');
+DELETE FROM grid_boxes WHERE kind = 'calendar';
+";
+
 /// 全部迁移：(版本号, SQL)。新增结构在**末尾追加**；移除历史结构可追加 DROP 迁移。
 pub const MIGRATIONS: &[(i64, &str)] = &[
     (1, V1_SCHEMA),
@@ -172,6 +216,8 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
     (7, V7_DROP_SYSTEM_BOX),
     (8, V8_GRID_ACCENT),
     (9, V9_GRID_CATEGORY),
+    (10, V10_GRID_MANUAL),
+    (11, V11_GRID_DROP_CALENDAR),
 ];
 
 /// 当前毫秒时间戳（用于 `applied_at`）。
@@ -321,6 +367,62 @@ mod tests {
             .query_row("SELECT accent FROM grid_boxes LIMIT 1", [], |row| row.get(0))
             .expect("accent 读回失败（很可能是 NULL）");
         assert_eq!(accent, "", "accent 缺省值必须是空串");
+
+        drop(conn);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// **V11**：日历盒子退场 —— 升级后 `kind = 'calendar'` 的行必须整行消失，
+    /// 而 `folder` / `note` 的格子与登记一格不动（迁移只该精确命中日历）。
+    ///
+    /// 用户 09-21：「日历可以修改为工作台」—— 日历并进常驻浮窗后，盒子里那行留着只会
+    /// 继续占着布局引擎里一条**固定 320 宽的竖列**，把收纳区白白挤窄一块。
+    #[test]
+    fn upgrading_drops_calendar_boxes_only() {
+        let (path, conn) = temp_conn("drop-calendar");
+        apply_upto(&conn, 10);
+        // 老库现场：三种 kind 各一个；日历盒子名下**故意**塞一条登记，验防御性清理
+        // （正常库里日历盒子没有条目 —— 它不参与登记）。
+        conn.execute_batch(
+            "INSERT INTO grid_boxes (name, kind, pos_x, pos_y, width, height, sort, created_at, updated_at) \
+             VALUES ('日历 · 今日计划', 'calendar', 1355, 32, 320, 503, 0, 'x', 'x'), \
+                    ('文档', 'folder', 341, 32, 320, 178, 1, 'x', 'x'), \
+                    ('便签', 'note', 1071, 32, 260, 120, 2, 'x', 'x'); \
+             INSERT INTO grid_items (box_id, file_path, display_name, sort, created_at) \
+             SELECT id, 'C:/t/a.txt', 'a', 0, 'x' FROM grid_boxes WHERE kind = 'calendar'; \
+             INSERT INTO grid_items (box_id, file_path, display_name, sort, created_at) \
+             SELECT id, 'C:/t/b.txt', 'b', 0, 'x' FROM grid_boxes WHERE kind = 'folder';",
+        )
+        .expect("构造老库失败");
+
+        run(&conn).expect("升级失败");
+
+        let kinds: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT kind FROM grid_boxes ORDER BY sort ASC")
+                .expect("读取 kind 失败");
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .expect("读取 kind 失败");
+            rows.map(|r| r.expect("kind 行读取失败")).collect()
+        };
+        assert_eq!(
+            kinds,
+            vec!["folder".to_string(), "note".to_string()],
+            "日历盒子必须整行消失，其余的 kind 一个都不许少"
+        );
+        let orphan: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM grid_items WHERE box_id NOT IN (SELECT id FROM grid_boxes)",
+                [],
+                |row| row.get(0),
+            )
+            .expect("统计悬挂登记失败");
+        assert_eq!(orphan, 0, "日历盒子名下的登记必须一并清掉（SQLite 外键默认不生效）");
+        let kept: i64 = conn
+            .query_row("SELECT COUNT(*) FROM grid_items", [], |row| row.get(0))
+            .expect("统计登记失败");
+        assert_eq!(kept, 1, "非日历格子的登记一个都不许动");
 
         drop(conn);
         let _ = std::fs::remove_file(path);

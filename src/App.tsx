@@ -112,8 +112,18 @@ const App: FC<AppProps> = ({ windowRoot = 'main', noteId }) => {
   }
 
   // 桌面网格挂件透明窗（grid）：全窗即挂件画布，点击穿透/交互切换由 Rust 光标轮询协同
+  //
+  // V63：这里也要挂 `ReminderScheduler`。它原本只在主窗口里，而主窗口从 V44 起就不
+  // 再自启、V63 起连托盘入口也改成了面板 —— 等于「待办提醒永远不会响」。挂件窗是
+  // **常驻**的（收起整理也只收内容不关窗），且调度器自己返回 `null`（无 UI、直接读库、
+  // 靠 `reminded` 去重），挂在这里既不多个界面，也不重复提醒。
   if (windowRoot === 'grid-overlay') {
-    return <GridOverlay />;
+    return (
+      <>
+        <ReminderScheduler />
+        <GridOverlay />
+      </>
+    );
   }
 
   // 工作台顶部贴条：常驻桌面顶部的一行今日概览（无边框 / 透明 / 置顶）

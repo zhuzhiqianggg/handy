@@ -21,13 +21,19 @@ export interface ModuleSidebarProps {
  * 用户的定位是「这个工具本来就是为了方便顺手使用，其他都可以直接在桌面上实现功能，
  * 不需要一个独立的窗口打开才操作」，所以主面板只留工具箱与密码存储器，那两个模块的
  * 入口在桌面挂件层的工具栏上（命令搜索里也照旧能找到）。
+ *
+ * V50：主窗口**只留工具箱**（用户原话「主 handy 窗口感觉只要工具箱就够了，其他模块
+ * 都放桌面实现，只有工具箱才需要一个独立弹出窗口」）。工作台 / 密码箱 / 桌面整理的
+ * 完整入口都在桌面侧栏抽屉与托盘里，此处只保留 toolbox，避免主窗塞满模块又回到
+ * 「什么都要单独开个窗口」的老路。
  */
 export function ModuleSidebar({ className }: ModuleSidebarProps): React.JSX.Element {
   const view = useAppStore((state) => state.view);
   // 订阅启停映射以驱动启用模块列表重渲染
   const modulesState = useAppStore((state) => state.settings.modules);
+  // V50：主窗只保留工具箱。其他模块（工作台 / 密码箱 / 桌面整理）走桌面，不占用主窗。
   const modules = React.useMemo(
-    () => registry.enabled().filter((mod) => mod.sidebar !== false),
+    () => registry.enabled().filter((mod) => mod.sidebar !== false && mod.id === 'toolbox'),
     [modulesState],
   );
 

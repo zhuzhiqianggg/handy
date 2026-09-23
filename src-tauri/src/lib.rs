@@ -11,6 +11,109 @@ pub mod shortcut;
 pub mod tray;
 pub mod window;
 
+/// 桌面右键菜单（`platform::desktop_menu` 的注册表项）触发的动作。
+///
+/// 两条路径共用：
+///   - **冷启动**：Handy 没在跑 → `setup` 里调一次；
+///   - **已有实例**：单实例插件的回调里调一次。
+///
+/// 返回 `true` 表示「已被某个参数认领」，调用方不必再弹主窗口 —— 用户点的是那个菜单项，
+/// 要的是那个动作，不是主窗口。
+///
+/// # 为什么有些动作要「发事件」而不是就地做
+///
+/// 「新建格子」「一键整理」「显示 / 隐藏便签」这些**本来就是前端在管的状态与交互**：
+/// 格子列表、当前选中、提示条、布局落库时机都在 `GridOverlay` 手上。从 Rust 复刻一遍等于
+/// 把同一件事写两处（V59 那批 HTML5 拖放的教训：同一条判断散在六处，最后没人说得清哪一处
+/// 说了算）。所以这里只把动作**翻译成一个事件**发给常驻的挂件窗，由它按既有路径执行 ——
+/// 与 `HANDY_AUTOTOOL` 是同一种做法。
+///
+/// 反过来，「显示 / 隐藏整理层」「备份 / 还原布局」在 Rust 侧已经是完整实现
+/// （`grid::show_overlay_now` / `hide_overlay_now` / `grid_layout_*`），就地做更直接、
+/// 也少一次跨进程往返。
+pub fn handle_cli_args(app: &tauri::AppHandle, argv: &[String]) -> bool {
+    let has = |flag: &str| argv.iter().any(|arg| arg == flag);
+
+    /// 把动作交给常驻挂件窗去做 —— **入队 + 唤醒**，两件事都在
+    /// `commands::grid::dispatch_desktop_action` 里（它同时管了「冷启动事件会丢」的坑：
+    /// 前端收到唤醒后是回来取队里的那份，而不是采信事件载荷）。见 `PENDING_ACTION`。
+    fn dispatch(app: &tauri::AppHandle, action: &str) {
+        commands::grid::dispatch_desktop_action(app, action);
+    }
+
+    if has("--show-grid") {
+        println!("[Handy] 桌面右键：显示桌面整理层");
+        commands::grid::show_overlay_now(app);
+        return true;
+    }
+    if has("--hide-grid") {
+        println!("[Handy] 桌面右键：退出桌面整理");
+        commands::grid::hide_overlay_now(app);
+        return true;
+    }
+    if has("--new-box") {
+        println!("[Handy] 桌面右键：新建格子");
+        dispatch(app, "new-box");
+        return true;
+    }
+    if has("--new-note") {
+        println!("[Handy] 桌面右键：新建便签");
+        dispatch(app, "new-note");
+        return true;
+    }
+    if has("--arrange") {
+        println!("[Handy] 桌面右键：一键桌面整理");
+        dispatch(app, "arrange");
+        return true;
+    }
+    if has("--save-layout") {
+        println!("[Handy] 桌面右键：备份布局");
+        let handle = app.clone();
+        tauri::async_runtime::spawn(async move {
+            match commands::grid::grid_layout_save(handle, None).await {
+                Ok(meta) => println!("[Handy] 已备份布局：{}", meta.name),
+                Err(err) => println!("[Handy] 备份布局失败：{err}"),
+            }
+        });
+        return true;
+    }
+    if has("--restore-layout") {
+        println!("[Handy] 桌面右键：还原布局（最近一次备份）");
+        let handle = app.clone();
+        tauri::async_runtime::spawn(async move {
+            // 快照列表按保存时间倒序，取第一条即「最近一次」
+            let latest = match commands::grid::grid_layout_list(handle.clone()).await {
+                Ok(list) => list.into_iter().next(),
+                Err(err) => {
+                    println!("[Handy] 读取布局备份失败：{err}");
+                    None
+                }
+            };
+            match latest {
+                Some(meta) => {
+                    match commands::grid::grid_layout_restore(handle.clone(), meta.id).await {
+                        Ok(_) => println!("[Handy] 已还原布局：{}", meta.name),
+                        Err(err) => println!("[Handy] 还原布局失败：{err}"),
+                    }
+                }
+                None => println!("[Handy] 还没有任何布局备份 —— 先「备份布局」一次"),
+            }
+            // 还原只改坐标，用户得看见结果：把整理层叫回来（内容收起过的话这一步是必须的）
+            commands::grid::show_overlay_now(&handle);
+        });
+        return true;
+    }
+    if has("--open-settings") {
+        println!("[Handy] 桌面右键：设置中心");
+        let handle = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let _ = commands::grid::desktop_open_view(handle, "settings".to_string()).await;
+        });
+        return true;
+    }
+    false
+}
+
 /// 应用入口。
 ///
 /// 注意：`tauri-plugin-single-instance` **必须最先注册**，否则无法拦截二次启动（见 DEVELOPMENT §11）。
@@ -19,13 +122,12 @@ pub fn run() {
     tauri::Builder::default()
         // —— 单实例：必须第一个注册，拦截第二次启动并唤起已有实例 ——
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            // V45：从桌面右键菜单「打开 Handy 桌面整理」二次启动时，用户要的是把整理层
-            // 叫回来，而不是弹主窗口（该参数由 `platform::desktop_menu` 写进注册表）。
-            if argv.iter().any(|arg| arg.as_str() == "--show-grid") {
-                commands::grid::show_overlay_now(app);
-            } else {
-                let _ = window::show_main_palette(app);
+            // 桌面右键菜单触发的动作（参数由 `platform::desktop_menu` 写进注册表）。
+            // 认领了就到此为止 —— 用户要的是那个动作，不是主窗口。
+            if handle_cli_args(app, &argv) {
+                return;
             }
+            let _ = window::show_main_palette(app);
         }))
         // —— 日志 ——
         .plugin(tauri_plugin_log::Builder::new().build())
@@ -88,16 +190,17 @@ pub fn run() {
             commands::vault::vault_create,
             commands::vault::vault_update,
             commands::vault::vault_delete,
-            // —— 桌面整理（M2 / V12）——
+            // —— 桌面整理（M2 / V12；V48 起**只剩只读扫描**）——
+            // preview / apply / undo / list_plans 已删除：桌面整理不再移动用户文件，
+            // 见 `commands/organizer.rs` 头部说明。
             commands::organizer::organizer_scan_desktop,
-            commands::organizer::organizer_preview_plan,
-            commands::organizer::organizer_update_plan_items,
-            commands::organizer::organizer_apply,
-            commands::organizer::organizer_undo,
-            commands::organizer::organizer_list_plans,
             // —— 桌面网格挂件（M2 改版：文件引用型，绝不移动文件）——
             commands::grid::grid_overlay_show,
             commands::grid::grid_overlay_hide,
+            // V60：桌面背景右键菜单点下的动作（新建格子 / 新建便签 / 一键整理 / 显隐便签）。
+            // Rust 侧先入队再唤醒挂件窗，前端标记挂载时与收到唤醒时各取一次 —— 见
+            // `commands::grid::PENDING_ACTION` 的注释（冷启动时事件必丢，所以要排队兜底）。
+            commands::grid::grid_take_pending_action,
             commands::grid::grid_overlay_status,
             commands::grid::grid_set_interactive,
             commands::grid::grid_overlay_update_regions,
@@ -132,6 +235,7 @@ pub fn run() {
             // —— 桌面整理：一键整理 / 布局备份与还原（V19）——
             commands::grid::grid_auto_arrange,
             commands::grid::grid_relayout,
+            commands::grid::grid_layout_reset,
             commands::grid::grid_desktop_sync,
             commands::grid::grid_file_icon,
             // V37：历史收纳残留（预览 / 撤回桌面 / 清理）+ 桌面图标尺寸
@@ -197,12 +301,12 @@ pub fn run() {
             commands::grid::ensure_desktop_menu(app.handle());
             // 桌面格子层「永久生效」：上次显示中（含重启前就在接管）→ 本次启动自动摆回桌面
             commands::grid::restore_overlay_if_visible(app.handle());
-            // V45：从桌面右键菜单「打开 Handy 桌面整理」冷启动（`handy.exe --show-grid`）→
-            // 直接**完整显示**整理层（内容 + 工具栏），不受「上次是否收起」的偏好影响。
-            // 必须放在 `restore_overlay_if_visible` 之后：那一步可能只显示了工具栏。
-            if std::env::args().any(|arg| arg == "--show-grid") {
-                println!("[Handy] 由桌面右键菜单唤起：显示桌面整理层");
-                commands::grid::show_overlay_now(app.handle());
+            // V45+：从桌面右键菜单冷启动（`handy.exe --xxx`）→ 直接把那个动作做掉，
+            // 不受「上次是否收起」的偏好影响。必须放在 `restore_overlay_if_visible` 之后：
+            // 那一步可能只显示了工具栏。参数分派与单实例回调共用同一套（见 `handle_cli_args`）。
+            let argv: Vec<String> = std::env::args().collect();
+            if handle_cli_args(app.handle(), &argv) {
+                println!("[Handy] 由桌面右键菜单唤起");
             }
             // 主窗口启动显示（V16 修复）：`visible:false` 交给逻辑控制显隐，
             // 首启必须显式 show —— 否则窗口一直隐藏、需手动点托盘才出现（"退出再开不显示"）。

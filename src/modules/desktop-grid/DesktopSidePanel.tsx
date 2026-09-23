@@ -1,12 +1,14 @@
 import * as React from 'react';
 import {
-  AppWindow,
   ArrowLeft,
   Boxes,
   CalendarDays,
   ChevronDown,
+  Keyboard,
   Link2,
   Loader2,
+  Maximize2,
+  Minimize2,
   Plus,
   Search,
   Settings,
@@ -18,10 +20,12 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import { registry } from '@/core/moduleRegistry';
+import { SettingsCenter } from '@/components/SettingsCenter';
 import { ipc } from '@/lib/ipc';
 import { toast } from '@/components/ui/toast';
 import { searchCommands } from '@/lib/search';
 import { categoryMetaOf, orderedCategories } from '@/core/toolCategories';
+import { DOCK_EASY_TO_REACH_IDS } from '@/core/settings';
 import { resolveIcon } from '@/lib/icons';
 import { ACTION_ICONS } from '@/modules/workstation/QuickActionsRail';
 import { loadQuickLinks, type QuickLink } from '@/modules/workstation/quicklinks';
@@ -72,30 +76,52 @@ import { cn } from '@/lib/utils';
  * 不存在第二份实现。
  */
 
-/** 面板里能打开的一项：工具（命令）或模块页面 */
+/**
+ * 面板里能打开的一项：工具（命令）/ 模块页面 / 桌面快捷方式。
+ *
+ * V48 新增 `'link'`：用户 09-19 原话「桌面直接快捷键打开工具搜索列表，快捷方式可以直接
+ * 显示上」—— 面板的列表原先只认注册表里的工具与页面，桌面上的快捷方式（含 `.lnk`）
+ * 一个都搜不到，想开一个桌面上的东西还得先关面板去桌面找。现在它们与工具同列同搜。
+ */
 export interface PanelEntry {
   id: string;
   name: string;
   description: string;
-  kind: 'tool' | 'module';
+  kind: 'tool' | 'module' | 'link';
   /** 工具分类（仅工具用；列表右侧的灰标签） */
   category?: string;
   /** 图标名（走 `resolveIcon`）；缺省按 kind 兜底 */
   icon?: string;
-  load: () => Promise<{ default: React.ComponentType<Record<string, never>> }>;
+  /** 工具 / 模块：懒加载它自己的组件（快捷方式没有这一项） */
+  load?: () => Promise<{ default: React.ComponentType<Record<string, never>> }>;
+  /** 快捷方式：点一下就用系统默认程序打开（不占面板、就地走人） */
+  open?: () => Promise<void>;
 }
 
-/** 面板页签 */
-export type SidePanelTab = 'tools' | 'quick';
+/**
+ * 面板页签。
+ *
+ * V63 加 `settings`：用户 09-21 原话「快捷键设置直接弹出工具箱弹窗」—— 设置从
+ * 「主窗口里的一整页」变成**面板里的第三个页签**，桌面之外不再需要第二个界面。
+ */
+export type SidePanelTab = 'tools' | 'quick' | 'settings';
 
 export interface DesktopSidePanelProps {
   /** 打开时落在哪个页签 */
   initialTab?: SidePanelTab;
   /** 直接进入「使用模式」的那一项（如从工具栏「密码箱」带过来的） */
   initialEntry?: PanelEntry | null;
+  /** 是否铺满右侧（`false` = 默认半屏） */
+  wide: boolean;
+  /** 在「半屏 / 铺满」之间切换 */
+  onToggleWidth: () => void;
   /** 关闭面板 */
   onClose: () => void;
-  /** 快捷页签里打开一个应用入口（`module:<id>` / 命令 id / `settings`） */
+  /**
+   * 快捷页签里打开一个应用入口（`module:<id>` / 命令 id）。
+   *
+   * V63：`settings` 不再从这里走 —— 它就在本面板的「设置」页签里，不需要外抛。
+   */
   onLaunch: (target: string) => void;
   /** 打开一条用户快捷方式 */
   onOpenLink: (link: QuickLink) => void;
@@ -106,21 +132,55 @@ export interface DesktopSidePanelProps {
 /**
  * 面板外壳的定位 / 尺寸类（由 `GridOverlay` 渲染外层容器时套用）。
  *
- * - `right-[252px]`：右下角常驻着桌面工具栏（`right-5` 起、竖排四组、最宽一组是
- *   「原生图标隐藏 / 对账 / 隐藏」约 236px）。面板整体落在它**左侧**，
- *   两者永不重叠 —— V45 用的 `right-[124px]` 是按「工具栏约 92px 宽」估的，
- *   V45 加了「密码箱」按钮之后工具栏变宽，估算就失效了，面板会盖住工具栏
- *   （用户截图里「工具栏不见了」的观感来源之一）；
- * - `bottom-[92px]`：底部**居中**的 Dock 快捷条最宽可到 `60vw`，横向必然与面板相交
- *   （面板左缘在 1707px 屏上约 x=635），所以纵向必须让开它 —— Dock 高约 44px + 距底 20px，
- *   面板停在 92px 处即可。⚠️ 别因为「Dock 在中间、面板在右边」就以为不重叠：
- *   60vw 的宽度是**跨到右边的**。
+ * 尺寸按「装得下一个真实工具」定：分栏类工具（JSON 格式化 / 文本对比）左右两栏都要
+ * 撑得开，所以半屏档在 1707px 宽的桌面上是 853px（远大于 V45 那版的 620px）。
  *
- * 尺寸按「装得下一个真实工具」定：分栏类工具（JSON 格式化 / 文本对比）左右两栏
- * 都要撑得开，所以宽度下限取 820px（而不是 V45 的 620px）。
+ * 两种宽度的由来（V49）——用户原话：
+ *
+ * > 「点工具弹出来的工具框，这里可以把右边宽度全部占全了，默认占一半的桌面空间，
+ * >  后面的工具打开后的具体某个工具也有足够的操作功能，更加方便操作」
+ *
+ *   · `half`（**默认**）—— 占桌面**一半**（`50vw`）。右沿退到 `right-[448px]`
+ *     给右下角常驻的「快捷入口」格子让位（V56 起它宽 320 = 日历宽，见下方
+ *     [`sidePanelShell`]）；`calc(100vw-380px)` 是窄屏兜底 —— 50vw 有时比
+ *     「可用宽度」还大，会把面板顶到屏幕外；
+ *   · `full` —— 铺到右边缘（只留 12px 边距），分栏类工具能拉到最宽。
+ *
+ * 两档的**底边都在 `bottom-[92px]`**（底部居中的 Dock 最宽可到 60vw，横向必然与面板相交，
+ * 所以纵向必须让开它）。而工具栏的悬浮球只在最底部 44px 内 —— 铺满时那颗球照样点得到，
+ * 不会把自己关死。
  */
-export const SIDE_PANEL_SHELL =
-  'absolute right-[252px] top-4 bottom-[92px] z-40 w-[min(820px,calc(100vw-300px))]';
+export type SidePanelWidth = 'half' | 'full';
+
+/**
+ * 面板外壳（V49 建立 · V56 对齐让位距离 · V60 让位对象从「快捷入口格子」换成「工作台」）。
+ *
+ * `right-*` 是给**右侧常驻的「工作台」浮窗**让位：它是固定宽度的（V62 起 400，
+ * 见 `DesktopWorkstation` 的 `WORKSTATION_W`），贴着右边缘 32px，所以半屏档面板的右沿必须
+ * 退到 `400 + 32 + 16（留一道缝）= 448px` 之外，否则面板下半截的右边缘会被它盖住 ——
+ * 那一块正好是滚动条与最右侧按钮所在的位置，被盖住就是「点不动」。
+ *
+ * ⚠️ 铺满档是**横向盖住**工作台那一列的（`right-3 w-[calc(100vw-24px)]`），
+ * 所以它靠的不是让位而是**层级**：面板 `z-40` > 工作台 `z-[38]`。
+ * V60 之前工作台的 z 是随面板开关**动态**切的；现在改成静态阶梯（见 `DesktopWorkstation`
+ * 里那段 z 说明），`test-desktop-constants.mjs` 会把「面板 z > 工作台 z」锁住 ——
+ * 这条不能只靠「谁在 DOM 后面」，同 z 时正是 DOM 顺序说了算，而工作台排在面板之后。
+ *
+ * 用户 09-19 对宽度只提过一次要求（「默认占一半的桌面空间，后面的工具打开后的具体某个
+ * 工具也有足够的操作功能」），所以半屏档仍以 `50vw` 为准，只是把它夹在「可用宽度」内。
+ *
+ *   · `half`（**默认**）—— 占桌面一半（`50vw`），右沿让开工作台；
+ *   · `full` —— 铺到右边缘（只留 12px 边距），靠层级盖住工作台，面板是完整可用的。
+ *
+ * 两档的**底边都在 `bottom-[92px]`**（底部居中的 Dock 最宽可到 60vw，横向必然与面板相交，
+ * 所以纵向必须让开它）。
+ */
+export function sidePanelShell(width: SidePanelWidth): string {
+  const box = 'absolute top-4 bottom-[92px] z-40';
+  return width === 'full'
+    ? `${box} right-3 w-[calc(100vw-24px)]`
+    : `${box} right-[448px] w-[min(50vw,calc(100vw-460px))]`;
+}
 
 /** 把注册表里的命令 / 模块统一成面板能渲染的条目 */
 export function collectPanelEntries(): PanelEntry[] {
@@ -152,6 +212,33 @@ export function collectPanelEntries(): PanelEntry[] {
   return [...tools, ...modules];
 }
 
+/**
+ * 桌面上的快捷方式 / 未归类条目 → 面板可搜索可打开的条目（V48）。
+ *
+ * 数据来自 `grid_loose_list`（左侧「未归类」竖条那一份，Rust 扫真实桌面得出），
+ * 取其中的**快捷方式**与**用户文件**，跳过系统入口（此电脑 / 回收站 / 用户的文件
+ * —— 那些在「快捷」页签的系统入口里有更合适的入口，塞进搜索列表只会噪声）。
+ *
+ * 打开走 `grid_open_path`（ShellExecute，与桌面双击同一条路径），不移动、不复制。
+ */
+export async function loadDesktopShortcuts(): Promise<PanelEntry[]> {
+  try {
+    const area = await ipc.gridLooseList();
+    return area.items
+      .filter((entry) => !entry.isSystem)
+      .map((entry) => ({
+        id: `shortcut:${entry.path}`,
+        name: entry.name,
+        description: entry.isLnk ? '桌面快捷方式' : entry.isDir ? '桌面文件夹' : '桌面文件',
+        kind: 'link' as const,
+        open: () => ipc.gridOpenPath(entry.path),
+      }));
+  } catch {
+    // 拿不到（非 Windows / 桌面不可读）就当没有快捷方式，不影响工具搜索本身
+    return [];
+  }
+}
+
 /** 桌面「应用入口」（点一下在面板里打开，不弹窗口） */
 const APP_SHORTCUTS: ReadonlyArray<{
   target: string;
@@ -168,19 +255,38 @@ const APP_SHORTCUTS: ReadonlyArray<{
 export function DesktopSidePanel({
   initialTab = 'tools',
   initialEntry = null,
+  wide,
+  onToggleWidth,
   onClose,
   onLaunch,
   onOpenLink,
   onRemoveLink,
 }: DesktopSidePanelProps): React.JSX.Element {
   const [tab, setTab] = React.useState<SidePanelTab>(initialEntry !== null ? 'tools' : initialTab);
+  /** 「设置」页签内要直接定位的项（V63：`'hotkey'` = 一进来就停在快捷键那一行） */
+  const [settingsFocus, setSettingsFocus] = React.useState<'hotkey' | null>(null);
   const [query, setQuery] = React.useState('');
   const [active, setActive] = React.useState<PanelEntry | null>(initialEntry);
   const [View, setView] = React.useState<React.ComponentType<Record<string, never>> | null>(null);
   const [loading, setLoading] = React.useState(false);
   const inputRef = React.useRef<HTMLInputElement | null>(null);
 
-  const all = React.useMemo(collectPanelEntries, []);
+  /** 桌面快捷方式 / 未归类文件（V48）：与工具同列同搜，点一下直接打开 */
+  const [shortcuts, setShortcuts] = React.useState<PanelEntry[]>([]);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    void loadDesktopShortcuts().then((list) => {
+      if (!cancelled) {
+        setShortcuts(list);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const all = React.useMemo(() => [...collectPanelEntries(), ...shortcuts], [shortcuts]);
 
   // 落在「工具」页签且还在列表态时自动聚焦搜索框：打开面板就能直接敲
   React.useEffect(() => {
@@ -209,7 +315,12 @@ export function DesktopSidePanel({
   const grouped = React.useMemo(() => {
     const buckets = new Map<string, PanelEntry[]>();
     for (const entry of results) {
-      const key = entry.kind === 'module' ? '__modules__' : (entry.category ?? 'other');
+      const key =
+        entry.kind === 'link'
+          ? '__shortcuts__'
+          : entry.kind === 'module'
+            ? '__modules__'
+            : (entry.category ?? 'other');
       const list = buckets.get(key);
       if (list) {
         list.push(entry);
@@ -225,9 +336,13 @@ export function DesktopSidePanel({
       }
     }
     for (const [key, list] of buckets) {
-      if (categoryMetaOf(key) === undefined && key !== '__modules__') {
+      if (categoryMetaOf(key) === undefined && key !== '__modules__' && key !== '__shortcuts__') {
         ordered.push({ key, title: '其他', entries: list });
       }
+    }
+    const shortcuts = buckets.get('__shortcuts__');
+    if (shortcuts && shortcuts.length > 0) {
+      ordered.push({ key: '__shortcuts__', title: `桌面快捷方式（${shortcuts.length}）`, entries: shortcuts });
     }
     const modules = buckets.get('__modules__');
     if (modules && modules.length > 0) {
@@ -236,9 +351,29 @@ export function DesktopSidePanel({
     return ordered;
   }, [results]);
 
+  /**
+   * 选中一项：
+   *   · 快捷方式（`open`）→ 用系统默认程序打开，顺手收面板（用户要的就是「打开它」）；
+   *   · 工具 / 页面（`load`）→ 在面板里就地打开它自己的界面。
+   */
+  const pick = React.useCallback(
+    (entry: PanelEntry): void => {
+      if (entry.open !== undefined) {
+        const run = entry.open;
+        onClose();
+        void run().catch((error: unknown) =>
+          toast.error(error instanceof Error ? error.message : String(error)),
+        );
+        return;
+      }
+      setActive(entry);
+    },
+    [onClose],
+  );
+
   // 选中 → 懒加载它自己的组件（与主窗口同一条 `load` / `loadView` 契约）
   React.useEffect(() => {
-    if (active === null) {
+    if (active === null || active.load === undefined) {
       setView(null);
       return undefined;
     }
@@ -291,20 +426,16 @@ export function DesktopSidePanel({
   };
 
   /**
-   * 「在控制台打开」（V46）：收面板 → 显示主窗口并**直达**这一个工具 / 页面。
+   * 跳到「设置」页签（V63）。
    *
-   * 走 `desktop_open_view`（Rust 侧 `show_main_palette` + `handy:navigate` 事件），
-   * 与顶部贴条「打开工作台」是同一套机制 —— 视图状态每窗口各持一份（ADR-8），
-   * 挂件窗改不了主窗口的 store，只能发事件。
-   * `entry.id` 对模块是 `module:<id>`、对工具是命令 id，与那个监听的语义正好对齐。
+   * `focus` 传 `'hotkey'` 时设置页会把快捷键那一行顶到最前并高亮 —— 用户原话
+   * 「快捷键设置直接弹出工具箱弹窗」，他要的是「点一下就到快捷键」，不是「点一下
+   * 到设置，然后自己在通用里找」。
    */
-  const openInConsole = (entry: PanelEntry): void => {
-    onClose();
-    void ipc
-      .desktopOpenView(entry.id)
-      .catch((error: unknown) =>
-        toast.error(error instanceof Error ? error.message : String(error)),
-      );
+  const goSettings = (focus: 'hotkey' | null = null): void => {
+    setActive(null);
+    setSettingsFocus(focus);
+    setTab('settings');
   };
 
   return (
@@ -340,16 +471,27 @@ export function DesktopSidePanel({
             setActive(null);
           }}
         />
-        {/* V46：桌面 → 控制台的固定出口。用户原话：「工具打开还是可以直接切换 handy
-            控制台页面」——桌面负责顺手用一下，控制台负责完整界面，任何时候都能过去。 */}
+        {/* V63：设置成为面板的第三个页签（原先要开主窗口）—— 用户「其他功能我们都
+            已经在桌面上实现了…没有必要还有一个多一个界面」。 */}
+        <TabButton
+          icon={Settings}
+          label="设置"
+          tip="主题 · 快捷键 · 开机启动 · 备份还原"
+          active={tab === 'settings'}
+          onClick={() => goSettings(null)}
+        />
         <button
           type="button"
-          onClick={() => launchAndClose(() => ipc.appShowMain())}
-          title="打开 Handy 控制台（主窗口）：工作台 · 桌面整理控制台 · 全部模块的完整界面"
-          className="ml-auto flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[11px] font-medium text-neutral-300 transition hover:bg-white/10 hover:text-neutral-100"
+          onClick={onToggleWidth}
+          title={
+            wide
+              ? '收回到半屏（默认占桌面一半）'
+              : '铺满右侧 —— 分栏类工具（文本对比 / JSON）能拉到最宽'
+          }
+          className="ml-auto flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[11px] font-medium text-neutral-300 transition hover:bg-white/10 hover:text-neutral-100"
         >
-          <AppWindow className="h-3.5 w-3.5" />
-          控制台
+          {wide ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
+          {wide ? '半屏' : '铺满'}
         </button>
         <button
           type="button"
@@ -372,17 +514,18 @@ export function DesktopSidePanel({
           results={results}
           grouped={grouped}
           firstResult={results[0] ?? null}
-          onPick={setActive}
+          onPick={pick}
           onBack={() => setActive(null)}
-          onOpenConsole={openInConsole}
         />
+      ) : tab === 'settings' ? (
+        <SettingsTab focus={settingsFocus} />
       ) : (
         <QuickTab
           onLaunch={onLaunch}
           onOpenLink={onOpenLink}
           onRemoveLink={onRemoveLink}
-          onOpenSettings={() => launchAndClose(() => ipc.desktopOpenView('settings'))}
-          onOpenMain={() => launchAndClose(() => ipc.appShowMain())}
+          onOpenSettings={() => goSettings(null)}
+          onOpenHotkey={() => goSettings('hotkey')}
         />
       )}
     </div>
@@ -419,6 +562,22 @@ function TabButton({
   );
 }
 
+/**
+ * 「设置」页签（V63）：直接内嵌主窗口那一份 `SettingsCenter`，**不存在第二份实现**。
+ *
+ * 外面那层 `dark` 不是装饰：面板底色是固定的 `bg-neutral-900`，而 `SettingsCenter`
+ * 用的是语义色（`text-foreground` / `text-muted-foreground` / `bg-background`）。
+ * 系统主题是浅色时，不套这层就是**黑底黑字**，什么都看不见（Tailwind `darkMode:
+ * 'class'`，`.dark` 把整组 CSS 变量在子树里换成深色档，见 `src/index.css`）。
+ */
+function SettingsTab({ focus }: { focus: 'hotkey' | null }): React.JSX.Element {
+  return (
+    <div className="dark flex min-h-0 flex-1 flex-col overflow-hidden bg-neutral-900">
+      <SettingsCenter embedded focus={focus} />
+    </div>
+  );
+}
+
 /** 「工具」页签：搜索 + 列表，或（选中后）工具本体 */
 function ToolsTab({
   active,
@@ -432,7 +591,6 @@ function ToolsTab({
   firstResult,
   onPick,
   onBack,
-  onOpenConsole,
 }: {
   active: PanelEntry | null;
   View: React.ComponentType<Record<string, never>> | null;
@@ -445,31 +603,45 @@ function ToolsTab({
   firstResult: PanelEntry | null;
   onPick: (entry: PanelEntry) => void;
   onBack: () => void;
-  onOpenConsole: (entry: PanelEntry) => void;
 }): React.JSX.Element {
   if (active !== null) {
+    const Icon =
+      active.kind === 'link'
+        ? Link2
+        : active.icon !== undefined
+          ? resolveIcon(active.icon)
+          : active.kind === 'module'
+            ? Boxes
+            : Wrench;
     return (
       <>
-        <div className="flex items-center gap-2 border-b border-white/10 px-2.5 py-2">
+        {/* V50：选中工具后的顶部条重新分区（用户 09-19：「图4 这个工具框样式很乱很奇
+            怪」）。原来「返回 / 名称 / 控制台」挤在一行，名称没图标、工具本体又直接从
+            `bg-neutral-950` 开始，视觉上没有“这是哪个工具”的锚点。改为：图标徽标 + 名称
+            （大）+ 描述（小）占左侧，右侧只有返回；「在控制台打开」沉到工具本体右上角，
+            需要更大空间时才显眼地出现。 */}
+        <div className="flex items-center gap-2 border-b border-white/10 px-3 py-2.5">
           <button
             type="button"
             onClick={onBack}
-            className="flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-[12px] text-neutral-300 transition hover:bg-white/10 hover:text-neutral-100"
+            title="返回工具列表（Esc）"
+            className="shrink-0 rounded-full border border-white/10 bg-white/5 p-1.5 text-neutral-300 transition hover:border-white/25 hover:bg-white/10 hover:text-neutral-100"
           >
             <ArrowLeft className="h-3.5 w-3.5" />
-            返回
           </button>
-          <span className="min-w-0 flex-1 truncate text-[13px] font-medium">{active.name}</span>
-          {/* V46：工具窗的固定出口 —— 需要更大空间 / 完整界面时去控制台，不必先关面板。 */}
-          <button
-            type="button"
-            onClick={() => onOpenConsole(active)}
-            title={`在 Handy 控制台打开「${active.name}」（完整界面）`}
-            className="flex shrink-0 items-center gap-1.5 rounded-md border border-white/10 bg-white/5 px-2 py-1 text-[12px] text-neutral-200 transition hover:border-sky-400/40 hover:bg-white/10 hover:text-sky-200"
-          >
-            <AppWindow className="h-3.5 w-3.5" />
-            在控制台打开
-          </button>
+          <span className="shrink-0 rounded-lg bg-sky-400/15 p-1.5 text-sky-200">
+            <Icon className="h-4 w-4" />
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="block truncate text-[13px] font-semibold text-neutral-100">
+              {active.name}
+            </span>
+            <span className="block truncate text-[11px] text-neutral-400">
+              {active.description}
+            </span>
+          </span>
+          {/* V63 删掉了这里的「打开完整版」按钮：它做的正是用户不要的那件事 ——
+              为了同一个工具再弹一个独立窗口。工具本体就在下面这块里，已经完整。 */}
         </div>
         {/* V46：工具本体底**必须不透明** —— 工具自己只画内容，不再叠在半透明玻璃上 */}
         <div className="min-h-0 flex-1 overflow-auto bg-neutral-950">
@@ -501,7 +673,7 @@ function ToolsTab({
               onPick(firstResult);
             }
           }}
-          placeholder="搜索工具 / 页面（名称、拼音首字母都行）…"
+          placeholder="搜索工具 / 页面 / 桌面快捷方式（名称、拼音首字母都行）…"
           className="min-w-0 flex-1 bg-transparent text-[13px] text-neutral-100 outline-none placeholder:text-neutral-500"
         />
         <span className="shrink-0 text-[11px] text-neutral-500">{results.length}</span>
@@ -524,7 +696,7 @@ function ToolsTab({
             ))}
       </div>
       <p className="border-t border-white/10 px-3.5 py-2 text-[11px] text-neutral-500">
-        回车打开第一项 · 工具就在这块面板里用，需要更大空间点标题栏「在控制台打开」
+        回车打开第一项 · 在这里实心面板里顺手用；要更多空间 / 完整界面，点右上「在控制台打开」
       </p>
     </>
   );
@@ -539,12 +711,19 @@ function EntryRow({
   onPick: (entry: PanelEntry) => void;
 }): React.JSX.Element {
   const Icon =
-    entry.icon !== undefined ? resolveIcon(entry.icon) : entry.kind === 'module' ? Boxes : Wrench;
+    entry.kind === 'link'
+      ? Link2
+      : entry.icon !== undefined
+        ? resolveIcon(entry.icon)
+        : entry.kind === 'module'
+          ? Boxes
+          : Wrench;
   const category = entry.kind === 'tool' ? categoryMetaOf(entry.category) : undefined;
   return (
     <button
       type="button"
       onClick={() => onPick(entry)}
+      title={entry.description}
       className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left transition hover:bg-white/10"
     >
       <span className="shrink-0 rounded-md bg-white/10 p-2 text-neutral-200">
@@ -554,11 +733,15 @@ function EntryRow({
         <span className="block truncate text-[13px] font-medium">{entry.name}</span>
         <span className="block truncate text-[11px] text-neutral-400">{entry.description}</span>
       </span>
-      {category !== undefined && (
+      {entry.kind === 'link' ? (
+        <span className="shrink-0 rounded bg-white/5 px-1.5 py-0.5 text-[10px] text-neutral-400">
+          打开
+        </span>
+      ) : category !== undefined ? (
         <span className="shrink-0 rounded bg-white/5 px-1.5 py-0.5 text-[10px] text-neutral-400">
           {category.name}
         </span>
-      )}
+      ) : null}
     </button>
   );
 }
@@ -569,13 +752,15 @@ function QuickTab({
   onOpenLink,
   onRemoveLink,
   onOpenSettings,
-  onOpenMain,
+  onOpenHotkey,
 }: {
   onLaunch: (target: string) => void;
   onOpenLink: (link: QuickLink) => void;
   onRemoveLink: (id: string) => void;
+  /** 切到「设置」页签（V63：不再去开主窗口） */
   onOpenSettings: () => void;
-  onOpenMain: () => void;
+  /** 切到「设置」页签并直接停在快捷键那一行 */
+  onOpenHotkey: () => void;
 }): React.JSX.Element {
   const [actions, setActions] = React.useState<SysAction[]>([]);
   const [links, setLinks] = React.useState<QuickLink[]>(() => loadQuickLinks());
@@ -591,9 +776,13 @@ function QuickTab({
     const next = pinnedIds.includes(id)
       ? pinnedIds.filter((item) => item !== id)
       : [...pinnedIds, id];
-    void updateSettings({ quickActionIds: next }).catch((error: unknown) => {
-      toast.error(`固定失败：${error instanceof Error ? error.message : String(error)}`);
-    });
+    // V56：打上「用户亲手改过」的标记 —— 之后口径再升级也不会覆盖他自己这份列表
+    // （见 `core/settings.ts` 的 `resolveQuickActionIds`）
+    void updateSettings({ quickActionIds: next, quickActionsCustomized: true }).catch(
+      (error: unknown) => {
+        toast.error(`固定失败：${error instanceof Error ? error.message : String(error)}`);
+      },
+    );
   };
 
   React.useEffect(() => {
@@ -636,6 +825,32 @@ function QuickTab({
     }
     return Array.from(map.entries());
   }, [actions]);
+
+  /**
+   * 按「**Windows 上好不好找**」把系统入口分成两拨（V56）。
+   *
+   * 这是本次给桌面快捷入口定的取舍判据的**可视化**：用户 09-20 原话「任务栏右键随时都可以
+   * 打开的没必要放在这里，我们这个快捷入口要放一起 window 上操作不方便的入口功能」。
+   * 所以面板里把「好找的」单独归一组并说明为什么默认不钉 —— 用户想钉照样能钉，
+   * 但至少知道自己在钉什么，而不是面对一坨 40 项不分彼此的列表。
+   */
+  const easyIds = React.useMemo(() => new Set<string>(DOCK_EASY_TO_REACH_IDS), []);
+  const recommended = React.useMemo(
+    () => groupedActions
+      .map(([group, list]): [string, SysAction[]] => [group, list.filter((a) => !easyIds.has(a.id))])
+      .filter(([, list]) => list.length > 0),
+    [groupedActions, easyIds],
+  );
+  const easy = React.useMemo(
+    () => groupedActions
+      .map(([group, list]): [string, SysAction[]] => [group, list.filter((a) => easyIds.has(a.id))])
+      .filter(([, list]) => list.length > 0),
+    [groupedActions, easyIds],
+  );
+  const recommendedCount = React.useMemo(
+    () => recommended.reduce((sum, [, list]) => sum + list.length, 0),
+    [recommended],
+  );
 
   const run = (action: SysAction): void => {
     setRunningId(action.id);
@@ -715,20 +930,22 @@ function QuickTab({
           <button
             type="button"
             onClick={onOpenSettings}
-            title="快捷键 · 主题 · 开机启动 · 备份还原"
+            title="主题 · 开机启动 · 备份还原 · 模块开关（就在本面板的「设置」页签里）"
             className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-2 py-1.5 text-left transition hover:border-sky-400/40 hover:bg-white/10"
           >
             <Settings className="h-3.5 w-3.5 shrink-0 text-neutral-200" />
             <span className="min-w-0 flex-1 truncate text-[12px] text-neutral-100">设置</span>
           </button>
+          {/* V63：用户「快捷键设置直接弹出工具箱弹窗」—— 点它就是「工具箱弹窗里
+              直接停在快捷键那一行」，中间不再经过任何别的界面。 */}
           <button
             type="button"
-            onClick={onOpenMain}
-            title="打开 Handy 主窗口（工作台 / 桌面整理控制台 / 全部模块的完整界面）"
+            onClick={onOpenHotkey}
+            title="直接改全局呼出快捷键（Alt+Space 那一组）"
             className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-2 py-1.5 text-left transition hover:border-sky-400/40 hover:bg-white/10"
           >
-            <AppWindow className="h-3.5 w-3.5 shrink-0 text-neutral-200" />
-            <span className="min-w-0 flex-1 truncate text-[12px] text-neutral-100">主窗口</span>
+            <Keyboard className="h-3.5 w-3.5 shrink-0 text-neutral-200" />
+            <span className="min-w-0 flex-1 truncate text-[12px] text-neutral-100">快捷键</span>
           </button>
         </div>
       </Section>
@@ -807,22 +1024,25 @@ function QuickTab({
           notice !== null ? (
             <p className="px-1 py-1 text-[10px] text-amber-300">{notice}</p>
           ) : (
-            <div className="space-y-2">
-              {groupedActions.map(([groupName, list]) => (
-                <div key={groupName}>
-                  <p className="mb-1 text-[10px] font-medium text-neutral-400">{groupName}</p>
-                  <div className="grid grid-cols-2 gap-1.5">
-                    {list.map((action) => (
-                      <ActionButton key={action.id} action={action} />
-                    ))}
-                  </div>
-                </div>
-              ))}
+            <div className="space-y-3">
+              <ActionGroups
+                title="推荐：Windows 上不好找的"
+                hint="系统里没有现成入口（或深藏四五级设置）—— 这些默认已经钉在桌面右下角的「快捷入口」格子里"
+                groups={recommended}
+                render={(action) => <ActionButton key={action.id} action={action} />}
+              />
+              <ActionGroups
+                title="系统里已有入口"
+                hint="任务栏右键 / 任务栏图标 / Win+V / 设置首页都能直达，默认不占桌面快捷入口的格子 —— 想放也点右侧图钉"
+                groups={easy}
+                render={(action) => <ActionButton key={action.id} action={action} />}
+              />
             </div>
           )
         ) : (
           <p className="px-1 py-1.5 text-[11px] leading-relaxed text-neutral-500">
-            网络 / 服务 / 证书 / hosts 编辑 / 终端 / 控制面板… 共 {actions.length} 个系统面板，展开后点一下即开。
+            共 {actions.length} 个系统面板，其中 {recommendedCount} 个是「Windows 上不好找」的
+            —— 它们默认已经钉在桌面右下角的「快捷入口」里，展开后点一下即开、点图钉即改。
           </p>
         )}
       </Section>
@@ -848,6 +1068,44 @@ function Section({
         {action}
       </div>
       {children}
+    </div>
+  );
+}
+
+
+/**
+ * 「全部系统入口」里的一拨（V56 拆成「不好找的 / 已有入口的」）。
+ *
+ * 两拨各自的**分组名**（终端 / 网络 / 系统管理）仍照 Rust 白名单表来，只是外面多套一层
+ * 取舍说明 —— 让用户一眼看出「为什么这几项默认在这个入口里、那几项不在」。
+ */
+function ActionGroups({
+  title,
+  hint,
+  groups,
+  render,
+}: {
+  title: string;
+  hint: string;
+  groups: [string, SysAction[]][];
+  render: (action: SysAction) => React.ReactNode;
+}): React.JSX.Element {
+  return (
+    <div>
+      <p className="text-[11px] font-semibold text-neutral-200">{title}</p>
+      <p className="mb-1.5 text-[10px] leading-relaxed text-neutral-500">{hint}</p>
+      {groups.length === 0 ? (
+        <p className="px-1 text-[10px] text-neutral-500">（这一类暂时为空）</p>
+      ) : (
+        <div className="space-y-2">
+          {groups.map(([groupName, list]) => (
+            <div key={groupName}>
+              <p className="mb-1 text-[10px] font-medium text-neutral-400">{groupName}</p>
+              <div className="grid grid-cols-2 gap-1.5">{list.map(render)}</div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

@@ -366,11 +366,15 @@ export function QuickActionsRail(): React.JSX.Element {
     const next = selectedIds.includes(id)
       ? selectedIds.filter((item) => item !== id)
       : [...selectedIds, id];
-    void updateSettings({ quickActionIds: next }).catch((error: unknown) => {
-      toast.error('保存快捷入口设置失败', {
-        description: error instanceof Error ? error.message : String(error),
-      });
-    });
+    // V56：勾选即视为「用户亲手改过」—— 之后默认口径再升级也不覆盖他这份列表
+    // （见 `core/settings.ts` 的 `resolveQuickActionIds`）
+    void updateSettings({ quickActionIds: next, quickActionsCustomized: true }).catch(
+      (error: unknown) => {
+        toast.error('保存快捷入口设置失败', {
+          description: error instanceof Error ? error.message : String(error),
+        });
+      },
+    );
   };
 
   const run = (action: SysAction): void => {
@@ -566,7 +570,12 @@ export function QuickActionsRail(): React.JSX.Element {
               <button
                 type="button"
                 onClick={() => {
-                  void updateSettings({ quickActionIds: [...DEFAULT_QUICK_ACTION_IDS] })
+                  // V56：「恢复默认」= 交回默认口径（清掉标记），而不是把当前默认**拷贝**一份
+                  // 存下来 —— 后者会让下一次口径升级又对这位用户失效。
+                  void updateSettings({
+                    quickActionIds: [...DEFAULT_QUICK_ACTION_IDS],
+                    quickActionsCustomized: false,
+                  })
                     .then(() => toast.success('已恢复默认快捷入口'))
                     .catch(() => undefined);
                 }}

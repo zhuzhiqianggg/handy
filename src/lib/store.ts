@@ -1,5 +1,5 @@
 import { isTauri } from '@/platform/detect';
-import { DEFAULT_SETTINGS, SETTINGS_KEY, type AppSettings } from '@/core/settings';
+import { DEFAULT_SETTINGS, SETTINGS_KEY, resolveQuickActionIds, type AppSettings } from '@/core/settings';
 
 /**
  * 应用级配置持久化（`tauri-plugin-store` → `settings.json`）。
@@ -120,10 +120,24 @@ export async function readStringArray(key: string): Promise<string[]> {
 
 /** 合并默认值，得到完整 AppSettings */
 function withDefaults(stored: Partial<AppSettings> | undefined): AppSettings {
+  // V55：旧版默认 theme='light'，已落盘的用户会一直停留在浅色。
+  // 这里把 'light' 迁移为 'system'（跟随系统），只有用户显式选过 'dark' 才保留。
+  const storedTheme = stored?.theme;
+  const theme = storedTheme === 'dark' || storedTheme === 'system' ? storedTheme : 'system';
   return {
     ...DEFAULT_SETTINGS,
     ...(stored ?? {}),
+    theme,
     modules: { ...DEFAULT_SETTINGS.modules, ...(stored?.modules ?? {}) },
+    // V56：快捷入口的口径变过一次（默认里不再放任务管理器这类随处可得的入口）。
+    // 已装机的 `settings.json` 里落盘的是**旧默认**，只改 DEFAULT_QUICK_ACTION_IDS
+    // 对老用户毫无作用 —— 所以在这里判一次：用户没亲手改过（无标记）就按当前默认重算，
+    // 改过就以他存的为准。细节与「为什么不能就地剔 A 补 B」见
+    // `core/settings.ts` 的 `resolveQuickActionIds`。
+    quickActionIds: resolveQuickActionIds(
+      stored?.quickActionIds,
+      stored?.quickActionsCustomized === true,
+    ),
   };
 }
 

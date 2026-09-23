@@ -49,7 +49,7 @@ import type { GridAccent, GridBox, LayoutSnapshotMeta } from '@/types/grid';
  *
  * # 本视图保留的能力
  *
- *   - **一键归类桌面**：扫描 → 按类型分组 → 只登记引用，不动文件；
+ *   - **一键整理桌面**：扫描 → 按类型分组 → 只登记引用，不动文件（V66 起按内容重排尺寸）；
  *   - **格子 / 挂件**：收纳格、便签、日历计划三种，日历复用 `todos` 表；
  *   - **诊断与修复**：撤回 / 清理 V33–V36 留下的 `Handy整理` 残留、查看日志；
  *   - **备份 / 还原布局**：把当前摆法存成本机快照，随时切回来；
@@ -245,14 +245,16 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
               // 轮着给配色，尽量让相邻两个便签颜色不同
               accent: ACCENT_ORDER[(sameKind % (ACCENT_ORDER.length - 1)) + 1] ?? 'amber',
             }
-          : { name: '日历 · 今日计划', width: 360, height: 430, accent: '' as GridAccent };
+          : { name: '日历 · 今日计划', width: 320, height: 470, accent: '' as GridAccent };
       void ipc
         .gridBoxUpsert({
           name: preset.name,
           kind,
           accent: kind === 'note' ? (preset.accent as GridAccent) : null,
-          posX: 40 + (boxes.length % 3) * 344,
-          posY: 40 + Math.floor(boxes.length / 3) * 268,
+          // V50：**不指定落点**。以前这里写死 `40 + (n%3)*344` 是想在预览画布上把新格子
+          // 岔开摆，但 `grid_box_upsert` 建完就会跑一次排布引擎、把它覆盖掉 —— 写死的坐标
+          // 从来就没生效过，只会让人误以为「位置是这里定的」。现在统一由布局引擎安置
+          // （便签进便签列、日历进日历列，见 grid.rs 的 place_widget_columns）。
           width: preset.width,
           height: preset.height,
         })
@@ -286,7 +288,40 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
   );
 
   /**
-   * 一键归类：扫描桌面 → 按类型把文件与文件夹**登记**进对应格子。
+   * **重新重置整理**（V48 新增）：按 Handy 自己的分区规则把整张桌面重排一遍。
+   *
+   * 与「一键整理桌面」的区别就是**口径**（用户原话：「如果用户自己调整了那么记录用户
+   * 自己的改变，除非后面用户重新重置整理，我们又按照我们自己的规律整理」）：
+   *   · 一键整理 = 增量补齐：你摆好的格子一律不动，只把散落内容归纳进格子；
+   *   · 重置整理 = 全量重排：所有格子回到「便签一列 / 日志一大列 / 收纳两列」的自动布局。
+   */
+  const resetArrangement = useCallback(async (): Promise<void> => {
+    const ok = await confirmAction(
+      '重新重置整理？\n\n' +
+        '会把桌面上所有格子（含你手动挪过、拉过大小的）**重新排一遍**：\n\n' +
+        '· 便签单独一列 · 日历/工作台日志一大列 · 收纳格两列；\n' +
+        '· 格子高度按图标数量自动计算，装不下的部分用格子内的滚动条；\n' +
+        '· 同样**一个文件都不会移动**。\n\n' +
+        '你之前手动调整过的位置会被这次重置覆盖。确定继续？',
+    );
+    if (!ok) {
+      return;
+    }
+    setArranging(true);
+    void ipc
+      .gridLayoutReset()
+      .then(async () => {
+        await refresh();
+        toast.success('已按分区规则重置整理', {
+          description: '便签一列 · 日志一大列 · 收纳两列；文件一个都没动',
+        });
+      })
+      .catch((error: Error) => toast.error(error.message))
+      .finally(() => setArranging(false));
+  }, [refresh]);
+
+  /**
+   * 一键整理：扫描桌面 → 按类型把文件与文件夹**登记**进对应格子。
    *
    * **一个文件都不会被移动**（V37 引用模型）：登记只让格子知道该把谁画进去，
    * 文件本体留在桌面原处。所以确认框里要把这件事说死，免得再被误会成
@@ -295,7 +330,7 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
    */
   const autoArrange = useCallback(async (): Promise<void> => {
     const ok = await confirmAction(
-      '一键归类桌面？\n\n' +
+      '一键整理桌面？\n\n' +
         '会把桌面上的文件和文件夹按类型登记进对应格子（每个类别一个格子）。\n\n' +
         '· 文件不会被移动，一个都不会 —— 格子只是把它们归拢显示；\n' +
         '· 快捷方式（.lnk）整体登记进「快捷方式」格，同样不移动；\n' +
@@ -343,7 +378,7 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
         ]
           .filter(Boolean)
           .join('、');
-        toast.success(`已归类 ${report.itemsAdded} 个条目${folders}`, {
+        toast.success(`已整理 ${report.itemsAdded} 个条目${folders}`, {
           description: `${created}${released}文件全部留在桌面原位，没有移动${
             tidied ? `；${tidied}` : ''
           }${loose}`,
@@ -354,14 +389,14 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
           });
         }
         if (report.failures.length > 0) {
-          toast.warning(`${report.failures.length} 个文件没能归类`, {
+          toast.warning(`${report.failures.length} 个文件没能整理`, {
             description: report.failures.slice(0, 3).join('；'),
           });
         }
       })
       .catch((err: unknown) => {
-        reportOperation('一键归类桌面', err);
-        toast.error('一键归类失败', {
+        reportOperation('一键整理桌面', err);
+        toast.error('一键整理失败', {
           description: `${err instanceof Error ? err.message : String(err)}（详情见日志）`,
         });
       })
@@ -496,13 +531,23 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
         {overlayVisible ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
         {overlayVisible ? '隐藏格子' : '显示格子'}
       </Button>
-      <Button size="sm" onClick={autoArrange} disabled={arranging} title="扫描桌面并按类型登记进格子（一个文件都不移动）">
+      <Button size="sm" onClick={autoArrange} disabled={arranging} title="扫描桌面并按类型登记进格子（一个文件都不移动；你摆好的格子不会被挪动）">
         {arranging ? (
           <Loader2 className="h-3.5 w-3.5 animate-spin" />
         ) : (
           <Sparkles className="h-3.5 w-3.5" />
         )}
-        一键归类桌面
+        一键整理桌面
+      </Button>
+      <Button
+        variant="outline"
+        size="sm"
+        onClick={resetArrangement}
+        disabled={arranging}
+        title="按「便签一列 / 日志一大列 / 收纳两列」重排整张桌面（会覆盖你手动调整过的位置）"
+      >
+        <LayoutGrid className="h-3.5 w-3.5" />
+        重置整理
       </Button>
     </>
   );
@@ -546,7 +591,7 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
             <span className="min-w-0 flex-1 truncate text-xs leading-relaxed text-muted-foreground">
               <span className="font-medium text-foreground">格子是桌面的呈现层</span>
               ：拖进 / 移出 / 换格子都只改登记，文件<span className="font-medium text-foreground">原地不动</span>；
-              一键归类按类型登记，快捷方式留在原位
+              一键整理按类型登记，快捷方式留在原位
             </span>
             <span className="shrink-0 text-[11px] text-muted-foreground">
               {guideOpen ? '收起' : '展开'}
@@ -560,7 +605,7 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
                 桌面原处（腾讯桌面整理就是这个行为）。双击打开的还是原文件。
               </p>
               <p>
-                <span className="font-medium text-foreground">一键归类</span>
+                <span className="font-medium text-foreground">一键整理</span>
                 ：扫一遍桌面，把文件和文件夹按类型登记进对应的格子。快捷方式（.lnk）
                 按你的要求留在原位，一个文件都不会被移动。从格子里移出过的东西不会再被
                 自动归类塞回来。
@@ -702,14 +747,14 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
           <div className="py-14 text-center">
             <p className="text-sm font-medium text-foreground">还没有格子</p>
               <p className="mx-auto mt-1 max-w-md text-xs leading-relaxed text-muted-foreground">
-                点「一键归类桌面」扫一遍桌面，按类型登记进各自的格子（快捷方式留在原位，
+                点「一键整理桌面」扫一遍桌面，按类型登记进各自的格子（快捷方式留在原位，
                 文件一个都不会被移动）；也可以点「新建格子」自己摆，或加便签 / 日历挂件
                 （便签可以加多个）。显示格子后把文件拖进格子即可。
               </p>
               <div className="mt-4 flex justify-center gap-2">
                 <Button size="sm" onClick={autoArrange} disabled={arranging}>
                   <Sparkles className="h-3.5 w-3.5" />
-                  一键归类桌面
+                  一键整理桌面
                 </Button>
               <Button variant="outline" size="sm" onClick={addBox} disabled={busy}>
                 <Plus className="h-3.5 w-3.5" />
