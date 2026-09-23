@@ -1,7 +1,7 @@
 # Handy · 顺手 — 项目现状与续接指引
 
 > **从 `handy` 目录打开项目，先读这一份。** 它回答三个问题：**做到哪了 → 还剩什么 → 怎么继续**。
-> 最近更新：2026-09-19（**V47 批次：Win+D 桌面消失（Z 序锚定法）· 菜单命中区白名单 · 拖放源对称 · 挂件区整列保留 · 新建挂件重排 · 便签 Markdown**） · 长期约定见 [`.workbuddy/memory/MEMORY.md`](memory/MEMORY.md) · 逐日进展见 [`memory/`](memory/) · 规划文档见 [`../docs/README.md`](../docs/README.md)
+> 最近更新：2026-09-21（**V59 批次：把「图标拖不动、拖动显示禁用符号」的真正根因挖出来了 —— wry 的 `IDropTarget` 对没有 `CF_HDROP` 的载荷回填 `DROPEFFECT_NONE`，所以 HTML5 拖放拖 DOM 元素在挂件窗里永远被系统判死，V43–V58 的六层补丁全部打错了层；内部拖拽整体改成**指针拖拽**，并保住「从资源管理器拖文件进格子」**）· 同批修 **收纳格高度是 auto 导致「压住下面那个格子」+「装不下也不出滚动条」**（改为严格绑定引擎高度 + 内容区 `flex-1 min-h-0 overflow-y-auto`），顺带让视图模式落 localStorage · V58 见 §1.39 · V57 见 §1.38 · V56 见 §1.37 · 长期约定见 [`.workbuddy/memory/MEMORY.md`](memory/MEMORY.md) · 逐日进展见 [`memory/`](memory/) · 规划文档见 [`../docs/README.md`](../docs/README.md)
 
 ---
 
@@ -76,10 +76,10 @@ WorkerW 时连带我们），改为**轮询判 `IsIconic` → `SW_SHOWNOACTIVATE
 
 | 项 | 值 |
 | --- | --- |
-| 阶段 | Phase 1 收尾 + V18–**V37** 反馈修复（MVP 完成，待装机验收） |
-| git | **V37 = `1df5cb2`**（23 文件，+2559/−403：撤销「真实收纳」改为呈现层 + 统一日志 + 图标尺寸对齐 + 残留回收，见 §1.23）；**V36 = `97a164a`**（7 文件，+1189/−223：闪烁真根因 + 隔空体检工具 + 右键菜单，见 §1.22）；**V35 = `7d57ee2`**（15 文件，+1317/−347：Win+D 存活 + 8 向缩放 + 便签多实例 + 日历可读性 + 迁移 v8，见 §1.21）；**V34 = `d366340`**（12 文件，+1272/−409：修 Z 序/驻留 + 挂件对齐工作台 + 收纳与视觉收口，见 §1.20）；**V33 = `eeed5f9`**（12 文件，+1637/−399：格子改真实收纳 + 挂件容器 + 心跳判据纠正 + 迁移回归测试，见 §1.19）+ `3322cc3`（文档回填）；**V28 = `bc05a8c`**（7 文件：唤醒保留工具视图 + 贴条搜索直达工具，见 §1.14）；**V27 = `f7e825f`**（19 文件，+2251/−31：新增接口测试工具 `api-tester`（首个网络类 Rust 命令）+ 清掉建议条 14 处识别误报 + 回归扩到 17 套 1778 条，见 §1.13）；**V26 = `2969256`**（19 文件，+2364/−158）+ `43a8a06`（文档回填：提交号 + §2.2 三处 STALE 校正 + 日志）；**V25 = `5f8fe8a`**（18 文件，+2649/−565）+ `3001510`（文档回填：修恒真断言 + 回填提交号/包体量）；**V24 = `ef9bba4`**（41 文件，+2273/−326）+ `5d16a0c`（示例条冒烟）；**V23 = `f81a914`**（17 文件，+3334/−184）；V22 = `d49857c`；V21 = `685b8a7`；V20 = `f96a374`；V19 = `64e3008`；`be1dc58` = V18 文档回填；`862d5bf` = V18 批次 |
-| 安装包（**V37 已重新打包并静默安装**，09-17 15:14） | `src-tauri/target/release/bundle/nsis/Handy_0.1.0_x64-setup.exe`（**4,331,458 B**）<br>`src-tauri/target/release/bundle/msi/Handy_0.1.0_x64_en-US.msi`（**5,578,752 B**）<br>`src-tauri/target/release/handy.exe`（免安装可直接跑，**11,209,728 B**）<br>取证：`handy.exe`(15:12:06) 晚于 `dist/index.html`(15:07:18)，**且安装后的 exe 与构建产物逐字节只差 3 字节**（Tauri bundle 标记位 `UNK`→`NSS`）⇒ 装上去的就是本次 V37 产物；一键脚本 `bash scripts/build-release.sh` 见 §5。**本轮装完即止，未代为启动**（见 §1.19.2） |
-| ⚠️ 首次启动会做数据库迁移 | 真实库现停在 **v8**（09-17 14:06 最后写入）。用户**下次正常启动时**会依次应用：**v9** 给 `grid_boxes` 加 `category` 并 `DELETE FROM grid_items`（清掉指向已搬走文件的历史登记 —— 桌面上那些 `新格子 3\诛仙世界.lnk` 之类的幽灵条目就此消失）。v6–v8 若尚未生效也会顺次补上。已由 `cargo test --lib db::migrations` **4 条**断言覆盖，命令行可复跑 |
+| 阶段 | Phase 1 收尾 + V18–**V63** 反馈修复（MVP 完成，待装机验收） |
+| git | ⚠️ **V48–V62 全部还在工作区未提交**（50+ 个已跟踪文件被改 + 若干新增：`test-desktop-constants.mjs` / `test-shell-menu.mjs` / `test-drag-pointer.mjs` / `test-smart-arrange.mjs` / `src/lib/smartArrange.ts` / `src-tauri/examples/menu_dump.rs` / 若干 `scripts/audit/*.py`）。**续接前先 `git status` 看全貌**，别以为最后一次提交就是最新状态。<br>最近提交 **`3c7d81d`**（V47 文档回填）/ **V47 = `823219f`**（修 Win+D 桌面消失 + 菜单命中区 + 拖放状态统一 + 挂件区整列保留，见 §1.33）；**V37 = `1df5cb2`**（23 文件，+2559/−403：撤销「真实收纳」改为呈现层 + 统一日志 + 图标尺寸对齐 + 残留回收，见 §1.23）；**V36 = `97a164a`**（7 文件，+1189/−223：闪烁真根因 + 隔空体检工具 + 右键菜单，见 §1.22）；**V35 = `7d57ee2`**（15 文件，+1317/−347：Win+D 存活 + 8 向缩放 + 便签多实例 + 日历可读性 + 迁移 v8，见 §1.21）；**V34 = `d366340`**（12 文件，+1272/−409：修 Z 序/驻留 + 挂件对齐工作台 + 收纳与视觉收口，见 §1.20）；**V33 = `eeed5f9`**（12 文件，+1637/−399：格子改真实收纳 + 挂件容器 + 心跳判据纠正 + 迁移回归测试，见 §1.19）+ `3322cc3`（文档回填）；**V28 = `bc05a8c`**（7 文件：唤醒保留工具视图 + 贴条搜索直达工具，见 §1.14）；**V27 = `f7e825f`**（19 文件，+2251/−31：新增接口测试工具 `api-tester`（首个网络类 Rust 命令）+ 清掉建议条 14 处识别误报 + 回归扩到 17 套 1778 条，见 §1.13）；**V26 = `2969256`**（19 文件，+2364/−158）+ `43a8a06`（文档回填）；**V25 = `5f8fe8a`**（18 文件，+2649/−565）+ `3001510`（文档回填）；**V24 = `ef9bba4`**（41 文件，+2273/−326）+ `5d16a0c`（示例条冒烟）；**V23 = `f81a914`**（17 文件，+3334/−184）；V22 = `d49857c`；V21 = `685b8a7`；V20 = `f96a374`；V19 = `64e3008`；`be1dc58` = V18 文档回填；`862d5bf` = V18 批次 |
+| 安装包（**V63 已重新打包并静默安装**，09-21 20:48 打包 / 装机） | `src-tauri/target/release/bundle/nsis/Handy_0.1.0_x64-setup.exe`（**4,348,944 B**）<br>`src-tauri/target/release/bundle/msi/Handy_0.1.0_x64_en-US.msi`（7 MB 档）<br>`src-tauri/target/release/handy.exe`（免安装可直接跑，**11,257,344 B**）<br>取证：`handy.exe`(20:48:07) 晚于 `dist/index.html`(20:43:32)。装到 `%LOCALAPPDATA%\Handy\handy.exe` 后 **与构建产物逐字节只差 3 字节**（偏移 10203828–10203830：`UNK` → `NSS`，Tauri bundle 标记位）⇒ 装上去的就是本次 V63 产物。**本轮装完即止，未代为启动**（`tasklist` 复核无残留）。⚠️ 装机前旧版（V62）**正在接管桌面**（`grid_meta` 三键皆 1、`SysListView32 vis=False`）：`taskkill /F /IM handy.exe`（PID 7116）→ **立刻** `desktop-icon-restore.py`（`可见=True`）→ `desktop-icon-probe.py` 复核 `vis=True` → `desktop_icons_hidden` 置 0 → 才安装。（⚠️ PowerShell 的 `Get-Process -Name handy` 在本机**查不到**它，别据此判断「没在跑」——用 `tasklist /FI "IMAGENAME eq handy.exe"`，或干脆看 `desktop-icon-restore.py` 自己的进程检测。）|
+| ⚠️ 数据库迁移 | 真实库已在 **v11**（1–11 全部应用，V62 装机后复跑 `db-probe.py` 确认）—— **本轮无待应用迁移**。迁移链 v1→v11 由 `cargo test --lib db::migrations` 守住 |
 
 ---
 
@@ -2431,16 +2431,1292 @@ size 11307520（与产物完全一致），`cmp -l` **恰好 3 字节**（`_VAR_
 5. 便签里 `---` 出分割线、三反引号出可多行扩展的代码块。
 6. 装机后桌面右键应已有「Handy 桌面整理」（若你手动删过则不会再自动加，可到整理设置页重装）。
 
+### 1.34 V48 批次（用户 7 条反馈 + 5 截图：**三便签重叠 · 布局不均衡 · 图标拖不动 · 「归纳收拢」是垃圾 · 工具条要悬浮球 · 日历样式**）
+
+> 用户原话（节选）：「三个便签全都重叠显示在这一个位置」「你的页面布局并不均衡美观，需要优化下分布计算，
+> 最好能合理利用空间」「现在不管是编辑锁定状态都不能拖动图标调整分类」「现在桌面整理模块有个垃圾就是
+> 什么归纳收拢，我们就是桌面整理，**不负责直接 mv 文件到新的目录下**，桌面整理就是单纯的桌面整理美化收纳，
+> **打开桌面的目录文件夹后布局没有任何变化的那种**」「这个可以做成工具条做成悬浮球样式」「我 win+d 后
+> 展示桌面每次都要 1-2 秒才能显示桌面图标格子等，这个正确吗？」「这个日历样式是不是缺少点什么东西…
+> 可以多设置风格让用户自己选择风格…貌似日期格子宽度太宽…正常不应该每个（格子）是正方形更好看吗？
+> 你现在这个格子里面的配置变化没什么用，没有什么明显变化。如果不能做到更好的方案就不要这个」
+
+#### 1.34.1 根因（每条都不是「手滑」，是把某个假设写错了）
+
+| # | 现象 | 真根因 |
+| --- | --- | --- |
+| 2 | 三个便签**坐标完全相同** | 旧 `anchor_widget` 用 `clamp_y` 把同列挂件往同一个 y 上压 —— 同一列放第二个时就重叠。真实库 dump 证实三便签都在 `(1415, 692) 260×220`。 |
+| 3 | 布局不均衡、空间浪费 | 布局引擎只有「一段流布 + 挂件贴角落」两种动作，没有**分区**概念：挂件与收纳格抢同一片空间，也没有「先清后算 / 保留用户布局」的区别。 |
+| 4 | 图标拖不动（编辑 / 锁定都不行） | 整条拖放链路**只认 React ref**（`itemDragRef` / `looseDragRef`）：ref 由 `dragstart` 写入，一旦 `dragstart` 因重渲染交错没跑在我们以为的元素上，`dragover` 就 `return`（不高亮、不允许放置），而且**静默**。 |
+| 5 | 「归纳收拢」会真的搬走文件 | Rust `organizer_apply` 真的 `fs::rename` 进 `桌面/Handy整理/<组名>/`。语义是**归档工具**，与「桌面整理 = 呈现层」冲突，是「整理会动我文件」这一误解的唯一来源。 |
+| 6 | Win+D 后 1–2 秒才恢复 | `reassert_takeover`（重新藏原生图标）与 Z 序自检**只挂在 1 秒周期上**，而这 1 秒就是用户看到的「桌面还没出来」。 |
+| 7 | 日历换色「没什么变化」 | 便签与日历**共用同一套 `accent` 卡片底色**（一层几乎看不出的色相偏移）；日历真正的版面（字色 / 今天 / 选中 / 节日 / 输入框）根本没跟着换。日期格 `grid-cols-7` 撑满宽度 → 360px 盒子里变成 48×30 的扁矩形。 |
+
+#### 1.34.2 改动清单（按用户条目）
+
+| # | 用户诉求 | 状态 | 落点 |
+| --- | --- | --- | --- |
+| 1 | 工具搜索列表里能直接看到桌面快捷方式 | ✅ | `DesktopSidePanel`：新增 `kind:'link'` 与 `loadDesktopShortcuts()`（走 `grid_loose_list` + `grid_open_path`），与工具同列同搜，点一下用系统程序打开并收面板；空查询时成组「桌面快捷方式（N）」 |
+| 2 | 便签不再重叠 | ✅ | `grid.rs` 新 `stack_in_column()`（first-fit，列满返回 `None` 由调用方开新列，**永不重叠**）+ `place_widget_columns()` |
+| 3 | 分区 + 均衡 + 保留用户布局 + 溢出滚动 | ✅ | `WidgetZone{Calendar,Note,Other}` + 挂件各占一列（日历一列 / 便签一列 / 其他再往左）；内容区 2 列等高平衡（LPT）；`LayoutMode::{Full,Fill}` —— 「一键归类」= **Fill**（只摆没摆过的，保留用户手摆的），新增 `grid_layout_reset` = **Full**；列内溢出交给格子自带滚动条 |
+| 4 | 编辑 / 锁定都能拖图标换分类 | ✅ | 拖放判据从「ref 非空」放宽成 `isOurDrag()`（ref **+ `dataTransfer.types`**）；`drop` 阶段用 `getData` 反查条目（`resolveDraggedItem` / `resolveDraggedLoose`，ref 丢了也能落）；图标 `onMouseDown` 显式 `stopPropagation`，与「拖整个格子」从事件源头分开；盒子补 `onDragLeave` 清高亮 |
+| 5 | 删掉「归纳收拢 / 移动文件」 | ✅ | 前端：`OrganizerView` 只剩「开始归拢」（重写，删掉处理方式开关 / 预览 / 二次确认 / 历史计划 / 撤销）；Rust：**删除** `organizer_preview_plan` / `organizer_update_plan_items` / `organizer_apply` / `organizer_undo` / `organizer_list_plans` 与 `apply_plan`/`undo_plan`/`build_plan`/`load_plan`/`save_plan`/`unique_dest`/`skip_reason`/`group_for`/`TARGET_DIR_NAME`，`organizer.rs` 862 → 约 290 行，**只剩只读 `scan_items`**；IPC 与 `types/organizer.ts` 同步收窄；`lib.rs` 注销四个命令 |
+| 6 | 工具条改悬浮球 · 去掉「原生图标隐藏」开关 · Win+D 即时 | ✅ | ① 工具栏改成**悬浮球**（收起只占 44px 圆球，点开摊成完整按钮条；`regionsKey` 加 `tb=` 保证命中区随开合重报）；② **删掉**工具栏上的「原生图标隐藏 / 接管图标」按钮与 `toggleTakeover()` —— 接管只保留自动路径（显示整理→自动接管，收起→自动归还）；③ `REASSERT_INTERVAL_SECS=1` → **`REASSERT_INTERVAL_MS=250`**；`restore_if_minimized` 命中后**当场**补一次 `reassert_takeover`；新增 `ICONS_WERE_VISIBLE` 翻转检测（每 ~100ms 观察、只在「藏→露」时纠正，稳态零读库） |
+| 7 | 日历正方形日期格 + 多主题 + 让配置真的有效 | ✅ | 新增 `CALENDAR_THEMES`（7 套**整套**主题：深色玻璃 / 暖纸 / 樱粉 / 天蓝 / 薄荷 / 藕紫 / 素白，键沿用 `accent` 所以**不需要迁移**）；`CalendarWidget` 接 `accent` 全套换色；日期格改 `aspect-square` + 网格定宽居中（`max-w-[288px]`，盒宽再多也只是居中留白）；调色盘对日历标成「主题」并用主题色点预览；默认尺寸 360×430 → **320×470** |
+
+#### 1.34.3 验证与产物取证
+
+- `cargo test --lib` **43/43**（删 5 个移动用例、新增 `scan_is_read_only_and_classifies` 与 `resolve_root_prefers_explicit_dir`；
+  新断言值得留意：**扫描前后目录内容与顺序必须完全一致** —— 这是「打开桌面目录布局无变化」的可执行版本）。
+- `tsc --noEmit` **0 错** · `node scripts/regression/run.mjs` **17/17 套**。
+- 打包：`bash scripts/build-release.sh --no-deploy`。
+- ⚠️ 装机顺序仍是铁律（接管期间 **先归还桌面再杀进程**，见 §4）。
+
+#### 1.34.4 待用户验收点
+
+1. 三个便签**各占自己那一列**，不再重叠；日历单独一列；收纳格两列、高低平衡。
+2. 点「一键归类桌面」**不动你摆好的格子**；只有「重置整理」才按 Handy 的规则整张重排。
+3. **编辑态和锁定态都能拖图标换格子**，拖到格子外回左侧竖条。
+4. 桌面整理模块里**再也找不到「移动到整理目录」**；整理后打开桌面目录，布局没有任何变化。
+5. 右下角是**一颗球**；点开才是完整工具条；**找不到「原生图标隐藏」按钮**。
+6. **Win+D 之后桌面内容基本即时回来**（目标：与正常桌面同级）。
+7. 日历：换「主题」有**明显**变化；日期格是**正方形**且日历居中；日期格配置不再是摆设。
+
+### 1.35 V49 批次（用户 4 条反馈 + 4 截图：**加第三个便签后格子跑到屏幕最左 · 工具面板要半屏/铺满 · 日历总宽度没收回来 · 内容绝不能重叠**）
+
+> 用户原话（节选）：「我添加便签到第三个后突然桌面上的很多格子直接跑到桌面最左边看不见的
+> 区域了，你看还有一点点漏出来的格子边缘」「点工具弹出来的工具框，这里可以把右边宽度全部
+> 占全了，**默认占一半的桌面空间**，后面的工具打开后的具体某个工具也有足够的操作功能」
+> 「日历这里**总宽度没有收回来**」「程序需要**先计算**，务必保证所有的内容**不能重叠**，
+> 可以有滚动条 但是不能图标重叠，**新加格子和便签后都要重新计算**更美观合理的展示」
+
+#### 1.35.1 根因（三条各自独立的漏洞，日志给了铁证）
+
+真机日志（`%LOCALAPPDATA%\Handy\handy.log`，用户 18:10 连点两次「+ 便签」）：
+
+```
+18:10:49  整理布局（增量补齐）：工作区 1707×912，挂件带左界 931，收纳区 2 列 × 300（左界 340）
+18:10:50  整理布局（增量补齐）：工作区 1707×912，挂件带左界 32， 收纳区 1 列 × 300（左界 340）
+```
+
+| # | 现象 | 真根因 |
+| --- | --- | --- |
+| 1 | 加第三个便签后一堆格子跑到屏幕最左边（只露出一点边） | 链条三节：① 新建格子走的是 V38 的 `free_slot_for`（`FlowPlacer`）——与 V48 的分区模型**不是同一套规则**，桌面一「满」就退回 `(32, 32)`；② 便签落在 `(32, 40)`，而 `needs_placement` 要求 `x` 与 `y` **同时** ≤ 32 才算默认位 → 它被判成「用户摆好的」**保留在原地**；③ 挂件带左界因此掉到 32 → 收纳区宽度 `8 − 340 = −332` → 收纳格被算到 `x = −292`（300 宽的格子只有最右边 8px 在屏内 = 用户看到的那条边）。 |
+| 2 | 工具面板操作区不够 | 面板是定死的 `w-[min(820px,calc(100vw-300px))]`，没有「更大 / 铺满」这一档 |
+| 3 | 日历总宽度收不回来 | 布局**只写挂件的 `pos_x/pos_y`，从来不写 `width`** —— 真机库里日历是 `460×638`，而 V48 之后的日历本体（正方形日期格 + `max-w-[288px]`）只要 320，两侧各留 70px 空白 |
+| 4 | 内容仍会重叠 / 装不下就消失 | ① **Fill 模式的列宽不夹到收纳区可用宽度**（Full 有夹）：567px 的区间里硬塞两条 300px 的列（624 > 567），第二条压到左侧竖条上；② 列内**不做高度压缩**，装不下就顺着往下摆到 `y > work_h`（用户看到的是「格子不见了」）；③ 被「新开的挂件列」压住的收纳格不会被重新安置（判据里没有「与本次算出的挂件重叠」这一条） |
+
+#### 1.35.2 改动清单
+
+| # | 用户诉求 | 状态 | 落点 |
+| --- | --- | --- | --- |
+| 1 | 加便签后不许有格子跑出屏幕 | ✅ | `needs_placement` 新增两条判据（**侵入竖条** `x < min_x`、**与本次算出的挂件矩形重叠**），越界改用真实 `w/h`；`place_widget_columns` 新增 `content_reserve` —— 挂件带最多占到「收纳区还剩下一条 `MIN_BOX_W` 列」为止，**绝不再往左开列**；剩下的挂件由 `pack_overflow` 压进当前列；新建格子一律落**哨兵 `(0,0)`** 再由布局安置（删掉 `free_slot_for`，`FlowPlacer` 只剩测试在用） |
+| 2 | 面板默认半屏、可铺满 | ✅ | `sidePanelShell(half \| full)`：默认 `w-[min(50vw,calc(100vw-276px))]`（半屏，右侧仍给工具栏让位），顶栏新增「铺满 / 半屏」按钮切到 `w-[calc(100vw-24px)]` + `right-3`；两档底边都在 `bottom-[92px]`，工具栏悬浮球在最底部 44px 内，**铺满时照样点得到** |
+| 3 | 日历宽度收回来 | ✅ | Rust 侧新增 `CALENDAR_BOX_W = 320` 与 `widget_natural_width()`，布局**每次都把挂件宽度写回自然宽度**（位置可保留、宽度不保留 —— 宽度是内容决定的，不是审美）；前端 `CALENDAR_NATURAL_W = 320` 在挂件上报自然高度时顺手改宽，**显示出来那一刻就生效**，不必等下次整理 |
+| 4 | 内容绝不重叠 · 新加后重算 | ✅ | 列数改用**真实列宽**判（`cols_for`）+ 列宽夹进收纳区；列内新增 `fit_column_heights()`（按比例压高度、下限 `MIN_BOX_H`）——「塞不进就压矮让格子内部滚动」，不再顶出屏幕；Full 模式列宽**铺满收纳区**（用户：「合理利用空间」）；新建格子后 Rust 侧直接跑一次 `layout_all_boxes(Fill)`，不依赖前端补一次 `grid_relayout`；**手工拖动落库后也判一次重叠**（`persistBoxGeometry`：与别的格子相交就立刻跑一次增量布局，把这一格放到最近的合法列位 —— 只影响重叠的那次拖动） |
+
+#### 1.35.3 两个只有真机才会暴露的补充
+
+- **命中区必须跟着面板宽度变**：桌面层的交互靠前端上报矩形（Rust 侧按矩形切换穿透），
+  所以 `regionsKey` 里加了 `pw=${panelWide ? 'full' : 'half'}` —— 否则切到「铺满」时右半边
+  点不动，收回「半屏」后右侧留一块吃点击的死区。**这是「改尺寸类」时最容易被忘的一处**。
+- **手工拖动也不许叠**：`persistBoxGeometry()` 落库前判一次矩形相交，相交就落库后立刻跑
+  增量布局（`needs_placement` 的「重叠」判据 ⇒ 只挪这一格）。合法拖动（不重叠）**完全不受影响**。
+
+#### 1.35.4 验证与产物取证
+
+- `cargo test --lib` **46/46**。新增/强化的断言：
+  - `a_third_note_never_pushes_boxes_off_the_left_edge` —— **真机事故的可执行版本**：先整理一遍，
+    再连插两个落在 `(32,32)` / `(32,40)` 的便签，断言「没有一格低于竖条右沿、两两不重叠、
+    整屏之内，三个便签同列且都在日历左侧」；
+  - `an_overwide_calendar_gets_its_width_reclaimed` —— 把日历改成 460 后再跑一次**增量**整理，
+    宽度必须回到 320（证明「宽度不受保留用户摆法保护」）；
+  - `a_overflowing_column_shrinks_instead_of_pushing_boxes_off_screen` —— 3×400px 塞进 500px，
+    压完后整列装得下且不矮于 `MIN_BOX_H`；
+  - `needs_placement` 补两条判据的断言（压在竖条上 / 被挂件列压住）。
+- `tsc --noEmit` **0 错** · `node scripts/regression/run.mjs` **17/17 套**。
+- 打包：`bash scripts/build-release.sh --no-deploy`。
+- ⚠️ 装机顺序仍是铁律（接管期间 **先归还桌面再杀进程**，见 §4）。
+
+#### 1.35.5 待用户验收点
+
+1. 连点「+ 便签」加到第 3、4 个：**没有任何格子跑到屏幕左边看不见的地方**；便签全部排在
+   日历左侧那一条列里，放不下就**自己变矮、格子内部滚动**。
+2. 点工具：面板默认占**半屏**；顶栏「铺满」可以拉到整块右侧，工具（文本对比 / JSON 之类
+   分栏的）有足够操作空间。
+3. 日历盒子**宽度收回 320**：左右不再各留一条空白；正方形日期格居中。
+4. 随便加格子 / 便签：**不会出现两个格子叠在一起**；「一键归类桌面」也不会动你摆好的格子。
+5. 把某个格子**拖到另一个格子上**松手：它会自己挪到最近的合法位置（不再叠着）；
+   拖到合法空位的拖动**保持不动**。
+
+### 1.36 V50 批次（用户 2 条：「**便签要一个独立的列**（宽度不一样，别跟格子挤在一起）· 你自己看图继续重构」）
+
+> 用户原话：「便签一个独立的列，因为他的宽度不一样，不要跟格子挤在一起影响整理美观
+> 2. 你自己看图片继续重构结构并优化吧」
+
+#### 1.36.1 真机取证（`scripts/audit/grid-boxes-dump.py` + `db-probe.py` + 日志）
+
+用户在 18:49–18:53 连点「+ 便签」到 **6 个便签**，同时库里还留着上一版算法的死坐标：
+
+```
+note   便签   x=787  y=32   / 便签 2 x=787  y=276 / 便签 4 x=787  y=520
+note   便签 6  x=1071 y=32   / 便签 3 x=1071 y=276 / 便签 5 x=1071 y=520
+folder 安装包 x=397  y=320   / folder 图片 x=386 y=462      ← 与 463 那条列差 40px
+folder 文件夹/文档/其他/压缩包 x=463（压缩包 y=980 > work_h 912 ⇒ 屏幕外）
+18:52:57  整理布局（增量补齐）：挂件带左界 787（挂件 5 个），收纳区 1 列 × 300 … 空间不足 1 个
+```
+
+四条病，全部是「V48/V49 的保留口径」直接导致的：
+
+| # | 现象 | 根因 |
+| --- | --- | --- |
+| 1 | **便签跟格子挤在一起**（用户截图：便签悬在「安装包 / 图片」正上方） | V49 的 `needs_placement` 只查「与挂件矩形**重叠**」。安装包停在 `x=1031`（右沿 1331），便签列在 `x=1071` —— 横向区间重叠、纵向错开（30..250 vs 366..486），于是整条漏了过去 |
+| 2 | 便签被摊成**两条列**（787 / 1071），挂件带吃掉 888px | `place_widget_columns` 的「这一列放不下就再往左开一条」在**多实例挂件**上必然发生 → 收纳区被压到 1 列还装不下 6 个格子 |
+| 3 | 「其他 / 压缩包」被顶到屏幕外（日志「空间不足 2 个」） | 收纳区只剩一条 300 的列，6 个格子按内容算总高 > 848 → 顺次排到 `y > 912` |
+| 4 | 安装包 / 图片 与 463 那条列**差 40px，一眼看歪** | `Fill` 的保留口径是「不重叠、不越界就一律原地保留」→ **上一版算法算出的列位被永久钉住**，既不对齐列网格、又当障碍物把后来要摆的格子往下顶 |
+
+#### 1.36.2 改动清单（结构性的，不是补丁）
+
+| # | 用户诉求 | 状态 | 落点 |
+| --- | --- | --- | --- |
+| 1 | 便签**恒定一条列**，加便签不影响格子 | ✅ | `zone_single_column(Calendar \| Note)`：日历列与便签列**各自恒定只有一条**，放不下就在**列内压高度**（`fit_column_heights`，便签正文本来就能滚）。于是「挂件带宽度」只由「有哪些挂件、挂件多宽」决定 ⇒ **加便签 = 收纳区一个像素都不动**（单测 `adding_more_notes_never_moves_a_content_box` / `the_widget_band_width_does_not_grow_with_more_notes`） |
+| 2 | 收纳格不许跟挂件挤在同一列 | ✅ | `needs_placement` **判据 ⑤**：`x + w > band_left − ARRANGE_GAP_X` ⇒ 判为「没落位」必须重排。`band_left` 也改成从**挂件列计划**里算（不再从「谁被保留在原位」里取最小值） |
+| 3 | 「你自己看图继续重构」→ 列位对齐 + 铺满 | ✅ | ① 新增 `manual` 标记（**迁移 v10**）区分归属：**用户拖过的原地不动**，引擎摆过的一律重新对齐到当前列网格（`Full` 模式连 `manual` 一并清 0）；② 新增 `content_columns()`：列数由 `CONTENT_TARGET_COL_W=360` 估（上限 `CONTENT_MAX_COLS=2`），列宽把可用宽度**等分铺满** —— 真机 707px 得出 2 列 × 341，中间只留 24px 标准列间距，列位落在 **341 / 706**（≈用户原来那条 707 的列，肉眼几乎不跳） |
+| 4 | 升级即可见，不必手动点整理 | ✅ | 挂件窗挂载后跑一次**自愈**（`GridOverlay` 里 `healedRef` + `ipc.gridRelayout()`）：增量口径是**幂等**的，摆对了就一个都不动 |
+| 5 | 排查要能定位 | ✅ | 日志新增「手工保留 N 个」，并在被顶出屏幕时**点名**是哪几个格子（V49 只写「空间不足 2 个」，得反推）；新增 `scripts/audit/grid-boxes-dump.py`（只读列坐标 + 串列检测）与 `db-probe.py`（全字段 + 元数据） |
+
+#### 1.36.3 验证与产物取证
+
+- `cargo test --lib` **54/54**。新增 6 条：
+  - `the_real_v50_mess_comes_out_tidy` —— **把真机现状（6 便签 + 6 格子 + 42 未归类）原样灌进临时库**跑增量排布，
+    断言「便签一条列 / 收纳两条列且等宽 / 无一格跨进挂件带 / 两两不重叠 / 无溢出」；
+    实测输出：挂件带左界 1071、收纳区 2 列 × 341（x=341 / 706）、6 个便签同列 x=1071（高 220→121 压矮）；
+  - `no_content_box_shares_a_column_with_a_widget` —— 复刻真机 `x=1031` 的越界格，断言排完与挂件**横向区间不相交**；
+  - `an_engine_placed_box_is_realigned_while_a_manual_one_stays_put` —— `manual=1` 的格子拖到 (120,600) 后
+    跑增量：它一个像素不动，引擎摆过的 `(397,320)` 必须回到列网格上；
+  - `adding_more_notes_never_moves_a_content_box` / `the_widget_band_width_does_not_grow_with_more_notes` /
+    `content_columns_fill_the_available_width` / `a_content_box_crossing_into_the_widget_band_needs_placement` /
+    `only_unknown_widgets_may_open_more_than_one_column`；并改写 `many_notes_*` 为「六个便签同一条列」。
+- `tsc --noEmit` **0 错** · `node scripts/regression/run.mjs` **17/17 套**。
+- 打包：`bash scripts/build-release.sh --no-deploy`；装机：铁律顺序（**接管期间先归还桌面图标再杀进程**，见 §4）。
+
+#### 1.36.4 待用户验收点
+
+1. 连点「+ 便签」到 3、4、5 个：**便签始终在自己的那一条列里**（不会再摊成两条、也不会把格子挤走）；
+   加便签的过程中**收纳格一个都不动**。便签多到一个屏幕放不下时会自动**压矮**（正文可滚），
+   想要高一点就自己拉大单个便签、或删掉多余的。
+2. 便签列与收纳格**不会再出现在同一条横向区间里**（上一版里便签悬在「安装包 / 图片」正上方）。
+3. 「安装包 / 图片」这类**上一版留下的错位格子会被自动拉回列网格**（与其它列对齐）；中间那条
+   空出来的死白也被收纳区吃满了（列宽 300 → 341）。
+4. 你自己**拖过 / 拉过**的格子不会被整理动到（新的 `manual` 标记）；只有点「重新重置整理」
+   才会连它们一起按 Handy 的规律重排。
+5. 升级后**不用手动点整理**：显示格子那一刻就会自愈一次。
+
+### 1.37 V56 批次（用户：「**将右下角这个快捷入口改造成格子样式固定到右下角，宽度和日历相同** · **任务管理器这类没必要放这里，要放 Windows 上操作不方便的入口** · 你分析并优化吧」）
+
+> 用户原话（2026-09-20，附一张右下角截图）：
+> 「注意我已经自己更新了很多功能，接下来你只需要将右下角这个快捷入口改造成格子样式固定到右下角，
+> 注意格子宽度和日历相同，另外例如任务管理器中心没有任何在这里实现的意义，任务栏右键随时都可以
+> 打开的没必要放在这里，我们这个快捷入口要放一起 window 上操作不方便的入口功能 你分析并优化吧」
+
+前置：用户自 V50 之后**自行迭代了若干功能**（V51–V55 在代码里有标注，但**本文件没有对应批次章节** ——
+见下方速查表），本文件以 **V56** 续接。
+开工前先读真机 `settings.json`（`%APPDATA%\com.handy.desktop\settings.json`，注意入口配置**嵌在
+`settings.quickActionIds`** 下、不在顶层）与 `scripts/audit/grid-boxes-dump.py`，确认三件事：
+`quickActionIds` 里确实有 `taskmgr` + `proxy-settings`、**且没有** `quickActionsCustomized` 标记
+（⇒ 升级后会自动跟随新默认）；日历实际高 503；右下角那块区域的上沿在 `y = 560`。
+
+**V51–V55 代码标注速查**（补文档缺口，细节需读源码注释）：
+
+| 版本 | 做了什么（据代码内 `// V5x：` 标注） |
+| --- | --- |
+| V51 | 系统入口（此电脑 / 回收站 / 用户的文件）改走 `FileIcon`（不再用内置线条图标）· **格子视图模式 `grid`/`list` 每格独立切换** · 拖放**始终 `preventDefault` + `dropEffect='move'`** · Rust 起 `CELL_EXTRA_W = 32` 配 `GRID_GAP = 6`（← 前端没跟上，V56 才修） |
+| V52 | **每格子独立锁定 / 解锁**（取代原全局编辑模式，旧调用留兼容壳） |
+| V53 | **便签不再有折叠 / 展开**（按内容自动撑开高度）· **桌面空白右键 → 原生 Windows 右键菜单**（不覆盖） |
+| V54 | 更精致的毛玻璃卡片底（顶部高光 + 主体渐变 + 底部微亮） |
+| V55 | 默认主题 `light → system` 迁移（`store.ts` 里 `withDefaults`，只保留用户显式选过的 `dark`）· 右键菜单精致化 · 拖动格子加**对齐参考线 + 边缘吸附** · 去掉 hover 放大 / 外发光 / `border-2` 高亮框（改为克制观感 —— 与 V56 的 `DockCell` 同一取向） |
+
+#### 1.37.1 两条诉求拆解与设计结论
+
+| # | 用户诉求 | 设计结论 |
+| --- | --- | --- |
+| 1 | 快捷入口改**格子样式**、固定右下角、**宽度 = 日历** | 复用收纳格的**外壳 / 标题栏 / 条目网格**同一套类名（抽 `BOX_SHELL_CLASS`），`fixed right-8 bottom-8`（32px = 引擎的 `ARRANGE_MARGIN`）。宽度取 `DOCK_W = CALENDAR_NATURAL_W = 320` ⇒ 它正好落在日历那一列正下方，桌面右半屏是一条自洽竖列（日历在上、入口在下） |
+| 2 | 只放**Windows 上不好找的入口** | 重定默认口径：剔除 `taskmgr`（任务栏右键就有）、网络/显示/声音/蓝牙/打印机/更新等**系统自带图形入口**的项，只留深路径 / 只能命令行 / 藏在多级菜单里的：`powershell-admin` · `cmd-admin` · `dns-flush` · `hosts-edit` · `env-vars` · `ncpa` · `services` · `proxy-settings` · `temp-folder` |
+| 3 | 「你分析并优化吧」→ 不能盖住别的东西 | 关键：**引擎原本不知道它存在**（前端画的浮层）。于是给引擎加**禁区**机制 —— 任何一列只要与它在横向上有交集，那一列的下沿就被压到它上沿之上（见 1.37.3） |
+
+#### 1.37.2 前端落点（`src/modules/desktop-grid/`）
+
+| 文件 | 改动 |
+| --- | --- |
+| `GridOverlay.tsx` | ① 新增常量 `DOCK_W = CALENDAR_NATURAL_W` / `DOCK_MAX_H = 320` / `DOCK_BODY_MAX_H = DOCK_MAX_H − BOX_HEADER_H − BOX_BORDER_H` / `DOCK_COLLAPSED_KEY`；② 抽 `BOX_SHELL_CLASS`（收纳格与快捷入口**共用**，保证「就是一个格子」）；③ 新增 `DockCell`（图标块 + 11px 标签，克制观感 —— 不带霓虹发光 / 放大）；④ 右下角整体重写：同一套标题栏（`h-9` + 渐变 + 下边框）+ 名「快捷入口」+ 设置 / 折叠两按钮，内容区 `grid grid-cols-3 gap-1` 分三块（应用入口 / 系统入口 / 我的快捷方式），超出 `DOCK_BODY_MAX_H` 内部滚动；⑤ 折叠态 `localStorage` 持久化；⑥ z 值随右侧面板开关切 `z-[100]` / `z-30`（面板铺满档时退到面板之下，半屏档两者本就不相交）；⑦ 保留原有拖放收藏逻辑 |
+| `DesktopSidePanel.tsx` | 半屏档右沿 `right-[252px]` → **`right-[368px]`**（320 宽 + 32 边距 + 16 缝），宽度兜底 `calc(100vw-380px)`；「全部系统入口」列表拆成 **`recommended`（不好找的）/ `easy`（系统已有入口）** 两拨并附取舍说明；`togglePin` 落 `quickActionsCustomized: true` |
+| `QuickActionsRail.tsx`（工作台竖排快捷条） | `toggle` 落 `quickActionsCustomized: true`；「恢复默认」改成 `{ quickActionIds: [...DEFAULT_QUICK_ACTION_IDS], quickActionsCustomized: false }` |
+
+#### 1.37.3 引擎加禁区（`src-tauri/src/commands/grid.rs`）
+
+这是本轮**唯一的结构性改动** —— 其他都是形态与口径。原先前端那块矩形对引擎是「不存在的东西」，
+真机上两种情形会直接叠上去：
+
+- **日历计划多了会长高**（`CalendarWidget` 按计划条数上报自然高度）→ 长到 320 以上就盖住入口；
+- **一个挂件都没有时**，收纳区铺满整幅工作区，最右那一列正好落在右下角。
+
+| 新增 | 作用 |
+| --- | --- |
+| `const DOCK_BOX_W: i64 = CALENDAR_BOX_W;`（=320）、`const DOCK_BOX_H: i64 = 320;` | 与前端 `DOCK_W` / `DOCK_MAX_H` **逐字一致**（同 `CALENDAR_BOX_W` 那套约定） |
+| `fn dock_rect(work_w, work_h) -> SlotRect` | 右沿 = 挂件带右沿（`work_w − ARRANGE_MARGIN`），下沿 = 工作区下沿 |
+| `fn column_bottom(x, w, work_h, reserved) -> i64` | **只看横向交集**（与 `needs_placement` 判据⑤ 同一套口径）：压上禁区就把这一列下沿收到 `r.y − ARRANGE_GAP_Y`，否则就是 `work_h − ARRANGE_MARGIN` |
+| `stack_in_column` / `pack_overflow` 的 `work_h` 参数 → **`bottom`** | 语义从「工作区高」改成「**这一列的绝对下沿**」，禁区收窄直接生效，不影响别的列 |
+| `layout_all_boxes_with` 里 `let dock = dock_rect(...); let reserved = [dock];` | 传给 `place_widget_columns(..., &reserved)`，单列区与多列区两条分支都改用 `column_bottom` |
+
+#### 1.37.4 旧配置迁移（`quickActionsCustomized`）
+
+默认口径变了，但**真机 `settings.json` 已经落盘了旧默认**（含 `taskmgr`）—— 直接改常量老用户看不到变化。
+
+- `src/core/settings.ts`：新增 `DEFAULT_QUICK_ACTION_IDS`（新 9 项）、`DOCK_EASY_TO_REACH_IDS`
+  （仅用于迁移与面板分组说明）、`resolveQuickActionIds(stored, customized)`；
+- `src/core/types.ts`：`AppSettings` 加 `quickActionsCustomized: boolean`；
+- `src/lib/store.ts`：`withDefaults()` 里走 `resolveQuickActionIds(...)`。
+
+规则：`customized === true 且 stored 非空` → 用用户列表（一个字不动）；否则 → 用当前默认。
+于是**老用户（无标记）自动跟着升级**（taskmgr 被踢出），用户一旦自己勾选即置 `true` 不再被覆盖
+（与 `settings.modules` 同一套约定）。`DEFAULT_SETTINGS` 里 `quickActionsCustomized: false`。
+
+#### 1.37.5 顺带修掉的 3 处前后端度量漂移
+
+改常量时对了一遍前后端，发现用户自迭代期间留下的三处不一致（前端画一份、Rust 算一份，靠注释约定
+「必须一致」，但没人锁）：
+
+| 常量 | 前端旧值 | Rust 实际 | 后果 |
+| --- | --- | --- | --- |
+| 盒子标题栏高 | `BOX_HEADER_H = 32`（对应更早的 `h-8`） | `36`（`h-9`，Rust 已改） | 「按内容自然高度撑开」的挂件永远矮 4px，底部 4px 被裁（便签靠内部滚动掩盖了，日历会白出滚动条） |
+| 竖条单元格额外宽 | `STRIP_CELL_EXTRA_W = 36`（配 `gap-1`） | `CELL_EXTRA_W = 32` 配 `GRID_GAP = 6` | 前端每列比后端预留宽 4px ⇒ 4 列时竖条实际比预留宽 10px，吃掉 `min_x` 里那道 24px 间隙的一部分 |
+| 竖条行距 | `gap-1` | `GRID_GAP = 6`（= `gap-1.5`） | 每个行距窄 2px |
+
+**统一原则：前端一律向后端看齐**（预留区由后端定，前端只能画在预留里）。并新建回归锁住这件事
+（见 1.37.6 的 `test-desktop-constants.mjs`）。
+
+#### 1.37.6 验证与产物取证
+
+- `cargo test --lib` **56 passed / 0 failed**。本批：修 **2 个过期期望**（V51–V55 改了度量却没回头改测试：
+  `one_standard_width_for_the_whole_batch` 按当前 `cell(32)=64×62`、列宽 3 列 224 / 4 列 294 推算，不再写死
+  228/300；`an_engine_placed_box_is_realigned_while_a_manual_one_stays_put` 的手工 y 由公式推算，不再写死 600），
+  `REAL_BOXES` 日历高度 `638 → 503`（真机当前值），新增 **2 条**：
+  - `the_dock_corner_is_a_no_go_zone_for_the_right_column_only` —— 只有与入口**横向相交**的那一列被压矮，
+    便签列不受影响；并断言 `DOCK_BOX_W == CALENDAR_BOX_W`（常量层面同宽）；
+  - `no_box_ever_covers_the_bottom_right_launcher` —— 「无挂件铺满整幅」与「日历高到 900」两种情形下，
+    所有格子都不压入口。
+- `node node_modules/typescript/bin/tsc --noEmit -p tsconfig.json` **exit 0**。
+- `node scripts/regression/run.mjs` **19/19 套通过**（新增第 19 套 `test-desktop-constants.mjs`：
+  前后端布局常量交叉校验 —— 解析守卫「解析为空即 FAIL」+ 逐项比对 `MIN_BOX_W/H`、日历宽、标题栏 / 边框高、
+  竖条单元格宽高、`DOCK_W/H/BODY_MAX_H`、`fixed right-/bottom-` 与 `ARRANGE_MARGIN`、面板让开距离、条目网格
+  `gap/px/minmax`；`tsNumber` 支持常量引用与加减表达式求值。**PASS 48 / FAIL 0**）。
+- `node scripts/audit/tool-audit.mjs` **339 PASS / 0 FAIL / 0 WARN**。
+- `node scripts/audit/layout-audit.mjs` **0 / 84 有问题**（此前记录的 2/84 窄屏微裁切已消失）。
+- **打包**：`bash scripts/build-release.sh --no-deploy`（PortableGit 全路径 bash + 显式 PATH）。
+  产物：`handy.exe` **11,236,352 B / 22:54:21** · `Handy_0.1.0_x64-setup.exe` **4,344,451 B** ·
+  `Handy_0.1.0_x64_en-US.msi` **7 MB**；取证：`handy.exe`(22:54:21) **晚于** `dist/index.html`(22:47:19)。
+- **装机**（09-20 22:55 · 铁律顺序）：① 查 DB —— 旧版 PID 36100 **正在接管**（`desktop_icons_hidden` /
+  `desktop_takeover` / `overlay_visible` **三键皆 1**，`SysListView32 vis=False`）；
+  ② `taskkill /F /IM handy.exe`（**必须 `MSYS_NO_PATHCONV=1`**，别写 `//F`）；
+  ③ **立刻** `desktop-icon-restore.py` → `可见=True`；④ `desktop-icon-probe.py` 复核
+  `SysListView32 vis=True`；⑤ `desktop_icons_hidden` 置 `'0'`（`desktop_takeover` / `overlay_visible`
+  仍留 1 —— 下次启动该重新接管）；⑥ NSIS `/S` 静默安装（`MSYS_NO_PATHCONV=1`，否则 `/S` 被当路径转换）；
+  装后 `handy.exe` mtime **12:31:32 → 22:54:14**；⑦ `cmp -l` 逐字节比对 ⇒ **只差 3 字节**
+  （偏移 10183732–10183734，构建产物 `UNK` → 装好的 `NSS`，即 Tauri bundle 标记位）⇒ **装上去的就是本次产物**；
+  ⑧ **未代启动**（`tasklist` 明说「没有运行的任务」），原生桌面图标保持可见，请用户自己启动。
+
+#### 1.37.7 待用户验收点
+
+1. 右下角入口是**格子样式**（外壳 / 标题栏与收纳格**一模一样**），**固定**在右下角、**宽度与日历相同**；
+   桌面右半屏从上到下 = 日历 → 快捷入口，右沿对齐。
+2. 打开后默认只列**不好找的**入口；**任务管理器**已不在默认里（用户若之前手动加过则保留 —— 自己改过就不覆盖）。
+3. **入口不会被压**：日历计划多到长高、或一个挂件都没有（收纳区铺满）时，与其相交的那一列会自动
+   收到入口上沿之上（不能出现「格子压在入口上」）。
+4. 右侧面板**半屏档**不再盖住入口右下角（右沿退到 368px）；**铺满档**入口退到面板之下（z 值切换）。
+5. 入口**折叠**态（收成一条标题栏）在重启后仍保持。
+
+### 1.38 V57 批次（用户：「**现在桌面上的是不能自己拖动调整的，只能通过整理自动整理** · **后面用户不能自己新建格子然后手动拖动整理**」）
+
+> 用户原话（2026-09-20 23:53）：
+> 「现在就剩一个问题，现在桌面上的是不能自己拖动调整的，只能通过整理自动整理
+>  后面用户不能自己新建格子然后手动拖动整理」
+
+#### 1.38.1 真机取证（`db-probe.py` + `handy.log`）
+
+- 库里 11 个格子：**除了 `便签 6`，全部 `manual = 1`**；坐标全部**恰好落在列网格上**
+  （收纳 341 / 706，便签 1071，日历 1355）—— 说明用户确实反复尝试过，但**没有一个手工位置被留住**。
+- 日志 23:51–23:55（用户启动 V56 后的 4 分钟）：
+  ```
+  23:54:44  收纳区空间不足，被顶出屏幕的格子：新格子 14
+  23:55:20  整理布局（增量补齐）：… 手工保留 5 个      ← 前一分钟还是 8 个
+  23:55:38  整理布局（增量补齐）：… 挪动 1 个
+  ```
+  即：**用户点「一键整理」= 唯一能改变布局的手段**（正如他自己描述的），期间还有一个格子被
+  排到屏幕外，而「新格子 14」随后从库里消失（用户只能删掉它 —— 因为他连拖回来的手段都没有）。
+
+#### 1.38.2 五条根因（全部是「拖动这条链路」上的断点，按严重度排序）
+
+| # | 根因 | 证据 |
+| --- | --- | --- |
+| ① | **`setEditMode(true)` 是个空操作** —— V52 把全局编辑态改成每格独立时留下的兼容壳，传 `true` 只 `return new Set(prev)`，**什么都没解锁**。而「新建格子」正是调它 | `focusNewBox` → `setEditMode(true)`；`addBox` 的提示却写着「**已解锁**，可以直接拖动 / 拉大小 / 改名」—— 文案在骗人 |
+| ② | **`toggleEditMode` 的解锁分支同样是 `new Set()`** ⇒ **只能锁、永远解不开**；而且它 **`grep` 全仓只有定义处，从未接到任何 UI** ⇒ 桌面上根本没有「全局解锁」这条路 | `toggleEditMode` 定义于 GridOverlay，无调用者 |
+| ③ | **箱体拖动被 `if (!editMode) return;` 卡住** ⇒ 锁着的格子**只有 36px 高的标题栏**能拖，抓箱体空白处毫无反应（而这正是用户的本能动作） | `<section onMouseDown>` 的首行守卫 |
+| ④ | **V50 规定「挂件一律由列规则安置，不看 `manual`、也不看它现在在哪」** ⇒ 拖便签 / 日历**永远**在下一次布局（挂载自愈 / 一键整理 / 增量补齐）被弹回列里的固定位置 | `layout_all_boxes_with` 里挂件段的注释与实现 |
+| ⑤ | **没有任何兜底把越界格子拉回来** ⇒ 「新格子 14」停在 `y > work_h` 处，用户看不见也够不着，而它又还没被删除 —— 变成幽灵格子 | 日志「被顶出屏幕的格子：新格子 14」 |
+
+> ①②③ 叠加的净效果就是用户那句话：**格子拖不动，只能靠整理**。
+
+#### 1.38.3 改动清单
+
+**前端（`src/modules/desktop-grid/GridOverlay.tsx`）**
+
+| # | 改动 |
+| --- | --- |
+| 1 | 删掉假接口 `setEditMode`，换成三个**名副其实**的 `unlockAllBoxes()` / `lockAllBoxes()` / `unlockBox(id)`（定义位置必须晚于 `boxesRef`） |
+| 2 | `focusNewBox` 改调 `unlockBox(boxId)` ⇒ **新建的收纳格立刻可拖 / 可拉 / 有操作按钮**（V38 用户要求的原意恢复） |
+| 3 | `addWidget`（便签 / 日历）也调 `focusNewBox(created.id)` —— 之前只有收纳格走这条路，新便签建出来是锁着的 |
+| 4 | `toggleEditMode` 改为读当前解锁集合：有解锁的 → 全锁；没有 → **全解锁**（真的解开） |
+| 5 | **格子右键菜单新增「自由摆放（解锁全部格子）」/「锁定全部格子」** —— `toggleEditMode` 从 V52 起就没接 UI，这里补上（格子菜单是用户 V41 指定的「格子操作面板唯一入口」） |
+| 6 | `<section onMouseDown>` **删掉 `if (!editMode) return;`** ⇒ 移动是桌面第一等交互，**任何时候都能拖**；锁只收放「编辑类」能力（改名 / 配色 / 删除 / 拉大小） |
+| 7 | `startMove` 加 `event.stopPropagation()`（标题栏与箱体两个 handler 都会冒泡到这里，避免一次按下起两次拖动） |
+| 8 | `onUp` 加「**没真的动过就不落库**」：拖动现在从任意位置起手，单击也会走完 `onUp`，若无条件落库则**单击一下就把格子标成 `manual`**，点几下全桌都变 manual、整理直接失效 |
+
+**引擎（`src-tauri/src/commands/grid.rs`）**
+
+| # | 改动 |
+| --- | --- |
+| 9 | 挂件单列分支**尊重 `manual` 的纵向位置**：落点合法（在界内 + 不与同列已确定的挂件相交）就照它摆，否则退回规则位。**横向仍归列规则** —— 这是用户自己 V50 要的「便签一个独立的列」，打破它就会回到「便签悬在收纳格正上方」那版截图。（`Full` 模式在加载前已把 `manual` 清零，所以「重新重置整理」自然回到默认纵向顺序） |
+| 10 | 布局收尾新增**「绝不把格子留在屏幕外 / 压在入口上」**兜底：只针对越界者，把越界的那个轴夹回可见区；夹完若落在右下角快捷入口的禁区上，再抬到它上面 |
+
+#### 1.38.4 验证与产物取证
+
+- `cargo test --lib` **58 passed / 0 failed**（V56 的 56 + 本批 2 条新测试）。
+  新增：
+  - `a_manually_moved_note_keeps_its_vertical_position` —— 手工拖过的便签纵向位置必须保留、
+    横向必须仍在便签列；
+  - `no_box_is_ever_left_out_of_view_or_on_the_launcher` —— **刻意构造真机那条路径**：
+    先排一遍拿到真实列位，再把一格按那个列位手工停到下半屏（合法的 `manual` 障碍物），
+    于是同列的引擎格子只剩它下面那点空间，first-fit 找不到位置就退回「接在已占位之下」。
+    ✅ **已实证此用例非恒真**：临时把兜底循环改成 `.take(0)`（等价停用）后该用例转红 ——
+    `格子「其他」纵向跑到可见区外了：y=880 h=320（工作区高 912）`，正是那个幽灵格子的形状。
+- `node node_modules/typescript/bin/tsc --noEmit -p tsconfig.json` **exit 0**。
+- `node scripts/regression/run.mjs` **19/19 套通过**；`test-desktop-constants.mjs` **PASS 48 / FAIL 0**
+  （本批未动任何布局常量）。
+- **打包**：`bash scripts/build-release.sh --no-deploy`。产物：`handy.exe` **11,238,400 B / 00:11:42**
+  （**晚于** `dist/index.html` 00:06:42）· `Handy_0.1.0_x64-setup.exe` **5 MB** · `Handy_0.1.0_x64_en-US.msi` **7 MB**。
+- **装机**（09-21 00:1x · 铁律顺序）：① 查 DB —— 旧版 PID 47768 **正在接管**（三键皆 1、
+  `SysListView32 vis=False`）；② `MSYS_NO_PATHCONV=1 taskkill /F /IM handy.exe`；
+  ③ **立刻** `desktop-icon-restore.py` → `可见=True`；④ 复核 `vis=True` + 进程已退；
+  ⑤ `desktop_icons_hidden` 置 `'0'`；⑥ NSIS `/S` 安装 ⇒ mtime **22:54:14 → 00:11:36**；
+  ⑦ `cmp -l` ⇒ **只差 3 字节**（偏移 10186228–10186230，`UNK`→`NSS`，Tauri bundle 标记位）；
+  ⑧ **未代启动**，原生桌面图标保持可见，请用户自己启动验收。
+
+#### 1.38.5 待用户验收点
+
+1. **随手拖动**：抓格子**任意空白处**（不必是标题栏）就能拖；松手停在原地，**不会自己弹回去**。
+   拖到与别的格子重叠时会被摆到最近的合法位置（「内容绝不能重叠」是你定的规矩）。
+2. **新建即可调**：`＋ 新建收纳格` / `便签` / `日历` 建出来后**立刻就是可拖状态**
+   （带虚线框与操作按钮），不需要再去找锁图标。
+3. **一键解锁全部**：在任意格子的**标题栏右键 → 「自由摆放（解锁全部格子）」**，
+   全部格子一起进入可调状态（改名 / 配色 / 删除 / 拉大小都出来）；再点一次全部锁回。
+4. **便签能上下调**：拖动便签改纵向位置会被保留（横向仍在便签那一列 —— 这是你 V50 要的
+   「便签一个独立的列」）。想彻底回到默认排布：管理页 → **重新重置整理**。
+5. **不会再丢格子**：任何整理都不会把格子排到屏幕外或压在右下角快捷入口上。
+
+### 1.39 V58 批次（用户：「**为什么我们的整理把桌面图标原始的右键行为改变了**，例如这种文件/文件夹右键**应该有 rar 压缩工具**的 · **我们不能改变桌面默认行为，我们只是整理位置**」）
+
+**结论先说**：查出来 **3 条我们自己造成的真缺陷**（全部已修），外加 **1 条拿不到的项**
+（360压缩，属对方策略，**任何非 explorer.exe 的宿主都拿不到**，附决定性实验证据）。
+
+#### 调查手段：新建 `src-tauri/examples/menu_dump.rs`（诊断用，不参与发布）
+
+`QueryContextMenu` 只**填充**菜单、不弹出，所以可以在无人值守下枚举任意路径的原生菜单项
+与**子菜单内容**。这是本次全部结论的来源，也是以后改 `shell_menu.rs` 的对照工具：
+
+```bash
+cd src-tauri && cargo run --release --example menu_dump -- "C:\某个\文件夹" 0x14
+```
+
+#### 缺陷 ① 标志位：`uFlags` 一直传 0
+
+V43 起 `QueryContextMenu(hmenu, 0, 1, 0x7FFF, 0)` —— Explorer 自己弹菜单传的是
+`CMF_NORMAL | CMF_EXPLORE`。实测同一文件两种传法的差异（`1.log`）：
+
+| flags | 菜单里有没有「重命名」 |
+| --- | --- |
+| `0`（V57 及以前） | **没有** |
+| `0x14`（`EXPLORE\|CANRENAME`） | 有：`[19] 重命名(&M)` |
+
+用户截图里那条缺失的「重命名」，就是这么来的。现在按 Explorer 口径传 `CMF_NORMAL|CMF_EXPLORE`。
+
+**但刻意不传 `CMF_CANRENAME`**：Explorer 菜单里那条「重命名」**不是菜单命令**，是 `DefView`
+（文件列表视图）自己实现的**原位改名**。我们这个宿主不是它的视图，传了只会让菜单长出一条
+**点了没反应**的项（甚至在看不见的列表上开一个隐藏编辑框）—— 比"少一项"更坏。已写进注释与
+`test-shell-menu.mjs` 的反向断言。
+
+#### 缺陷 ② 从不转发 `WM_INITMENUPOPUP`（这条影响面最大）
+
+Shell 与第三方扩展的**子菜单是懒加载**的：`QueryContextMenu` 只放占位项，真内容在
+`WM_INITMENUPOPUP` 里补。原来的实现从不转发，实测（修前）：
+
+```text
+发送到(&N)      └ 子菜单只有 1 项：蓝牙设备                 ← 正常应有 压缩文件夹/邮件收件人/桌面快捷方式…
+包含到库中(&I)  └ 子菜单只有 1 项：正在检索库...             ← 占位文案直接露给用户看了
+```
+
+修法是经典**窗口子类化**：菜单弹出期间换掉宿主窗口的 `WndProc`，把
+`WM_INITMENUPOPUP` / `WM_DRAWITEM` / `WM_MEASUREITEM` / `WM_MENUCHAR` 转给
+`IContextMenu2::HandleMenuMsg` / `IContextMenu3::HandleMenuMsg2`，其余消息原样
+`CallWindowProcW` 交回原过程（**我们只是旁听，不改宿主行为**），菜单收起即还原。
+两条实现坑都踩过并写在注释里：① 先克隆接口再**释放 `RefCell` 借用**，否则重入必 panic；
+② `WM_MENUCHAR` 要用返回值回话，命中后必须自己 `return`，不能再落到宿主过程。
+
+#### 缺陷 ③ Shift + 右键被我们抢了
+
+Explorer 里 Shift + 右键 = **扩展菜单**（多出「在此处打开 PowerShell 窗口」「在新进程中打开」
+「在此处打开 Linux shell」），属**系统语义**。我们原来用它开 Handy 自己的条目菜单。
+现在：Shift → 传 `CMF_EXTENDEDVERBS` 给 Shell；Handy 自己的条目菜单改挂 **Ctrl + 右键**
+（Ctrl + 右键在 Explorer 里没有任何含义，抢它不改变任何原生行为）。
+
+**同类第 4 处（同一批一并修）**：桌面**空白处**右键原来也没透传 Shift。改完三处
+（格子条目 / 未归类条目 / 桌面空白处）语义一致 —— **不一致本身就是「改行为」**。
+已由 `test-shell-menu.mjs` 断言「`shellContextMenu(... event.shiftKey)` 至少出现 3 次」锁住。
+
+#### 拿不到的项：360压缩（不是我们能修的）
+
+用户要的「rar 压缩工具」在本机是 **360压缩**（`{9179176E-B763-3200-8500-BB1B90B3D5DE}` /
+`C:\Program Files (x86)\360\360zip\360ZipExt64.dll`，注册在 `*` 与 `Directory` 的
+`shellex\ContextMenuHandlers` 下，x64、CLSID 正常、**未**被 `Shell Extensions\Blocked` 屏蔽）。
+
+但它**只在进程名是 `explorer.exe` 的宿主里出项**。决定性实验（同一份工具、同一路径、
+同一个 flags）：
+
+| 工具进程名 | `dify.zip` 的菜单项数 | 360压缩的项 |
+| --- | --- | --- |
+| `menu_dump.exe` | 40 | **无** |
+| `explorer.exe`（复制改名后运行） | **45** | 用360压缩打开 / 解压到… / 解压到当前文件夹 / 解压到 dify\ |
+
+即 `360ZipExt64.dll` 里同时存在 **宽字符串 `explorer.exe` 与 `360ExtLoader.exe`**，并导入
+`CreateProcess` / `GetCommandLine` / `GetModuleFileName` —— 按宿主进程名分流。
+**换任何工具（包括腾讯桌面整理）都一样拿不到**；我们的代码里没有任何可修之处。
+真要拿到，只能让 explorer.exe 亲自弹菜单（见 CONVENTIONS §31 的取舍）。
+
+#### 顺带核实：我们**没有**把桌面背景菜单改掉
+
+`platform/desktop_menu.rs` 只往 `HKCU\Software\Classes\DesktopBackground\Shell` **加**一条
+「打开 Handy 桌面整理」，是**增项**，不删不改系统原有项。桌面空白处右键仍走
+V53 的原生菜单（`ipc.shellContextMenu('::{...}\Desktop')`）。
+
+#### 验证
+
+- `cargo test --lib` **58 passed / 0 failed**；`tsc --noEmit` **exit 0**；
+  `node scripts/regression/run.mjs` **20/20 套**（新增 `test-shell-menu.mjs`，**32 PASS / 0 FAIL**）。
+- 新套件**自证非恒真**：临时把 `flags` 改回字面量 `0`，它立刻变红（`✗ flags 含 CMF_EXPLORE`、
+  `✗ flags 不再裸传 0`），还原后复绿。
+- 打包 / 装机取证见 §2.1。
+
+#### 请你验收
+
+1. 格子里图标按 **Shift + 右键** → 出现「在此处打开 PowerShell 窗口」这类**扩展菜单**项。
+2. 按 **Ctrl + 右键** → 出现 Handy 自己的菜单（打开文件位置 / 移出格子）。
+3. 右键 → **发送到** 子菜单里不止「蓝牙设备」一项；**包含到库中** 不再直接显示「正在检索库...」。
+4. 普通右键的菜单项与在资源管理器里右键**同一个文件**逐条比对（除 360压缩 与 重命名 两项，
+   原因见上）。
+5. 桌面空白处右键仍是**原生**菜单（含我们加的那条 Handy 入口）。
+
+### 1.40 V59 批次（用户 2 图 3 条：「**自动整理后高度方向还是有点重叠** · **图标还是不能自己拖动，拖动就显示禁用图标** · **列表展开格子装不下了应该自动出滚动条**」）
+
+用户原话（09-21 07:47，`Clipboard_Screenshot.png` + `Clipboard_Screenshot-1.png`）：
+
+> 「看图片为什么自动整理 你看图片中红圈的位置高度方向还是有点重叠呢
+> 2.图标还是不能自己拖动，拖动就显示禁用图标
+> 3.我列表展开格子装不下了应该自动出滚动条哇」
+
+三条反馈，**两个根因，都在「我们看不见的那一层」**：
+
+#### 根因 ①（第 2 条）HTML5 拖放在挂件窗里**被 wry 判死** —— V43–V58 五轮补丁全打错了地方
+
+`wry-0.55.1/src/webview2/drag_drop.rs`（本机 registry 源码，逐行读过）：
+
+```rust
+fn DragEnter(&self, pDataObj, ..., pdwEffect) -> ... {
+    let hdrop = DragDropTarget::iterate_filenames(pDataObj, |p| paths.push(p)); // 只认 CF_HDROP
+    if !enter_is_valid { return Ok(()); }        // ← 直接返回，**一个字都不写 *pdwEffect**
+    ...
+}
+fn DragOver(&self, ..., pdwEffect) -> ... {
+    unsafe { *pdwEffect = *self.cursor_effect.get() };   // 初值 = DROPEFFECT_NONE（没被改过）
+}
+```
+
+我们的图标是 **DOM 元素**，拖它**没有 `CF_HDROP`** ⇒ `enter_is_valid == false` ⇒
+`DragOver` 每个像素都往 `*pdwEffect` 写 `DROPEFFECT_NONE` ⇒ **操作系统**判定这次拖拽
+「不可放置」：光标画成禁止符号、`drop` 永不派发。
+
+**只要用 HTML5 拖放拖 DOM 元素，在这个窗口里就永远放不下**，与 JS 怎么写无关。
+V43（`effectAllowed='all'`）、V47（同时置 `itemDragging`）、V48（`dataTransfer.types` 兜底）、
+V50（无条件 `preventDefault`）、V51（不再设 `dropEffect='none'`）、V55（放宽校验）——
+六层补丁之所以全部无效，就是因为改的不是那一层。**已全部删除**。
+
+⇒ **内部拖拽改成「指针拖拽」**：`mousedown` 记起点 → `mousemove` 越过
+`DRAG_THRESHOLD = 5px` 才进入拖拽态（自己算落点、自绘一个跟随光标的预览）→
+`mouseup` 执行落点动作。整条链路**不进入系统拖放循环**，`IDropTarget` 无从插手。
+同时**保住**「从资源管理器拖文件进格子」（真实文件有 `CF_HDROP`，`onDragDropEvent` 照旧），
+所以挂件窗的 `drag_drop_enabled` **保持默认 `true`**（`tauri-utils` 的文档原话：
+"Disabling it is required to use HTML5 drag and drop on the frontend on Windows" ——
+两条路**互斥**，这才是选指针拖拽的真正理由）。
+
+细节：落点判定复用既有的 `hitDock` / `hitBoxId`（同一套坐标，不另起一套换算）；
+顺序与原生文件拖放一致（**快捷入口优先**）；`mousedown` 就调 `gridSetInteractive(true)`
+（**不能等阈值**，否则指针滑出命中区后 Rust 轮询把窗口切回穿透，`mousemove` 断流卡死 ——
+`startMove` 用的是同一句话）；`mouseleave` 作废会话（防永久卡在拖拽态）；Esc 取消。
+
+#### 根因 ②（第 1、3 条）收纳格高度是 **auto**，与引擎几何不一致
+
+`<section>` 上是 `height: isWidget ? box.height : undefined` —— **收纳格**的高度由内容决定，
+而引擎（`box_height_at`）是按「条目数 ÷ 每行列数」估的。两者不一致就同时出两个毛病：
+
+- 渲染比引擎高 ⇒ 盒子长出去，**压住下面那个格子**（红圈里的重叠）；
+- 盒子自己长高了 ⇒ 内容区的 `overflow-y-auto` 与内容等高，**没有可滚余量**，
+  于是「装不下了却没有滚动条」。
+
+叠加上一条更隐蔽的：flex 子项默认 `min-height: auto`（不小于内容高），
+**少了 `min-h-0` 它根本压不下去**，`overflow-y-auto` 形同虚设。
+
+**切成列表视图时最容易撞上**：引擎按图标网格估高（8 个条目 = 2 行 / 178px），
+列表视图是一行一个（8 行 / ≈300px），差一倍还多。
+
+修法：① `height: box.height`（**所有**格子，不再有 auto 分支）；② 去掉 `maxHeight: isWidget ? …`
+（再压一层上限会让渲染高度小于引擎高度，又变回重叠）；③ 内容区 `flex-1 min-h-0 overflow-y-auto`
+三件齐（列表 / 网格两套类名），并删掉 `max-h-[60vh]`（上限已由盒子本身给）。
+
+> 旁证：真机库 11 个格子的坐标**两两不重叠**（列内间隔一律 24px），
+> 所以可见的重叠**只可能**来自「渲染高度 ≠ 引擎高度」，不可能来自引擎排布。
+
+顺带修一个静默缺陷：`boxViewModes` 从 V51 起是**纯内存** `useState` ——
+用户切到列表视图**重启就悄悄变回网格**。现在落到 `localStorage`
+（`handy:grid.box-view-modes`，与折叠态同一套做法）。
+
+#### 改动清单
+
+| 文件 | 改动 |
+| --- | --- |
+| `src/modules/desktop-grid/GridOverlay.tsx` | 删 6 处 HTML5 拖放处理（根画布 / 收纳格 / 竖条 / 入口 / 条目 / 竖条条目）+ 删 `resolveDraggedItem` / `resolveDraggedLoose` / `isOurDrag` / `startItemDrag` / `startLooseDrag` / `endItemDrag` / 两个 MIME 常量；新增 `DragSession` 类型 + `DRAG_THRESHOLD` + `beginDragSession` / `beginItemDrag` / `beginLooseDrag` / `resetDragVisuals` + `mousemove`/`mouseup`/`Escape`/`mouseleave` 主循环 + 自绘拖拽预览；`height: box.height`；内容区 `flex-1 min-h-0`；视图模式落 localStorage |
+| `src-tauri/src/commands/grid.rs` | 只加注释：**明确不许**给挂件窗设 `drag_drop_enabled(false)`，并写清 wry 的行为（防下次有人「顺手修一下」） |
+| `scripts/regression/test-drag-pointer.mjs` | **新建**：锁「不许再出现 HTML5 拖放实操痕迹」「高度必须绑引擎值」「内容区三件套」等 43 条 |
+| `scripts/regression/test-desktop-constants.mjs` | 收纳格网格类名的解析正则跟着更新（`max-h-[60vh]` → `min-h-0 flex-1`）——**正是它自带的「解析为空即 FAIL」守卫先变红，才没让这次类名改动静默溜过** |
+| `scripts/regression/run.mjs` | 登记新套件（20 → **21 套**） |
+
+#### 验证
+
+- `cargo test --lib` **58 passed / 0 failed**（本批无 Rust 逻辑改动，只加注释）。
+- `tsc --noEmit` **exit 0**。
+- `node scripts/regression/run.mjs` **21/21 套**；`test-drag-pointer.mjs` **43 PASS / 0 FAIL**。
+- 新套件**自证非恒真**（三处逐一破坏、逐一变红、还原复绿）：
+  ① 加回 `onDragStart` + `dataTransfer.setData` → FAIL 2；② 拿掉内容区 `min-h-0` → FAIL 3；
+  ③ 高度退回 `isWidget ? box.height : undefined` → FAIL 1。
+- 打包 / 装机取证见 §2.1。
+
+#### 请你验收
+
+1. 抓格子里任意图标**拖到另一个格子** → 光标是正常箭头（**不再出现禁止符号**），
+   松手后图标出现在目标格子里；拖动全程有一个跟随光标的小预览。
+2. 拖到**空白处**松手 → 图标回到左侧「未归类」竖条（**移出格子，文件本身没动**）。
+3. 拖到右下角**快捷入口** → 收藏成一条「我的快捷方式」。
+4. 拖动途中**按 Esc** → 取消，什么也不发生。
+5. 格子之间**不再有重叠**（「其他」那种装不下的格子会**内部出滚动条**）。
+6. 把某个格子切成**列表视图**，重启后**仍然是列表视图**（此前会悄悄变回网格）。
+
+> 已知未做（有意）：引擎的自动高度仍按**图标网格**估算（不知道列表视图）。
+> 所以「列表视图 + 条目多」的盒子会**内部滚动**而不是自动长高 —— 这正是用户要的
+> 「装不下了应该自动出滚动条」。要做「列表也能自动撑高」需要把视图模式下推到
+> `grid_boxes`（迁移 v11）并在 `box_height_at` 里分档，属独立批次。
+
+### 1.41 V59.1 批次（用户 1 条：「**桌面可以滚轮上下移动了……只有鼠标移动到图标或者格子上才可以移动，
+在桌面空白的地方不能移动**」+「**貌似在另一个电脑有问题**」）
+
+> 上一批（V59）的验收前置：用户 09-21 已确认「**图标拖动问题解决了，样式也解决了**」，
+> 但随即报出这条 —— 它是 **V59 自己引入的回归**，不是新需求。
+
+#### 根因（两处，同一类错误）
+
+**① 根画布被 V59 改成了滚动容器（主因）**
+
+```diff
+-      className="fixed inset-0 select-none overflow-hidden"
++      className="fixed inset-0 select-none overflow-y-auto grid-scroll"   // ← V59 引入
+```
+
+V59 排查「装不下不出滚动条」时**顺手**把桌面根画布也改成了 `overflow-y-auto`，
+还在 `test-drag-pointer.mjs` 的白名单里给它写了理由（「根画布 `fixed inset-0`：整层滚动」）
+—— **那条理由本身就是 bug**：全屏桌面层永远不该能滚。
+
+机制：根画布 `fixed inset-0`，格子 / 竖条都是它的 **`absolute` 子元素**；绝对定位元素的边框盒
+超出包含块时会**撑大包含块的可滚动溢出区** ⇒ 只要有**任何一处**子元素比视口高出十几像素，
+整层就变成可滚容器。再叠加根画布平时 `pointerEvents: 'none'`：
+
+| 光标位置 | 命中谁 | 结果 |
+|---|---|---|
+| 桌面空白处 | 根画布穿透 → explorer | 滚不动（看着「正常」） |
+| 图标 / 格子上 | 格子自己恢复指针事件 → 冒泡到根画布 | **整个桌面跟着滚** |
+
+⇒ 用户看到的正是「**只有在图标或格子上才能滚**」。
+
+**② 左下「未归类」竖条会把自己的溢出漏给根画布（「另一个电脑」的那一半）**
+
+`loose_strip_rect`（Rust）：列数被 `LOOSE_MAX_COLUMNS = 4` 夹住时 `rows = ceil(n/4) > rows_per_col`，
+此时 Rust 必须把 `h` 封顶在 `avail_h`（不许越出工作区下边界），而**前端渲染的行数仍是
+`ceil(n / columns)`** ⇒ 内容天然比给定区域高。竖条原本没有 `overflow`，多出来的行就**溢出去**
+被根画布收走。小屏 `avail_h` 更小、`rows_per_col` 更少 ⇒ **更少的条目就够触发**，
+这就是用户说的「另一个电脑有问题」——同一处代码在不同分辨率下的**阈值差**，不是两套 bug。
+
+#### 改动
+
+| 文件 | 改动 |
+|---|---|
+| `src/modules/desktop-grid/GridOverlay.tsx` | ① 根画布 `overflow-y-auto grid-scroll` → **`overflow-hidden`**（并写死「永远不要改成 auto」的原因）；② 竖条容器加 **`overflow-y-auto grid-scroll`**（列数撞上限时**在竖条内部滚**，与收纳格同口径）；③ 右键菜单外壳 `menuShellClass` + 格子菜单那处字面量：`absolute z-50` → **`fixed z-50`**（坐标取自 `clientX/clientY` = 视口坐标；`absolute` 会被根画布的 `overflow-hidden` 裁掉半截，且与一直是 `fixed` 的桌面菜单不一致） |
+| `src-tauri/src/commands/grid.rs` | `loose_strip_rect` 补文档：把「列数撞上限 ⇒ 前端内容高于 `rect.h` ⇒ 由竖条自己滚」写成**显式契约**（并写明**不许**放开 `h` 的封顶）；单测补 `assert!(natural_h > many.rect.h)` 把契约钉住 |
+| `scripts/regression/test-drag-pointer.mjs` | 白名单去掉根画布、加入竖条；**新增 6 条断言**：根画布必须是 `overflow-hidden` / 不许挂 `grid-scroll` / 全屏层只有 1 个 / 竖条自己滚 / 无 `absolute z-50` 菜单 / 菜单确实 `fixed z-50` |
+| `scripts/audit/overlay-overflow-probe.py` | 新增：离线复算「屏幕 · 工作区 · 桌面图标尺寸 · 未归类条目数 ⇒ 竖条几何 + 各格子下沿」的探针，用来把「哪台机器会溢出」量出来（**不依赖跑测试那台机器的桌面**） |
+
+#### 验证
+
+- `tsc --noEmit` exit 0；`cargo test --lib` **58 passed**；`node scripts/regression/run.mjs` **21/21 套**
+  （`test-drag-pointer` 43 → **49 PASS / 0 FAIL**）。
+- **自证非恒真**（三处破坏逐一变红再还原）：
+  ① 根画布退回 `overflow-y-auto grid-scroll` → FAIL 3；
+  ② 竖条去掉 `overflow-y-auto` → FAIL 2；
+  ③ 格子菜单退回 `absolute z-50` → FAIL 2。
+- 本机离线复算（`overlay-overflow-probe.py`）：屏幕 2560×1440 / 工作区 2560×1368（物理），
+  挂件窗逻辑 **1707×912**、桌面图标 **32**、未归类 25 条 ⇒ 竖条 3 列 10 行、底 706 < 912
+  ⇒ **本机本来不溢出**；说明用户看到的溢出量很小（「移动一点」），与「小屏才踩到」的判断一致。
+
+#### 请你验收
+
+1. 鼠标停在**图标 / 格子上**滚轮上下滚 → **整个桌面不再移动**。
+2. 鼠标在**桌面空白处**滚轮 → 本来就不动，保持不动。
+3. 格子里条目装不下时，**格子内部照旧能滚**（这条是 V59 的能力，不能被这一改弄丢）。
+4. 在屏幕**靠下 / 靠右**的位置右键格子 → 菜单**完整显示**，不被切掉半截（V59.1 顺带修）。
+
+> 已知未做（有意，独立批次）：`grid.rs` 建挂件窗时直接套用 DB 里的 `overlay_geometry`
+> （本机 1707×912），**不与当前显示器工作区求交** —— 换到分辨率更小的机器上会出现
+> 「窗口比屏幕大、右下角格子跑到屏外」。它**不解释**本次的滚动（滚动只由根画布决定），
+> 所以没有塞进这一批；要改就在窗口创建处夹一次 `work_area`。
+
+
+### 1.42 V60 批次（用户 1 图 1 条：「**鼠标右键可以借鉴腾讯桌面整理的功能，日历可以修改为工作台，
+把快捷入口这些都可以整合到工作台里面，整合成一个整体的模块，现在还缺少添加便签的按钮
+还有整理 关闭整理等，工作台这个可以常驻，不跟桌面整理一起退出等**」）
+
+拆成四件事，先按 `AskUserQuestion` 定了三个方向（用户均取推荐项）：
+
+| 问题 | 结论 |
+|---|---|
+| 工作台形态 | **常驻浮窗 · 固定在右侧**（不是可拖动，也不是格子） |
+| 快捷入口 | **并入工作台**，取消独立格子 |
+| 右键菜单 | **桌面背景原生右键 · 子菜单**（走注册表，不是接管后自绘） |
+
+#### ① 「日历」→「工作台」= 浮窗，不是格子（这是整批的枢纽）
+
+日历原来是 `kind='calendar'` 的**盒子**：参与布局、可拖动、`contentHidden` 时被一起收起。
+而用户要「**常驻，不跟桌面整理一起退出**」—— 盒子的显隐定义就是「退出整理时消失」，
+**两者天然冲突**。所以工作台必须浮窗化：它由自己决定显隐，不必给盒子系统开特例。
+
+Rust 侧把「右下角 320×320 禁区」改成「**工作区右侧一整列**」：
+
+```diff
+- const DOCK_BOX_W / DOCK_BOX_H / fn dock_rect()        // 右下角一个块
++ const WST_BOX_W: i64 = CALENDAR_BOX_W                 // = 320，与当年日历同列
++ fn workstation_rect(work_w, work_h)                   // x=work_w-32-320, y=32, w=320, h=work_h-64
+```
+
+`place_widget_columns` 的签名里 `work_w` 换成 **`right_edge`**（= 禁区左沿 − `ARRANGE_GAP_X`），
+`cursor_right` 从它起步；末尾越界钳制由「抬到禁区上沿」改成「**横向让开**」——
+新版禁区是整列高，抬不动。
+
+| 文件 | 改动 |
+|---|---|
+| `src-tauri/src/commands/grid.rs` | `dock_rect` → `workstation_rect`；`place_widget_columns(…, right_edge)`；抽出 `pub fn hide_overlay_now`（给 CLI 用）；单测 `the_dock_corner_is_a_no_go_zone_…` → `the_workstation_column_is_a_no_go_zone`、`REAL_BOXES` 9→8（去日历盒子）、`the_real_v50_mess_…` 种子去日历 |
+| `src-tauri/src/db/migrations.rs` | 新增 `V11_GRID_DROP_CALENDAR`：删 `kind='calendar'` 的盒子 + 其悬挂登记；单测 `upgrading_drops_calendar_boxes_only` |
+| `src/modules/desktop-grid/DesktopWorkstation.tsx` | **新增**：常驻浮窗（标题栏 + 唯一滚动区 + 底栏 4 按钮） |
+| `src/modules/desktop-grid/GridOverlay.tsx` | 盒子头部 / 配色 / 视图切换 / 宽度回收**全部去日历分支**；Dock `<div>` 整块换成 `<DesktopWorkstation>`；新增 `calendarTheme`（`handy:grid.workstation-theme`）与主题选择器；清理 11 个 V45 合并面板后就死掉的图标 import |
+
+工作台的**外壳类名与底色由调用方传入**（`BOX_SHELL_CLASS` / `cardBackground('')`）——
+用户 09-20 要求「快捷入口改造成格子样式」，复制一份常量到新文件只会等着两边漂移。
+
+#### ② 操作按钮：用户点名缺的四件事
+
+工作台底栏 `grid grid-cols-4`：**便签**（`StickyNote`）/ **格子**（`Plus`）/ **整理**（`Sparkles`）/
+**退出整理**（`Eye/Off`，`hidden` 时文案翻成「开启整理」）。它们**不参与滚动**（`shrink-0`）——
+「随时点得到」才是这排按钮的意义。
+
+#### ③ 桌面背景原生右键子菜单（`DesktopBackground\Shell`）
+
+从 V45 的「孤零零一项」扩成 **8 项分组子菜单**：打开桌面整理 / 新建格子 / 新建便签 / 一键桌面整理 /
+备份布局 / 还原布局 / 设置中心 / 退出桌面整理。三个静默失败坑都用单测钉住了：
+
+1. **子键名必须是 GUID 形状**（Explorer 硬要求，非 GUID 会让整条子菜单**静默消失**）；
+2. **`SubCommands` 必须「存在但为空」**（空串是语义的一部分）；
+3. **`install()` 必须整键重建**，不是就地覆盖 —— 否则从 `SUB_ITEMS` 里去掉过的项会留在注册表里
+   变成一个**死按钮**。
+
+顺带修掉一个**升级路径上的死结**：`ensure_desktop_menu` 原来只按「顶层键在不在」判断已装，
+而老用户注册表里躺着 V45 的单命令版 ⇒ `status()` 永远 true、`install()` 永远不被调用 ⇒
+**新菜单一辈子推不到老用户机器上**。现在 `status()` 的语义收紧为「装的正是当前版本」
+（注册表写 `Version` 值，与 `MENU_VERSION` 比对），对不上就自动重建。
+
+**砍掉一项**：V60 里我曾写上「显示 / 隐藏便签」（`--toggle-notes`）。V48 起便签就是格子，
+产品里**没有**「便签显隐」这个开关 —— 为菜单凑数现造一个状态，正好撞上这个模块最贵的一课
+（用户对「东西自己不见了、还找不到规律」容忍度为零）。按本文件既有的「假按钮宁缺毋滥」纪律删除。
+
+#### ④ 冷启动丢事件（本批唯一需要新机制的地方）
+
+`lib.rs::handle_cli_args` 有两条入口，行为不一样：
+
+| 路径 | 触发 | 只发事件会怎样 |
+|---|---|---|
+| **热** | Handy 已在跑，单实例回调 | 正常（挂件窗 JS 早已注册监听） |
+| **冷** | Handy 没在跑，`handy.exe --new-box` | **必然丢** —— 事件是 `setup` 里发的，那时 WebView 还在加载 |
+
+所以 **入队 + 唤醒** 两件事都做，并且**以队列那份为准**：前端收到唤醒后回调
+`grid_take_pending_action` 取走并清空，从不采信事件载荷（它是 `take()` 语义，两条路都走通
+也不会重复新建两个格子）。前端在**挂载时**与**收到唤醒时**各取一次。
+
+#### ⑤ 顺带抓出的真 bug：面板与工作台同为 `z-40`
+
+`sidePanelShell` 一直是 `z-40`，新工作台最初也写了 `z-40`。同级时谁在上**只由 DOM 顺序决定**，
+而工作台在 `GridOverlay` 里排在面板之后 ⇒ 铺满档面板（`right-3 w-[calc(100vw-24px)]`，
+横向盖住工作台那一列）的右侧（滚动条 / 关闭按钮所在）会被工作台压住、点不动。
+工作台改为 **`z-[38]`**，把阶梯钉成机器校验：
+`盒子(auto) < 参考线 35 < 工作台 38 < 面板 40 < 菜单 50 < 拖拽预览 95`。
+
+#### 改动文件（V60）
+
+| 文件 | 改动 |
+|---|---|
+| `src-tauri/src/commands/grid.rs` | 禁区整列 · `place_widget_columns` 签名 · `hide_overlay_now` · **`PENDING_ACTION` / `dispatch_desktop_action` / `grid_take_pending_action`** |
+| `src-tauri/src/platform/desktop_menu.rs` | `SUB_ITEMS` 8 项 · `MENU_VERSION` 升级标记 · 整键重建 · 5 条单测 |
+| `src-tauri/src/lib.rs` | `handle_cli_args` 8 个参数分支（4 个就地做、3 个转发前端、布局两个 spawn） |
+| `src-tauri/src/db/migrations.rs` | `V11_GRID_DROP_CALENDAR` |
+| `src/modules/desktop-grid/DesktopWorkstation.tsx` | **新增**（壳 + 底栏 + `WORKSTATION_W`） |
+| `src/modules/desktop-grid/GridOverlay.tsx` | 去日历 · 接工作台 · 右键动作执行与监听 |
+| `src/lib/ipc.ts` | `gridTakePendingAction` |
+| `src/modules/desktop-grid/DesktopSidePanel.tsx` | 半屏档让位注释更新（`right-[368px]` 仍成立） |
+| `scripts/regression/test-drag-pointer.mjs` | 新增 ⑪ 节 25 条（工作台常驻 / 按钮 / 跨语言几何 / 动作集一致 / 迁移） |
+| `scripts/regression/test-desktop-constants.mjs` | 常量换成 `WORKSTATION_W` / `WST_BOX_W`；新增 z 阶梯与「工作台无高度上限」 |
+| `scripts/audit/guard-mutation-check.py` | **新增**：守卫的**自证非恒真**工具（见 §5 验证纪律） |
+
+#### 验证
+
+- `tsc --noEmit` exit 0；`cargo test --lib` **63 passed**（V59.1 的 58 + 迁移 v11 + 菜单 4 条）；
+  `node scripts/regression/run.mjs` **21/21 套**（`test-drag-pointer` 49 → **74**，
+  `test-desktop-constants` 22 → **48**）；`tool-audit` **339 PASS / 0 FAIL / 0 WARN**；
+  `vite build` exit 0。
+- **自证非恒真**：`python scripts/audit/guard-mutation-check.py` —— 2 个守卫 / **17 个破坏用例**
+  全部被对应断言捕获、源码自动还原（含上面 ⑤ 那个真 bug：把工作台调回 `z-40` 或抬到 `z-[45]`
+  都变红）。
+
+#### 装机（V60）
+
+| 项 | 结果 |
+|---|---|
+| 打包 | `bash scripts/build-release.sh --no-deploy`（PortableGit 全路径 bash + 显式 PATH）· **EXIT=0** · 6 分 31 秒 |
+| 产物 | NSIS **`Handy_0.1.0_x64-setup.exe` 5 MB** · MSI **7 MB** · `handy.exe` **11,264,512 B** |
+| 顺序取证 | `handy.exe` **15:50:10** 晚于 `dist/index.html` **15:44:11** ✓；关键源码 mtime 全部更早（`GridOverlay.tsx` 15:38:55 · `grid.rs` 15:22:15 · `desktop_menu.rs` 15:24:17 · `migrations.rs` 14:59:09）✓ |
+| 装机前环境 | 旧版（V59.1）仍在运行（PID 42232），**未接管态**（`overlay_visible=0` / `desktop_icons_hidden=0`）—— 探针确认 explorer 的 `SysListView32 vis=True`，所以本次**不处于**「强杀会留空白桌面」的危险状态 |
+| 停进程 | `MSYS_NO_PATHCONV=1 taskkill /F /IM handy.exe` 成功 → `tasklist \| grep -i handy` 无残留 ✓ |
+| 归还桌面 | `desktop-icon-restore.py` 报「Progman/DefView 已可见，跳过」；`desktop-icon-probe.py` 复核 `Progman / SHELLDLL_DefView / SysListView32` **三级全 vis=True** ✓ |
+| 标记复位 | `grid_meta.desktop_icons_hidden` 显式置 `'0'`（`desktop_takeover`/`overlay_visible` 不动） |
+| 装机 | NSIS `/S` exit 0；已安装 `handy.exe` mtime **12:11:40 → 15:50:02** ✓ |
+| 取证 | `cmp -l` 仅 **3 字节**差：偏移 **10210292–10210294**，`UNK`(125/116/113) → `NSS`(116/123/123)，文件大小一致 ✓ |
+| 是否代启动 | **没有**（`tasklist \| grep -i handy` 无结果），原生图标保持 `vis=True` |
+
+> ⚠️ 装机后**首次启动**时 `ensure_desktop_menu` 会重建右键菜单：老注册表里那份是 V60 开发期
+> 用探针装上的（9 项、无 `Version` 值）⇒ 新 `status()` 判「不是当前版本」⇒ `install()` **整键重建**
+> 成 8 项并写 `Version=60`。这一步是**设计内**的（见上文③），也是「升级路径不再被堵死」的实证。
+
+#### 请你验收
+
+1. 桌面右侧是**一个整体模块**：上面日历、中间快捷入口、下面四个按钮（便签 / 格子 / 整理 / 退出整理）。
+2. 点底栏「便签」→ 出现一张便签；点「格子」→ 出现一个收纳格；点「整理」→ 桌面重排。
+3. 点底栏「退出整理」→ **格子和竖条消失，工作台还在**（这是本批的核心）。再点「开启整理」→ 回来。
+4. 桌面空白处右键 → 菜单里多了「**Handy 桌面整理 ▸**」子菜单，8 项：
+   新建格子 / 新建便签 / 一键桌面整理 / 备份布局 / 还原布局 / 设置中心 / 退出桌面整理。
+   **Handy 关掉时**（从托盘退出）再点「新建格子」→ 应冷启动并直接新建（这条走的是新队列）。
+5. 面板（搜索 / 工具箱 / 快捷）**铺满档**时，能盖住工作台且**右侧不被压住**（V60 抓的那个 z bug）。
+
+
+### 1.43 V61 批次（用户 1 图 1 条：「**工作台样式不够自然、快捷模块一看就是拼上去的** · **要简单文字按钮、别用大图标占空间** · **双击打开我的电脑/文件夹没反应，右键打开却切到资源管理器**」）
+
+> 用户 09-21（附桌面截图）：「感觉工作台这块样式不够自然，一看那个快捷模块就是拼接上去的
+> 要融为几个整体，简单的文字按钮就可以 不用那么大的图标占空间，本来空间就不够，
+> 图标原有的行为都被覆盖了 例如我双击打开我的电脑 打开某个文件夹现在都做不到了
+> 双击没反应，右键打开居然切到 资源管理器了」
+
+这一条里其实压着**两件不相干的事**，先分开：
+
+| 现象 | 性质 | 落点 |
+|---|---|---|
+| 工作台「拼接感」、大图标占空间 | **观感**（编译通过 + 类型正确 + 单测全绿照样存在） | `DesktopWorkstation.tsx` / `GridOverlay.tsx` / `DesktopWidgets.tsx` |
+| 双击没反应（右键却好使） | **功能 bug**（V59 改造的自造回归） | `grid.rs` 的交互状态机 |
+
+#### ★ 双击失效的根因（本批最值钱的一条）
+
+`grid_set_interactive(false)`（前端抬起条目时调）**无脑**执行 `set_ignore_cursor_events(true)`
+把窗口设成穿透，而**光标轮询线程的局部缓存** `last_ignore` 看不见这次改动：
+
+```
+轮询：    set(可交互)        last_ignore = Some(false)
+前端抬起：set(穿透)          last_ignore 仍是 Some(false)   ← 记账没跟上
+轮询下一拍：算出「该可交互」，!want == false == last_ignore
+          ⇒ 判定「不用改」⇒ **跳过 set** ⇒ 窗口永久穿透
+```
+
+第一次 `mouseup` 之后窗口就穿透了 ⇒ 第二次点击落到下层桌面 ⇒ 浏览器**永远凑不齐 `dblclick`**。
+
+**指纹**：同一批图标**右键好使、左键不好使** —— `onContextMenu` 不经过 `beginDragSession`，
+压根没改过窗口状态。用户这句「右键打开居然切到资源管理器了」不是在抱怨右键，
+而是把「左键彻底断了」这件事指出来了。
+
+修法（两层，缺一不可）：
+
+1. `grid_set_interactive` 改成按「**强制标志 + 当前光标命中**」重新求值
+   （`let want = interactive || cursor_hit(&win)`）—— 撤掉强制可交互 ≠ 立刻穿透；
+2. 穿透态的「上次施加值」提升为**共享原子** `POLLER_IGNORE`，唯一入口 `apply_ignore`
+   （谁改谁记账），并给「实际状态不可知」的两条路径（窗口创建 / 收起格子）加 `force_ignore`。
+
+#### 工作台观感：从「三块板子」到「一张卡片」
+
+| 维度 | V60（用户看到的） | V61 |
+|---|---|---|
+| 可点物 | 32px 图标块 + 10px 居中标签的**磁贴方阵**（3 列） | 同一款**胶囊**：14px 图标 + 11px 文字（2 列） |
+| 分组 | 三段之间各压一条 `border-t` | **段头**（小标题 + 延伸淡线，两段共用一个组件） |
+| 底栏 | 四个「上图标下文字」竖排块（约 44px） | 四个横向胶囊（约 26px） |
+| 日历外壳 | 自带 `bg-neutral-950/72` + `ring-1` | 只留 `bg-black/[0.18]`（不再「卡片里贴卡片」） |
+| 重复入口 | 「整理」「设置」在底栏/标题栏之外各再摆一份 | 去重：只留「工具箱」 |
+
+省下来的高度（约 50–60px）全给了日历，正是用户说的「本来空间就不够」。
+
+#### 改动清单
+
+| 文件 | 改动 |
+|---|---|
+| `src-tauri/src/commands/grid.rs` | `POLLER_IGNORE` 共享原子（`IGNORE_UNKNOWN` 哨兵）· `apply_ignore` / `force_ignore` · 轮询去掉局部 `last_ignore` · `grid_set_interactive` 按「强制 + 光标命中」求值 · 窗口创建与 `hide_overlay_now` 改走 `force_ignore` |
+| `src/modules/desktop-grid/DesktopWorkstation.tsx` | `ActionButton` 改横向胶囊 · 新增并导出 `SectionLabel`（→ `WorkstationSectionLabel`）· 内容区去掉 `border-t` 分段、`gap-2.5` · 底栏分隔线调淡到 `/0.04` |
+| `src/modules/desktop-grid/GridOverlay.tsx` | `DockCell`（磁贴）→ **`DockChip`**（胶囊）· 快捷入口并成一段两列网格 · 应用入口去重（只留工具箱）· 「我的快捷方式」独立成段 · 清掉 3 个死导入（`Settings`/`SlidersHorizontal`/`Sparkles`） |
+| `src/modules/desktop-grid/DesktopWidgets.tsx` | 默认日历主题 `shell`：`bg-neutral-950/72 + ring` → `bg-black/[0.18]`（六套浅色主题不动） |
+| `scripts/regression/test-drag-pointer.mjs` | 新增 ⑫ 节（观感 + 双击契约）· 内容区那条断言改为不锁具体 gap 值 → **93 条** |
+| `scripts/audit/guard-mutation-check.py` | 登记 10 条 V61 破坏用例（含「双击 bug 原样复活」「记账缺失」「磁贴复活」「分隔线复活」）；修 2 条过期用例 → **22 条** |
+
+#### 验证（六绿 + 自证非恒真）
+
+| 项 | 结果 |
+|---|---|
+| `tsc --noEmit` | exit 0 |
+| `cargo check` / `cargo test --lib` | exit 0 / **63 passed** |
+| `node scripts/regression/run.mjs` | **21/21 套**（`test-drag-pointer` 74 → **93**；`test-desktop-constants` **48** 不变） |
+| `node scripts/audit/tool-audit.mjs` | **339 PASS / 0 FAIL / 0 WARN** |
+| `node scripts/audit/layout-audit.mjs` | 见下 |
+| `vite build` | exit 0（8.09s） |
+| `python scripts/audit/guard-mutation-check.py` | 1 个守卫 / **22 个破坏用例全部被对应断言捕获**，源码自动还原 |
+
+> ⚠️ 第一次跑自证时**有 4 条用例当场被判「无判别力」**（两条断言只写「至少一处」、
+> 两条查错了文件、两条用例源码片段过期）。这正是这个工具的价值：**它证明的是断言有牙，
+> 不是「跑绿了」**。修法已写进 CONVENTIONS §35.6。
+
+#### 装机记录（2026-09-21 16:53）
+
+| 项 | 值 |
+|---|---|
+| NSIS 静默安装 | `Handy_0.1.0_x64-setup.exe /S` → **exit 0**（`MSYS_NO_PATHCONV=1`） |
+| 构建产物 | `src-tauri/target/release/handy.exe` · 11264512 字节 · mtime 16:46:09 |
+| 装机产物 | `%LOCALAPPDATA%\Handy\handy.exe` · 同尺寸 · mtime 16:46:02 |
+| `cmp -l` 取证 | **仅 3 字节差**（偏移 10210292–10210294）`UNK`→`NSS`，与 V60 一致 ✅ |
+| 装机前置 | 无 `handy.exe` 进程 · `grid_meta.desktop_icons_hidden=0` · 原生图标 `vis=True`（已归还桌面） |
+| 未代启动 | ✅ `tasklist | grep -i handy` 装机后无残留（按铁律**不代启动**） |
+
+#### 请你验收（V61）
+
+| # | 项目 | 验收点 |
+|---|---|---|
+| 1 | **双击恢复**（本批 P0） | 双击桌面「我的电脑」/「某个文件夹」图标 → **正常打开**（不再需要先右键） |
+| 2 | 工作台融合 | 桌面右侧工作台：快捷入口与按键是否已「融成整体」——同款小胶囊 + 段头分组，不再像拼上去的 |
+| 3 | 省空间 | 图标明显变小、日历能多显示内容；不再「卡片里贴卡片」（默认日历外壳只留半透明黑底） |
+
+### 1.44 V62 批次（用户 1 图 2 条：「**开启整理和整理两个让人懵逼** · **工作台太小了 日历等都不清晰，最重要的工作台反而太小**」）
+
+> 用户 09-21（附桌面截图）：
+> 「开启整理和整理两个让人懵逼 可以有一个更好的方式体现 或者整理换个说法」
+> 「工作台太小了 日历等都不清晰，我建议日历控制台可以更好看一下 至少跟其他格子协调一点 最重要的工作台反而太小」
+
+两条各自独立：① 是**命名 / 外观**问题（两颗按钮长得一模一样）；② 是**尺寸 / 密度**问题
+（320 宽装不下「日历 + 快捷入口 + 操作按钮」三段）。
+
+#### ① 两颗按钮为什么让人懵
+
+底栏四颗**等距同款**的胶囊，其中两件的名字都带「整理」：
+
+| 按钮 | 它其实是 | 问题 |
+|---|---|---|
+| `整理` | **一次性动作**：按类型把桌面条目归进格子并重排 | 与下一颗共用「整理」二字 |
+| `开启整理` / `退出整理` | **模式开关**：格子显隐 ↔ 恢复原生桌面图标 | 同上 |
+
+修法两条腿（**改名 + 换外观**）：
+
+| 项 | 改前 | 改后 |
+|---|---|---|
+| 动作文案 | `整理` | **`归类`**（icon `Sparkles` → `Boxes`） |
+| 开关文案 | `开启整理` / `退出整理` | **`显示格子` / `收起格子`** |
+| 开关外观 | 与动作同为填充胶囊 | **描边**（`ActionButton` 的 `variant="toggle"`） |
+| 分组 | 四颗等距排开 | 「新建类」（便签 / 格子）与「桌面级」（归类 / 开关）之间加一条 `w-px` 细分隔线 |
+
+#### ② 工作台为什么太小
+
+`WST_BOX_W` 一直是 `CALENDAR_BOX_W = 320` —— 那是当年**日历格子**的自然宽度（一个
+`max-w-[288px]` 的月历网格就走得下）。工作台上线后它要装三段内容；而日历的 `max-w-[288px]`
+**是盒子时代的遗产**：当年日历是可以被用户拉到 460 宽的盒子，限宽是为了「拉宽盒子 = 居中留白」
+而不是把日期格拉扁。工作台是**固定宽度的常驻列**，限宽只剩坏处 —— 把日期格锁死在 41px、
+字号压到 12px，正是用户说的「不清晰」。
+
+| 落点 | 改前 | 改后 |
+|---|---|---|
+| 工作台宽度 | 320 | **400**（Rust `WST_BOX_W` 与前端 `WORKSTATION_W` 同步，与 `CALENDAR_BOX_W` 解耦） |
+| 日历网格 | `max-w-[288px]` | **随卡片自适应**（400 宽 → 每格约 54px） |
+| 日历字号 | 日期 12 / 农历 9 / 周几 10 / 计划 11 | 日期 13 / 农历 10 / 周几 11 / 计划 12 |
+| 标记（计划点 / 生日蛋糕） | 4px / 7px | 5px / 9px |
+| 日历外壳 | `bg-black/[0.18]` + `rounded-xl p-2` | `bg-black/[0.12]` + `rounded-lg p-1`（更贴卡片、少一层内边距） |
+| 半屏档面板让位 | `right-[368px]` | `right-[448px]`（400 + 32 + 16 缝） |
+
+⚠️ 加宽 80px 会让收纳区 `zone_w` 少 80；掉到一列的阈值是 `zone_w < 548`
+（见 CONVENTIONS §36.3），真机 1707 宽下仍在两列区间内 —— 再往上加之前必须重算。
+
+#### 改动清单
+
+| 文件 | 改动 |
+|---|---|
+| `src-tauri/src/commands/grid.rs` | `WST_BOX_W` 320 → **400**（与 `CALENDAR_BOX_W` 解耦）· 单测断言同步 |
+| `src/modules/desktop-grid/DesktopWorkstation.tsx` | `WORKSTATION_W` → 400 · 按钮改名 · `ActionButton` 加 `variant` · 分组分隔线 |
+| `src/modules/desktop-grid/DesktopWidgets.tsx` | 日历去限宽 · 字号 +1 · 标记放大 · 默认主题 shell `0.12` + `rounded-lg p-1` |
+| `src/modules/desktop-grid/DesktopSidePanel.tsx` | 半屏档让位 368 → **448px**（`calc(100vw-380px)` → `-460px`） |
+| `src/modules/desktop-grid/GridOverlay.tsx` | 注释同步（底栏按钮名） |
+| `scripts/regression/test-desktop-constants.mjs` | 宽度断言改「≥ 400」+「≥ CALENDAR_BOX_W」→ **49** 条 |
+| `scripts/regression/test-drag-pointer.mjs` | 宽度源改 `WST_BOX_W` · 新增 3 条（底栏文案 / toggle / 日历限宽）→ **96** 条 |
+| `scripts/audit/guard-mutation-check.py` | 修 5 条过期用例 + 新增 4 条 V62 用例 → **32** 条 |
+
+#### 验证（六绿 + 自证非恒真）
+
+| 项 | 结果 |
+|---|---|
+| `tsc --noEmit` | exit 0 |
+| `cargo test --lib` | **63 passed / 0 failed** |
+| `node scripts/regression/run.mjs` | **21/21 套**（constants 49 · drag-pointer 96） |
+| `node scripts/audit/tool-audit.mjs` | **339 PASS / 0 FAIL / 0 WARN** |
+| `node scripts/audit/layout-audit.mjs` | **0 / 84**（四档视口 × 21 个界面的窄屏裁切体检） |
+| `vite build` | exit 0（8.33s） |
+| `python scripts/audit/guard-mutation-check.py` | 2 守卫 / **32 个破坏用例全部被捕获** |
+
+#### 装机记录（2026-09-21 18:03）
+
+装机前 Handy **正在运行**（PID 27892）且**处于接管态**（`grid_meta` 三键皆 1），按铁律走完整归还流程：
+查库 → `MSYS_NO_PATHCONV=1 taskkill /F /IM handy.exe` → **立刻** `desktop-icon-restore.py`（`可见=True`）
+→ `desktop-icon-probe.py` 复核 `vis=True` → `desktop_icons_hidden` 置 `'0'` → NSIS `/S`（exit 0）
+→ `cmp -l` **仅 3 字节差**（偏移 10210292–10210294：`UNK`→`NSS`）→ 未代启动 ✅。
+（顺序要点：**停进程后立刻归还**，不能先恢复再杀 —— 进程内的自愈会在 3 秒内重新藏起来。）
+
+| 项 | 值 |
+|---|---|
+| 构建产物 | `handy.exe` **11,264,512 B** · mtime **18:02:26** |
+| 装机产物 | `%LOCALAPPDATA%\Handy\handy.exe` · 同尺寸 · mtime 18:02:20 |
+| NSIS / MSI | **4,352,346 B**（18:02:26） / 7 MB 档 |
+| 打包日志 | `.build-logs/20260921-175650`（6 步全过，`--no-deploy` 跳过部署） |
+| 未代启动 | `tasklist \| grep -i handy` 装机后无残留 ✅ |
+
+#### 请你验收（V62）
+
+| # | 项目 | 验收点 |
+|---|---|---|
+| 1 | 底栏按钮不再懵 | 「便签 / 格子 / 归类 / 收起格子（或显示格子）」—— 不再有两个「整理」；开关那颗是**描边**外观 |
+| 2 | 工作台更大 | 右侧工作台明显变宽，日历日期格变大、字号清晰 |
+| 3 | 与卡片协调 | 日历底更淡、内边距更小，像「长在工作台上」而不是卡片里再贴一张卡片 |
+
+### 1.45 V63 批次（用户 2 图 3 条：「**便签一半白一半黑**」·「**格子没对齐，要按分辨率+数量动态算，放不下就滚动**」·「**主程序窗口没必要，工具箱弹出框就够**」）
+
+> 用户 09-21 晚，附两张桌面截图，三条反馈连着提。前两条是**呈现**问题（看着像坏了 /
+> 看着没对齐），第三条是**架构**判断（桌面之外不必再有一个界面）。
+
+#### 反馈① 新建便签「一半白色一半黑色」
+
+| 项 | 内容 |
+|---|---|
+| 用户原话 | 「新建的便签格子为什么是这样的，一半有白色背景 一半是黑色，格子应该顺序排列吧」 |
+| 根因 | 便签纸 `div` 是 `min-h-[90px]`，而承载它的**格子卡片**高度由布局引擎按内容算，常大于 90px。纸以下露出的是卡片那层深色磨砂底（`cardBackground`）→ 视觉上就是「纸坏了 / 半白半黑」。**不是背景色写错，是纸没铺满。** |
+| 改法 | `min-h-[90px]` → **`min-h-full`**（`DesktopWidgets.tsx` 的 `NoteWidget`）：纸**铺满整个内容区** —— 盒子比内容高时纸跟着拉满，内容更长时纸继续长（外层 `overflow-y-auto` 接管滚动）。90px 保底挪到内层 `RichMarkdown`，语义不变。 |
+
+#### 反馈② 「按分辨率和格子数动态算，确保对齐，放不下就滚动」
+
+| 项 | 内容 |
+|---|---|
+| 用户原话 | 「你应该根据桌面分辨率 大小和格子多少动态计算，确保每个格子对齐，格子合理的大小，如果计算确认放不下那就应该自动滚动条等 现在怎么还是在乱搞呢？没有对齐」 |
+
+**旧的为什么对不齐（V50–V62，三条一起作祟）**：
+
+1. **高度随条目数**（`box_height_at`）—— 同一行的格子下沿天然参差；
+2. **两条等宽列 + LPT 按高度分列**（`content_columns`）—— 列宽固定，格子数一变就出现
+   180 / 165 两种宽；
+3. **`manual` 整块保留历史宽高** —— 用户拖过一次的格子从此不参与任何对齐。
+
+**新模型：统一网格（`uniform_grid`）**：
+
+- 所有收纳格**同一尺寸**（等宽 + 等高），尺寸由 **`格子数 + 工作区大小`** 一起算出：
+  列数在 `1..=UNIFORM_MAX_COLS(4)` 里挑「让格子最宽敞」的那一档，评分 = `min(宽, 高)`
+  （只宽不高 / 只高不宽都不算宽敞），且必须满足 `宽 ≥ MIN_BOX_W`、`高 ≥ UNIFORM_FLOOR_H(96)`、
+  `高 ≤ UNIFORM_MAX_H(480)`；
+- **行优先自左向右**填（`cell_rect`），顺序即「格子应该顺序排列」；
+- **放不下就滚**：挤到下限仍装不完时，网格越过下边界，由前端滚动容器接管 ——
+  **V56 那条收尾 clamp 改成只对挂件生效**（收纳格越界是「放不下」的正常态，夹回去会叠在同 y）；
+- **`manual` 语义变更**（推翻 V50 第三条）：用户拖过的格子**只保留位置**（吸附到最近单元
+  `nearest_free_cell`），**尺寸一律统一**。
+
+**前端配套**：收纳格住进 `overflow-y-auto` 容器（宽 = `contentZoneRight`，滚动条落在收纳区
+与便签列之间的缝里，不被工作台压住）；便签用 `position: fixed` 挂出滚动层外，不跟着滚；
+命中判定 `hitBoxId` 把 `scrollTop` 加回去；拖拽夹住 `contentZoneRight`。
+
+#### 反馈③ 主窗口退场，桌面面板 = 唯一外壳
+
+| 项 | 内容 |
+|---|---|
+| 用户原话 | 「我们主程序窗口还有必要的，我觉得工具线弹出框就够了吧，其他功能我们都已经在桌面上实现了例如工作台没有必要还有一个多一个界面，快捷键设置直接弹出工具箱弹窗 你设计下继续完成」 |
+
+**设计**：不再为「设置 / 工具」另开一个界面 —— **桌面右侧面板（工具箱弹框）就是外壳**。
+
+1. **面板加第三个页签「设置」**：内嵌主窗口那份 `SettingsCenter`（`embedded` 时去掉自己的
+   header），**不存在第二份实现**。外层套 `dark` 不是装饰：面板底色固定 `bg-neutral-900`，
+   而 `SettingsCenter` 用的是语义色，浅色主题下不套这层就是**黑底黑字**；
+2. **快捷键直达**：Quick 页签新增「快捷键」按钮 → 切到设置页签并把快捷键那一行**顶到最前
+   + 高亮 + 滚动到视野**（`SettingsCenter` 新参数 `focus='hotkey'`）；
+3. **Rust 侧入口全部改派发**：新增 `dispatch_panel_action`（**不** `show_overlay_now` ——
+   开个设置不该顺手接管桌面；挂件窗不在时补一次 `show_launcher_only` 兜底）。
+   托盘「打开 Handy」→ **「打开工具箱」**、托盘「设置」、托盘左键、全局快捷键、
+   顶部贴条的工具搜索（`bar_open_command`）、桌面右键「打开设置中心」、
+   `desktop_open_view('settings')`，一律走 `panel:*` 动作；
+4. **删掉所有唤起主窗口的按钮**：面板顶栏「控制台」、工具页「打开完整版」、
+   Quick 页签「主窗口」；
+5. **兜住一个连带风险**：`ReminderScheduler` 原本只挂主窗口，而主窗口 V44 起不自启、
+   V63 起连托盘入口也没了 → 待办提醒会**永远不响**。它返回 `null`（无 UI、直接读库、
+   `reminded` 去重），所以也挂到**常驻的挂件窗根**上。
+
+#### 落点
+
+| 文件 | 改动 |
+|---|---|
+| `src/modules/desktop-grid/DesktopWidgets.tsx` | 便签纸 `min-h-[90px]` → `min-h-full`；90px 保底挪到内层 |
+| `src-tauri/src/commands/grid.rs` | 新增 `UniformGrid` / `uniform_grid` / `UNIFORM_*` 常量 / `nearest_free_cell`；**删** `content_columns`；收纳区整块重写；clamp 只对挂件生效；新增 `dispatch_panel_action` + `PANEL_ACTION_*` / `PANEL_OPEN_PREFIX`；`desktop_open_view` 对 `settings` 特判。单测 **66** |
+| `src-tauri/src/tray.rs` | 「打开 Handy」→ 「打开工具箱」；三项改派发面板动作 |
+| `src-tauri/src/shortcut.rs` | 全局快捷键改派发 `panel:toggle-tools` |
+| `src-tauri/src/commands/bar.rs` | `bar_open_command` / `bar_open_workstation` 改派发 `panel:open:<target>` |
+| `src/modules/desktop-grid/GridOverlay.tsx` | 收纳区滚动容器 + 便签 `fixed` + `hitBoxId` 加 `scrollTop` + 拖拽夹住；`runDesktopAction` 处理 4 种 `panel:*`；工作台设置按钮改 `openPanel('settings')` |
+| `src/modules/desktop-grid/DesktopSidePanel.tsx` | 新增「设置」页签 + `SettingsTab`；删「控制台 / 打开完整版 / 主窗口」；Quick 页签加「快捷键」 |
+| `src/components/SettingsCenter.tsx` | 新参数 `embedded` / `focus` |
+| `src/App.tsx` | `ReminderScheduler` 也挂到挂件窗根 |
+| `scripts/regression/test-drag-pointer.mjs` | `min-h-0` 白名单从一条扩成一组（新增的收纳区滚动容器是**绝对定位定高**，与竖条同类）→ **96** 条 |
+
+#### 验证（六绿 + 自证非恒真）
+
+| 项 | 结果 |
+|---|---|
+| `tsc --noEmit` | exit 0 |
+| `cargo test --lib` | **66 passed / 0 failed** |
+| `node scripts/regression/run.mjs` | **21/21 套**（constants 49 · drag-pointer 96） |
+| `node scripts/audit/tool-audit.mjs` | **339 PASS / 0 FAIL / 0 WARN** |
+| `node scripts/audit/layout-audit.mjs` | **0 / 84**（V62 遗留的 2 处窄屏裁切一并消失） |
+| `vite build` | exit 0（8.59s） |
+| `python scripts/audit/guard-mutation-check.py` | 2 守卫 / **32 个破坏用例全部被捕获** |
+
+#### 装机记录（2026-09-21 20:48）
+
+装机前 Handy **正在接管**（`grid_meta` 三键皆 1、`SysListView32 vis=False`），按铁律走完归还
+流程：`taskkill /F /IM handy.exe`（PID 7116）→ **立刻** `desktop-icon-restore.py`（`可见=True`）
+→ `desktop-icon-probe.py` 复核 `vis=True` → `desktop_icons_hidden` 置 `'0'` → NSIS `/S`（exit 0）
+→ `cmp -l` **仅 3 字节差**（偏移 10203828–10203830：`UNK`→`NSS`）→ 未代启动 ✅。
+
+| 项 | 值 |
+|---|---|
+| 构建产物 | `handy.exe` **11,257,344 B** · mtime **20:48:07** |
+| 装机产物 | `%LOCALAPPDATA%\Handy\handy.exe` · 同尺寸 · mtime 20:48:02 |
+| NSIS / MSI | **4,348,944 B** / 7 MB 档 |
+| 打包日志 | `.build-logs/20260921-204305`（6 步全过，`--no-deploy` 跳过部署）；**20:37 那一版漏了 App.tsx 的 `ReminderScheduler` 改动（打包中途改的代码），已重跑** |
+| 未代启动 | `tasklist` 装机后无残留 ✅ |
+
+#### 请你验收（V63）
+
+| # | 项目 | 验收点 |
+|---|---|---|
+| 1 | 便签不再半白半黑 | 新建一张便签，白纸**铺满整张卡片**，下方不再露出深色底 |
+| 2 | 格子对齐 | 所有收纳格**同一尺寸**、行优先顺序排列、行列间距一致；改窗口大小或增减格子后仍然对齐 |
+| 3 | 放不下就滚 | 格子多到一屏装不下时，收纳区出现滚动条（便签列与左侧竖条**不跟着滚**） |
+| 4 | 设置就在弹框里 | 托盘「设置」/ 工作台齿轮 / 面板「设置」页签 → **都在桌面右侧那个弹框里打开**，不再弹独立窗口 |
+| 5 | 快捷键直达 | Quick 页签「快捷键」→ 停在快捷键那一行（高亮），改完即时生效 |
+| 6 | 托盘改名 | 托盘第一项是「打开工具箱」（不是「打开 Handy」），点了弹的是桌面右侧面板 |
+
+### 1.46 V69 批次（用户 1 图 1 条：「**现在好多了，不过格子的布局计算还是很垃圾，你应该先把大格子算了布局好，然后把小格子找空隙插入，按照格子内容多少大小一次计算合理的位置放置 或者你有更好的方案你自己来实现规划**」）
+
+| # | 用户的话 | 现象 / 期望 | 落地 |
+|---|---|---|---|
+| 1 | 布局计算还是很垃圾 | 截图里**两个空的「新格子」坐在第一列顶端**，11 项的「文档」被顶到第二列 | 根因 = `balanced_partition` 是**保序切段** ⇒ 「谁排前面」由登记顺序决定 ⇒ 空盒子先占好位 |
+| 2 | 先把大格子算了布局好 | 大格子优先占位 | `placement_order`：按 `size_rank=(面积,内容量,高,宽)` 降序；稳定排序 ⇒ 完全并列才回落到登记顺序 |
+| 3 | 然后把小格子找空隙插入 | 小格子去补空隙 | `pack_columns`（**LPT**）：每个格子放进**当前最矮的那一列**（并列取最左）—— 最矮列就是此刻最大的空隙；最高列 ≤ 最优解 4/3 |
+| 4 | 按照格子内容多少大小一次计算 | 位置由内容一次算定 | 摆放序 = 内容的纯函数，与 `LayoutMode`、当前坐标无关 |
+
+**算法顺手吞掉的四代补丁**（摆放序纯函数化后，它们解决的都是同一个反馈环）：
+
+| 版本 | 补丁 | 为什么现在不需要 |
+|---|---|---|
+| V64 | `manual` 格子吸附到离它最近的坑 | 位置不再回喂给排序 ⇒ 真机上「17 项抢到 1 项窄坑」的现象消失 |
+| V66 | 「读序必须等于落位序」（连 `(x,y)` 读法都成了不变量） | 幂等不再靠几何兜 ⇒ 读法自由 |
+| V66.1 | 「`(x,y)<=MARGIN` 即未落位、甩队尾」哨兵 | 哨兵把第一个格子当新格子 ⇒ 每次增量整理顺序轮转（真机 7 格全挪）。**已删** |
+
+⇒ **幂等升级为「算出来的」**：尺寸没变 ⇒ 摆放序没变 ⇒ 落位一字不差。
+
+**三个必须留下兜底的点**（都曾被单测逮住）：
+
+1. `pick_columns` **第二趟尺寸**：自然尺寸选不出 k 时，把宽度夹到 `zone_w/k`（`MIN_BOX_W..AUTO_MAX_W`）
+   再排。宽度是瓶颈时这一步是决定性的（真机收纳区 921 宽，18 项的自然宽就 366，5 列要 1926px）。
+   ⚠️ 夹宽度**必须同时用新宽重算高度**（`box_height_at`）—— 前端按这个宽度渲染，宽变行数就变；
+   只改宽 ⇒ 「后端算得下、前端还是滚」。
+2. `size_rank` 里的**内容量**：`box_own_size` 的宽高分档会吃掉差别（18 项与 16 项都是 366×272 ⇒
+   面积相同）⇒ 只按面积比就退化成登记顺序。面积并列 ⇒ 内容多的优先。
+3. `scatter_back`：内部按摆放序排完，`slots[p]` 属于 `order[p]`；调用方是 `zip(slots)` 回写的，
+   必须摊回输入序 —— 否则格子名与坑位错配。
+
+**真机结果**（16 格 + 1 便签）：三列 x=330/550/770 **各自 848 高、底边齐平**；「文档」(18 项) 坐
+第一列顶端 y=32；空格子全落到列尾 y=616/760；便签 260×303 在 x=991。无越界、无滚动条。
+
+**验证**：`cargo test --lib` **73/73**（新 3 条：`the_biggest_box_is_placed_first` /
+`small_boxes_fill_the_shortest_column` / `the_lower_band_hosts_boxes_when_the_upper_band_cannot_hold_them_all`，
+外加辅助断言 `assert_columns_are_size_ordered`）；`tsc --noEmit` 0；`guard-mutation-check.py` 基线
+96+49、32 破坏用例全捕获；`tool-audit` PASS 339；回归 **21/21**。
+
+**改动文件**：`src-tauri/src/commands/grid.rs`（唯一）。
+
+**踩坑**：① 换算法时顺手丢了 V66 的宽度兜底 ⇒ 2 个端到端用例越界；② 一条写着旧输出值的断言
+（`order[1..3]==[0,1]`）在编码算法改对后就红了 —— 断言要写「它在防什么」，别顺手快照当时的输出。
+
+### 1.47 V70 批次（用户 2 图 2 条：「**格子太多后还是出现了滚动条，我建议如果放不下了就提醒用户不能因为空间有限不能创建更多格子，不然逻辑没法实现了**」·「**我删除了很多格子后空间多了，应该重新计算大小，尽可能让所有图标都直接展示出来，没有滚动条，除非是格子太多图标太多放不下了**」）
+
+| # | 用户的话 | 现象 / 期望 | 落地 |
+|---|---|---|---|
+| 1 | 格子太多后还是出现了滚动条 | 截图：整层滚动条 + **每个格子内部也少排一列** | 见下「1px 几何账」 |
+| 2 | 放不下了就提醒用户，不能因为空间有限不能创建更多格子 | 建之前拒绝 + 给理由 | `probe_room_for_another_box`（SAVEPOINT 试探）→ `grid_box_upsert` 创建分支拒绝并 `return Err(reason)` |
+| 3 | 删除了很多格子后空间多了，应该重新计算大小 | 盒子该长高把图标全摆出来 | 删固定 `CONTENT_MAX_H=460`，高度上限改传 `zone_h` |
+| 4 | 尽可能让所有图标直接展示，除非格子太多图标太多 | 滚动只作最后手段 | 单测 `a_box_grows_to_show_everything_before_it_is_allowed_to_scroll` |
+
+**根因：1px 的几何账被正反馈放大成一整列**（截图逐像素量出来的）
+
+| 格子 | 条目 | 引擎算 | 前端画 | 后果 |
+|---|---|---|---|---|
+| 文档 | 18 | 5 列 × 4 行 = 20 格 | **4 列 × 4 行 = 16 格** | 藏掉 2 个图标 |
+| 其他 | 8 | 3 列 × 3 行 = 9 格 | **2 列 × 4 行 = 8 格** | 藏掉 1 个 |
+
+* 引擎 `BOX_HEADER_H = 36`，前端标题栏 `h-9`(36) **+ `border-b`(1) = 37** ⇒ 每格矮 1px；
+* 条目区差一点 ⇒ 提前出滚动条 ⇒ 经典滚动条占 4px ⇒ **少一列** ⇒ 行数变多 ⇒ 更高 ⇒ 更溢出。
+
+修法（四件一起，缺一件就只剩一半效果）：
+
+1. `BOX_HEADER_H` 36 → **37**（含那条 `border-b`）；前端 `GridOverlay.tsx` 同步。
+2. 新增 `GRID_SCROLLBAR_W = 4`：`box_width_for_columns` 加、`item_columns_at` 减。
+3. CSS `.grid-scroll { scrollbar-gutter: stable; }` —— **槽位恒留**，否则「能不能滚」会反过来
+   改变「能排几列」（引擎按没滚动条算刚好放得下，前端一渲染就少 4px 反而真滚起来）。
+4. 新增 `BOX_FIT_SLACK = 2`：宽高各留 2px 余量，吸收取整误差。
+
+**「放不下」要在建之前说**（用户第 1 条）：
+
+```rust
+SAVEPOINT handy_room_probe;   // 立刻回滚
+  INSERT INTO grid_boxes ...; // 真插（与真插入共用 INSERT_BOX_SQL）
+  layout_all_boxes_with(..);  // 真排
+ROLLBACK TO handy_room_probe;
+// 判据 = LayoutOutcome::overflowed
+```
+
+* 能这么干的前提：**布局只吃 `&Connection`、不碰窗口不发事件** ⇒ 零副作用（用例验了
+  `snap(&conn)` 不变、格数不变、回滚后 `last_insert_rowid` 也退回）。
+* **试探出错一律当「还装得下」**（`Err(_) => None`）——「量尺子」失败就拒 ⇒ 用户永远建不出格子。
+* 拒答文案写明「**没有新建**」并给出路（先删一个格子 / 清掉一些图标）；前端提示条
+  **按字数放宽时长**（≤9s）且改成能换行的 `rounded-2xl max-w-[560px]`，否则 2.6 秒读不完。
+
+**「空间多了就长高」**（用户第 2 条）：删掉写死的 `CONTENT_MAX_H`，改由调用方传 `zone_h`
+（`box_own_size` / `own_sizes` / `sizes_at`）⇒ 空间宽裕时盒子长到把所有图标摆完，紧张时才压
+（内部滚）。
+
+**验证**：`cargo test --lib` **81/81**（V70 新 5 条：`a_new_box_is_refused_exactly_when_the_desk_is_full` /
+`every_natural_box_size_really_shows_all_of_its_items` / `the_width_for_n_columns_really_yields_n_columns` /
+`a_box_grows_to_show_everything_before_it_is_allowed_to_scroll` /
+`the_users_current_desktop_shows_every_icon_without_a_scrollbar`〔**真机那一组**：文档 18 / 其他 8 / 文件夹 8 + 2 便签，逐个验「摆得下 ≥ 自己条目数」〕）；`tsc --noEmit` 0；回归 **21/21**；
+`tool-audit` 339 PASS；`layout-audit` 0/84；`sample-smoke` **29/29**；`guard-mutation-check.py`
+**41 个破坏用例全捕获**（新增 8 条：BOX_HEADER_H 退回 36 / 删试探 / 不回滚 / 各走各的 SQL /
+出错就拒 / 提示时长 / 删 `scrollbar-gutter` / 滚动条宽度与常量不符）。
+
+**改动文件**：`src-tauri/src/commands/grid.rs`、`src/modules/desktop-grid/GridOverlay.tsx`、
+`src/index.css`、`scripts/regression/{test-drag-pointer,test-desktop-constants}.mjs`、
+`scripts/audit/{guard-mutation-check.py,sample-smoke.mjs}`。
+
+**踩坑**：① 找临界点的循环退出时**库里已经是越界的那一档**，必须先往回删再断言边界两侧
+（第一版因此红在「还没满就拒绝新建」）；② `sample-smoke` 两条红都是**探针自身**的问题 ——
+一条断言 V48 已删的「移动到整理目录」（改判「不存在」），一条在按下 ↓ **之后**才读旧索引
+（⇒ 候选 >1 条时恒假）。判红先分清「产品坏了」还是「探针过期/自错」。
+
+
+### 1.48 V71 批次（用户 1 图 1 条：「**你看整体效果怎么还是补补丁一样的，三个图表最多的不应该 2 3 列上面开始平均放置，然后把零散的少量的格子补在下面即可哇，至于便签这个列前面的空间不够再放**」）
+
+| # | 用户的话 | 现象 | 落地 |
+|---|---|---|---|
+| 1 | 还是补补丁一样 | 真机 3 个格子（18 / 8 / 8 项）排成 **2 列**：第 1 列只有「文档」、下方空掉 501px，另外两个摞在第 2 列 | [`pick_columns`] 重写 |
+| 2 | 三个图表最多的不应该 2 3 列上面开始平均放置 | 大格子要**并排铺在最上面** | 每个 `k` 内**先试自然宽度、再试夹到 `zone_w / k`** |
+| 3 | 零散的少量格子补在下面 | 小格子填下方空隙 | LPT（V69 已有）+ 新用例 `small_boxes_fill_in_below_the_big_ones` 钉住 |
+| 4 | 便签这个列前面的空间不够再放 | 带下空间（便签列下方）仍是最低优先级 | `content_plan_with_lower_band` 不动 —— cost 最小化天然满足 |
+
+**根因**：`pick_columns` 把「**自然宽度放不下**」当成了「**这个列数不可行**」。
+
+| 试到的 k | 自然宽度合计 | V69 判定 | V71 判定 |
+|---|---|---|---|
+| 3 | 372 + 232 + 232 + 2×24 = **884** > 637 | 淘汰 | 夹到 196 ⇒ 636 ≤ 637 ⇒ **命中** |
+| 2 | 372 + 232 + 24 = **628** ≤ 637 | **命中并返回**（⇒ 2 列，补丁感） | 不再需要 |
+
+**病根一句话**：宽度是软约束（夹窄了格子变高，但还能用），**列数才是用户看得见的那个东西**。
+修法：`trials = [自然, 夹宽]` 挪进 `k` 循环内部，且**自然在先** —— 不夹也放得下时不许夹。
+
+**改动文件**：
+`src-tauri/src/commands/grid.rs`（`pick_columns` 重写 + `content_plan_in` ①②③ 段合流）、
+`scripts/regression/test-drag-pointer.mjs`（新增 ⑭ 段）、
+`scripts/audit/guard-mutation-check.py`（+2 条 V71 破坏用例）、
+`docs/02-architecture/DESKTOP-LAYER.md`（§1 图与表修正 + 新增 **§1.1 收纳格怎么落位（V65–V71）**）。
+
+**验证**：`cargo test --lib` **81/81**（新 3 条：`the_biggest_boxes_share_the_top_row_instead_of_piling_up` /
+`small_boxes_fill_in_below_the_big_ones` / `a_roomy_zone_keeps_natural_box_widths`）；
+`tsc --noEmit` 0；回归 **21/21**（`test-drag-pointer` 110 PASS）；`layout-audit` **0/84**；
+`sample-smoke` **29/29**；`tool-audit` 339 PASS；`guard-mutation-check.py` **43 个破坏用例全捕获**
+（+2：夹宽挪出循环 / 夹宽排到自然之前）。两个方向的变异都手工验证过会红。
+
+**踩坑（方法论级）**：**用例的场景必须能区分两种实现**。`a_roomy_zone_keeps_natural_box_widths`
+第一版拿「2 个 8 项」当场景，对着「夹宽优先」这个破坏**恒绿** —— `capacity` 被 `order.len()` 夹到 2，
+而 `k = 2` 的 `cap` 是 306，232 宽的格子根本夹不到，两套尺寸给出同一个答案。换成 `[18, 8]`
+（自然 628 刚好放得下 vs 夹宽 306）才卡住。**在两种实现下都绿的用例不是用例，是注释。**
+
+
 ## 2. 剩余任务与已知风险
 
 ### 2.1 🔴 唯一阻塞项：装机 GUI 验收（用户执行）
 
 > ⚠️ **本轮起，agent 会话已无法启动本应用**（新旧版本一律挂死在启动早期，见 §1.19.2），
 > 因此「静默安装 + 启动」这一步只能做到**装完为止**，**启动请用户双击桌面/开始菜单的 Handy**。
-> 本轮 V40 **故意没有代为启动**（避免留下僵尸进程干扰用户那次启动）。
-> 另外**首次启动会顺次应用还没生效的数据库迁移**（用户库 2026-09-17 停在 **v8**，v9
-> `grid_boxes.category` + `DELETE FROM grid_items` 会在首次启动时自动应用）——
-> 若启动后工具「桌面格子」页报 `no such column: category` 之类，说明迁移没跑成功，请反馈。
+> V60 **同样没有代为启动**（已用 `tasklist | grep -i handy` 确认装机后无进程残留、
+> 原生桌面图标 `vis=True`）。
+>
+> **当前待验收的是 V62**（§1.44，装机时间 09-21 18:03）：清单见 §1.44 末尾「请你验收」3 条，
+> 其中第 1 条（**底栏不再有两个「整理」**）与第 2 条（**工作台 320 → 400、日历字号变清晰**）是本批核心。
+> **首次启动会顺次应用还没生效的数据库迁移**：用户库会走到 **v11**（`V11_GRID_DROP_CALENDAR`
+> 删掉历史遗留的 `kind='calendar'` 盒子 —— 它们已经并进工作台了，这是**预期行为**）；
+> 若「桌面格子」页报 `no such column` 之类，说明迁移没跑成功，请反馈。
 
 | # | 项目 | 验收点 |
 | --- | --- | --- |
@@ -2694,18 +3970,22 @@ node -e "…起 vite :41779 → 轮询 fetch 就绪 → node \$AB open 'http://l
 | **`docs/03-development/TOOL-OPTIMIZATION.md`** | **工具优化评估报告（V20）**：23 个工具评分总表 + 逐工具方案 + P0/P1/P2 + 明确取舍 |
 | **`docs/03-development/TOOL-AUTHORING.md`** | **新增工具编写指南（V24）**：分层铁律、注册项字段规范、响应式铁律、常见坑、完工清单 |
 | [`memory/MEMORY.md`](memory/MEMORY.md) | 长期约定：标识、路径、协作坑、开发环境、验证纪律 + **当前生效**的 V22–**V24** 约定 |
-| [`memory/CONVENTIONS.md`](memory/CONVENTIONS.md) | 历史批次约定（V18–V23 架构与实现），V24 从 MEMORY.md 拆出来（原文件 16.9k 字符导致注入被截断） |
-| `memory/2026-09-*.md` | 逐日进展日志（含 V01–**V24** 全过程） |
+| [`memory/CONVENTIONS.md`](memory/CONVENTIONS.md) | 历史批次约定（V18–**V71**，最新 §40）；V24 从 MEMORY.md 拆出来（原文件 16.9k 字符导致注入被截断） |
+| `memory/2026-09-*.md` | 逐日进展日志（含 V01–**V71** 全过程） |
+| `scripts/audit/guard-mutation-check.py` | **守卫自证非恒真**（V60 新增）：逐条破坏源码 → 断言必须变红 → 自动还原。改守卫就跑它 |
 
 ---
 
 ## 6. 续接开工三件事
 
 1. **先跑六绿确认树健康**（V34 起把 Rust 单测也纳入）：`cargo check`（经 `scripts/rust-env.sh`）+
-   `cargo test --lib`（**46/46**，含迁移断言）+ `tsc --noEmit`（0 错）+
-   `node scripts/regression/run.mjs`（**17/17 套**）+ `node scripts/audit/tool-audit.mjs`（**339 PASS / 0 FAIL / 0 WARN**）+
-   `node scripts/audit/layout-audit.mjs`（**0 / 84 组合有问题**，约 10 分钟），均应为 exit 0。
+   `cargo test --lib`（**77/77**，含迁移断言 v1→v11 + 桌面右键菜单 5 条 + V70 四条）+ `tsc --noEmit`（0 错）+
+   `node scripts/regression/run.mjs`（**21/21 套**）+ `node scripts/audit/tool-audit.mjs`（**339 PASS / 0 FAIL / 0 WARN**）+
+   `node scripts/audit/layout-audit.mjs`（**0 / 84 组合有问题**，约 30 分钟含浏览器预热），均应为 exit 0。
    需要看真实交互面时再补 `node scripts/audit/sample-smoke.mjs`（**29/29**，**必须先 `vite build`**）。
+   **改了任何「读源码断言」的守卫（`scripts/regression/*.mjs`）之后，必须再跑**
+   `python scripts/audit/guard-mutation-check.py`（**V60 新增**：逐条破坏 → 断言变红 → 自动还原；
+   用例表 `MUTATIONS` 与被锁的东西一起维护，**当前 43 个用例**）—— 否则新写的断言可能是个「永远 PASS」的摆设。
    `vite build` 见 §4 打包段（**别先跑 `clean-dist.mjs`；也别和布局审计写在同一条 Bash 调用里**）。
 2. **确认上一轮验收结论**：若用户已装机验收，把发现的问题按「现象 + 期望」记录到本文档 §2 或当日日志，再派人修。
 3. **选下一个方向**：默认优先级 = ① 修验收问题 → ② §2.2 技术债（其中「**文本处理台 Phase 2**」是价值最高的待办；其次是「清空工具草稿」的界面入口，`usePersistedState` 已导出 `clearPersisted` 但没接界面）→ ③ §2.3 Phase 2 模块。

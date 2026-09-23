@@ -28,8 +28,15 @@ _tmp_*
 /*.out
 /*.exit
 
-# 验收截图（本地留证用，不入库）
+# 验收截图（本地留证用，不入库；含真机桌面图标与文件名，勿推公网）
 /_shots/
+/desktop-screenshot*.png
+
+# 其他编辑器 / 工具的分享产物（Trae 等）
+.trae-html-share-packages/
+
+# 会话内的自检输出（cargo test / 变异自检 / 布局审计的结果落盘）
+.workbuddy/audit-out/
 
 # Vite 每次构建在根目录留下的配置临时产物
 vite.config.ts.timestamp-*.mjs
