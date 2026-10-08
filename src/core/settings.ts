@@ -39,7 +39,12 @@ export const RECENT_LIMIT = 20;
  *      十来个的格子位；
  *   ② **要 Win+R 敲命令、或翻四五级设置才到的，收** —— 服务 / 环境变量 / hosts /
  *      代理 / 网络连接（Win11 已经把它从「网络和共享中心」里摘掉了）；
- *   ③ **系统根本没给图形入口的，优先收** —— 刷新 DNS 缓存、临时文件目录。
+ *   ③ **系统根本没给图形入口的，优先收** —— 刷新 DNS 缓存（`%TEMP%` 这种
+ *      `Win+R` 敲 `%temp%` 就能直达、几乎没人会专门去翻的，不占默认位；用户按需仍可
+ *      在「全部系统入口」里勾回 `temp-folder`）。
+ *
+ * ⚠️ **`temp-folder` 已被移出默认（用户 09-23 反馈「谁没事会去操作这个呢」）**：Rust
+ * 白名单里保留该 id，想用的人到「全部系统入口」勾一下即可，默认不再占用本就紧张的格子位。
  *
  * id 契约来自 Rust 白名单表 `src-tauri/src/commands/sys.rs`（那里是唯一事实源；本表删掉
  * 一个 id 只是「默认不展示」，白名单里的入口照样能在工作台勾回来）。服务端动作表若删除了
@@ -57,7 +62,6 @@ export const DEFAULT_QUICK_ACTION_IDS: readonly string[] = [
   // —— 只能 Win+R 敲命令的 ——
   'services',
   'proxy-settings',
-  'temp-folder',
 ];
 
 /**

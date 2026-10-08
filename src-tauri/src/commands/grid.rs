@@ -64,7 +64,10 @@ use windows::Win32::Foundation::HWND;
 
 use rusqlite::{params, Connection, Row};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::{
+    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindow,
+    WebviewWindowBuilder,
+};
 
 use crate::db;
 
@@ -75,7 +78,34 @@ pub const GRID_LABEL: &str = "grid-overlay";
 const GRID_URL: &str = "index.html?window=grid-overlay";
 
 /// `grid_meta` 中挂件窗几何的键名。
+///
+/// ⚠️ **V83 起已废弃**（只在 [`drop_legacy_geometry`] 里出现一次，用于清理历史脏数据）。
+/// 窗口几何不再持久化：见 [`primary_work_area`] 的文件级说明。
 const META_KEY_GEOMETRY: &str = "overlay_geometry";
+
+/// 挂件窗几何被对齐到新显示器配置时广播给前端（前端收到后重排一次）。
+const EVENT_BOUNDS_CHANGED: &str = "grid:bounds-changed";
+
+/// 显示器配置复核周期（tick 数；`POLL_INTERVAL_MS` × 40 = 1 秒）。
+///
+/// V83：接/拔第二块屏、改分辨率或缩放、把主屏换到另一台显示器 —— 这些都会让
+/// 「主显示器工作区」变掉，而用户**不一定会去点「整理」**。低频复核一次足够
+/// （一次 `EnumDisplayMonitors` 级别的调用，可忽略），但必须存在：插上外接屏那一刻
+/// 没人为窗口重新算几何，是用户 09-28 那张截图的第二个成因。
+const BOUNDS_CHECK_TICKS: u64 = 40;
+
+/// 判定「挂件窗已对齐主显示器工作区」的容差（物理像素）。
+///
+/// 非整数缩放（125% / 150% / 175%）下 `SetWindowPos` 与 `GetWindowRect` 来回换算
+/// 会差 1–2px。用严格相等判断就成了**每 1 秒"纠正"一次、却永远纠正不动**的死循环：
+/// 窗口每秒闪一下、前端每秒重排一次。留 2px 容差，桌面上没人看得出来。
+const BOUNDS_TOLERANCE: i32 = 2;
+
+/// 连续纠正次数上限，超了就退避（与 [`reassert_takeover`] 同一套思路）。
+const BOUNDS_MAX_FIXES: u32 = 5;
+
+/// 纠正退避时长（秒）。
+const BOUNDS_BACKOFF_SECS: u64 = 300;
 
 /// 光标轮询间隔（毫秒）。
 ///
@@ -177,16 +207,6 @@ pub struct GridRegion {
     pub y: f64,
     pub width: f64,
     pub height: f64,
-}
-
-/// 挂件窗几何（逻辑像素，存 `grid_meta`，JSON 序列化）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GridGeometry {
-    pub x: i64,
-    pub y: i64,
-    pub width: i64,
-    pub height: i64,
 }
 
 /// 盒子实体（与 `grid_boxes` 表对应；`item_count` 为条目计数子查询）。
@@ -1156,6 +1176,79 @@ pub async fn grid_item_move(
     Ok(())
 }
 
+/// 给一个条目改名 —— **同目录改名，文件绝不搬家**（V87）。
+///
+/// # 为什么现在又允许 `fs::rename`（V37 起一直刻意回避它）
+///
+/// V33–V36 曾经「把文件 `fs::rename` 进 `桌面/Handy整理/<格名>/`」，那是在**搬动文件**：
+/// 快捷方式失效、用户找不到东西，所以 V37 起改成纯呈现层（格子只改呈现，不动文件）。
+///
+/// **改名不一样**：它是 Explorer 本来就有的原生能力（右键→重命名 / F2 / 单击两次），
+/// 用户点它就是要改磁盘上的名字，腾讯桌面整理也照做。我们不做，反而是在「改掉原生行为」
+/// —— 正是用户 10-08 质疑的那件事。
+///
+/// # 硬约束：只许**同一个目录内**改名
+///
+/// - 名字里出现 `\ / :` 一律拒绝，其余 Windows 非法字符（`* ? " < > |`）也拒绝 ——
+///   出现它们意味着「想改成别处的路径」，那又回到 V36 搬文件的老路；
+/// - 目标名已存在直接拒绝，**不自动加后缀**（Explorer 会弹确认框，我们不替用户猜）；
+/// - 只允许基于 `Path::parent()` 拼目标路径，绝不拼接用户给的目录。
+#[tauri::command]
+pub async fn grid_item_rename(
+    app: AppHandle,
+    path: String,
+    new_name: String,
+) -> Result<(), String> {
+    let trimmed = new_name.trim().to_string();
+    if trimmed.is_empty() {
+        return Err("名字不能为空".to_string());
+    }
+    // Windows 文件名非法字符（`\` `/` 在前：它们会把「改名」变成「搬走」）
+    const ILLEGAL: [char; 9] = ['\\', '/', ':', '*', '?', '"', '<', '>', '|'];
+    if let Some(bad) = ILLEGAL.iter().find(|c| trimmed.contains(**c)) {
+        return Err(format!("名字里不能包含「{bad}」"));
+    }
+    // Explorer 也这么处理：纯点号 / 末尾带点的名字在 Windows 上不成立
+    let trimmed = trimmed.trim_end_matches('.').to_string();
+    if trimmed.is_empty() {
+        return Err("名字不能为空".to_string());
+    }
+
+    if path.trim().is_empty() {
+        return Err("没有可改名的路径".to_string());
+    }
+    let conn = connect(&app)?;
+    let source = Path::new(&path);
+    if !source.exists() {
+        return Err("文件已不在原位置了".to_string());
+    }
+    let Some(parent) = source.parent() else {
+        return Err("取不到所在目录".to_string());
+    };
+    let target = parent.join(&trimmed);
+    if target != source && target.exists() {
+        return Err(format!("已经有一个「{trimmed}」了"));
+    }
+
+    if let Err(err) = std::fs::rename(source, &target) {
+        return Err(format!("改名失败：{err}"));
+    }
+
+    // 库里的登记必须跟着改：`grid_items.file_path` 是条目的身份，不改就会出现
+    // 「磁盘上叫新名字、格子里还按旧路径找」的幽灵条目。
+    let new_path = target.to_string_lossy().to_string();
+    // 按**旧路径**定位登记行：同一个文件可能登记在某个格子里（1 行），也可能
+    // 还没进任何格子、只是「未归类」竖条里的一个桌面文件（0 行）—— 两种都要能改名。
+    conn.execute(
+        "UPDATE grid_items SET file_path = ?1, display_name = ?2 WHERE file_path = ?3",
+        params![new_path, trimmed, path],
+    )
+    .map_err(|err| format!("更新条目登记失败：{err}"))?;
+
+    grid_log(&format!("条目改名：{trimmed}（文件未移动，仍在原目录）"));
+    Ok(())
+}
+
 /// 某格子的条目列表（引用模型：登记为真相，磁盘只做存在性校验）。
 #[tauri::command]
 pub async fn grid_item_list(app: AppHandle, box_id: i64) -> Result<Vec<GridItem>, String> {
@@ -1164,53 +1257,165 @@ pub async fn grid_item_list(app: AppHandle, box_id: i64) -> Result<Vec<GridItem>
     list_live_items(&conn, entity.id)
 }
 
-// —— 挂件窗几何 ——
+// —— 挂件窗几何（V83：多显示器下的唯一真源）——
+//
+// # 为什么几何**不再持久化**
+//
+// V83 之前这套是这样的：前端挂载时读一次 `scaleFactor`，之后窗口 `moved` / `resized`
+// 停稳 500ms 就调 `grid_geometry_set` 把尺寸写进 `grid_meta.overlay_geometry`；
+// 开窗时**DB 优先**。单屏 + 不动缩放的机器上一直看不出问题，但**接上第二块屏**就炸：
+//
+//   · 显示器配置变化时，Windows/tao 会移动甚至改我们的窗口尺寸（DPI 变了要重排），
+//     于是 `resized` 触发；
+//   · 前端那次换算用的是**挂载时取过的旧 `scaleFactor`** —— 用过期 DPI 把物理尺寸
+//     换成逻辑尺寸存库，存进去的就是个错值；
+//   · 从此开窗一律按这个错值 ⇒ **永久锁死**。
+//
+// 用户 09-28 的截图（双屏）就是这么来的：内容全挤在 `1138×608` 的角落里，
+// 屏幕右侧近 800px、下方 400 多 px 全空。而窗口是 `resizable(false)` +
+// `decorations(false)`，**用户根本没有调整它的途径** —— 持久化它只有害处，没有收益。
+//
+// 现在：几何**实时问系统**，显示器怎么变窗口就怎么跟（见 [`sync_overlay_bounds`]）。
+//
+// # 策略：只算主显示器
+//
+// 挂件窗**严格等于主显示器工作区**，绝不跨屏。理由：
+//
+//   1. **系统层面做不到「主屏接管、副屏保留原生图标」**：桌面图标视图
+//      （`SHELLDLL_DefView` / `SysListView32`）是**一张横跨整个虚拟桌面的单一视图**，
+//      只能整体显示/隐藏。要么全接管，要么全不接管。
+//   2. 便签 / 工作台 / 未归类竖条都是**单实例**语义，双屏各铺一份马上产生
+//      「同一份内容到底在哪块屏」的歧义。
+//   3. 双屏各铺需要**每屏一个窗口**（WebView2 窗口跨不同缩放的屏会渲染模糊、
+//      尺寸跳变），是一个独立特性，不该混在修 bug 里做。
+//
+// 副产品是**副屏完全原生**：那里没有我们的任何窗口，右键 / 新建 / 拖拽都不经过我们
+// —— 正好就是用户一直要的「别改我桌面的默认行为」。
 
-/// 同步读取挂件窗几何（开窗时用；无记录 / JSON 损坏均返回 `None` 走缺省值）。
-fn read_geometry(app: &AppHandle) -> Result<Option<GridGeometry>, String> {
-    let conn = connect(app)?;
-    let raw: Option<String> = match conn.query_row(
-        "SELECT value FROM grid_meta WHERE key = ?1",
-        params![META_KEY_GEOMETRY],
-        |row| row.get(0),
-    ) {
-        Ok(v) => Some(v),
-        Err(rusqlite::Error::QueryReturnedNoRows) => None,
-        Err(err) => return Err(format!("读取挂件几何失败：{err}")),
+/// 当前**主显示器工作区**（物理像素 `(x, y, width, height)`）。
+///
+/// 这是挂件窗几何的唯一真源。取不到（极罕见：显示器正在重排）返回 `None`，
+/// 调用方一律**保持窗口现状**而不是猜一个值。
+fn primary_work_area(app: &AppHandle) -> Option<(i32, i32, u32, u32)> {
+    let monitor = app.primary_monitor().ok().flatten()?;
+    let area = monitor.work_area();
+    if area.size.width == 0 || area.size.height == 0 {
+        return None;
+    }
+    Some((
+        area.position.x,
+        area.position.y,
+        area.size.width,
+        area.size.height,
+    ))
+}
+
+/// 判定窗口当前矩形相对目标工作区**是否需要纠正**，返回 `(位置要动, 尺寸要动)`。
+///
+/// 抽成纯函数只为一件事：**「容差」这条不变量能被单测钉住**。静态守卫只能看出
+/// `.abs() > BOUNDS_TOLERANCE` 写没写，看不出「差 1px 到底算不算错位」——
+/// 而那正是「每秒纠正一次、却永远纠正不动」这个死循环的开关。
+///
+/// 位置与尺寸分开判：只错一样就只动一样（`set_size` 会触发 webview 重排，
+/// 位置对了就没必要让它白重排一次）。
+fn bounds_need_fix(
+    cur_pos: (i32, i32),
+    cur_size: (u32, u32),
+    target: (i32, i32, u32, u32),
+) -> (bool, bool) {
+    let (cx, cy) = cur_pos;
+    let (cw, ch) = cur_size;
+    let (tx, ty, tw, th) = target;
+    let off_pos = (cx - tx).abs() > BOUNDS_TOLERANCE || (cy - ty).abs() > BOUNDS_TOLERANCE;
+    let off_size = (i64::from(cw) - i64::from(tw)).abs() > i64::from(BOUNDS_TOLERANCE)
+        || (i64::from(ch) - i64::from(th)).abs() > i64::from(BOUNDS_TOLERANCE);
+    (off_pos, off_size)
+}
+
+/// 把挂件窗对齐到当前主显示器工作区（**物理像素**，幂等）。
+///
+/// 返回「这次是否真的动过窗口」—— 几何一变内容排布就得跟着重排，调用方据此决定
+/// 要不要广播 [`EVENT_BOUNDS_CHANGED`]。
+///
+/// ⚠️ 用物理像素设位置和尺寸，不要走逻辑像素：逻辑坐标要经过「按哪块屏的缩放换算」
+/// 这一步，而窗口本来就是被摆到那块屏上的 —— 拿它自己的 DPI 去算自己的位置是循环论证，
+/// 跨屏 / 缩放变动时必然错位。
+///
+/// ⚠️ 桌面借给系统期间（[`handoff_active`]，用户正在用原生右键菜单）**不动窗口**：
+/// 那一刻窗口是收起状态，几何没有意义，而动窗口可能干扰收回时的复核。
+fn sync_overlay_bounds(app: &AppHandle) -> bool {
+    if handoff_active() {
+        return false;
+    }
+    let Some(win) = app.get_webview_window(GRID_LABEL) else {
+        return false;
     };
-    Ok(raw.and_then(|raw| serde_json::from_str::<GridGeometry>(&raw).ok()))
+    let Some((x, y, w, h)) = primary_work_area(app) else {
+        return false;
+    };
+
+    // 位置与尺寸分开判：只错一样就只动一样（`set_size` 会触发 webview 重排，
+    // 位置对了就没必要让它白重排一次）。
+    //
+    // ⚠️ 一律用**容差**比较，不要 `!=`：非整数缩放下 `SetWindowPos` 与 `GetWindowRect`
+    // 来回换算会差 1–2px，严格相等就成了「每 1 秒纠正一次、却永远纠正不动」的死循环。
+    // （判定逻辑在 [`bounds_need_fix`]，那里有单测钉住容差边界。）
+    // 当前矩形取不到（窗口刚建、还没上屏）⇒ 当成「要纠」，走一次 `set` 没有副作用。
+    let (off_pos, off_size) = match (win.outer_position(), win.inner_size()) {
+        (Ok(pos), Ok(size)) => {
+            bounds_need_fix((pos.x, pos.y), (size.width, size.height), (x, y, w, h))
+        }
+        _ => (true, true),
+    };
+    if !off_pos && !off_size {
+        // 已经对齐 ⇒ 把纠正计数清零，下一次真有变化时又能立刻动手
+        BOUNDS_FIXES.store(0, Ordering::Relaxed);
+        return false;
+    }
+
+    // 退避中：多半是这台机器上「我们要的尺寸」跟「系统给我们的尺寸」根本不可能相等
+    // （第三方窗口管理 / 特殊的 DPI 虚拟化）。继续每秒硬掰只会让窗口一直闪。
+    let now = unix_secs();
+    if BOUNDS_RETRY_AT.load(Ordering::Relaxed) > now {
+        return false;
+    }
+
+    if off_pos {
+        let _ = win.set_position(PhysicalPosition::new(x, y));
+    }
+    if off_size {
+        let _ = win.set_size(PhysicalSize::new(w, h));
+    }
+    let fixes = BOUNDS_FIXES.fetch_add(1, Ordering::Relaxed) + 1;
+    if fixes >= BOUNDS_MAX_FIXES {
+        BOUNDS_FIXES.store(0, Ordering::Relaxed);
+        BOUNDS_RETRY_AT.store(now + BOUNDS_BACKOFF_SECS, Ordering::Relaxed);
+        grid_log("连续多次无法把挂件窗对齐主显示器工作区（多半被第三方工具改尺寸），暂停自动对齐 5 分钟");
+    }
+    grid_log(&format!(
+        "挂件窗几何已按主显示器对齐：位置 {x},{y} 尺寸 {w}×{h}"
+    ));
+    true
 }
 
-/// 读取挂件窗几何（无记录返回 `null`）。
-#[tauri::command]
-pub async fn grid_geometry_get(app: AppHandle) -> Result<Option<GridGeometry>, String> {
-    read_geometry(&app)
-}
-
-/// 持久化挂件窗几何（前端 moved / resized 防抖后调用）。
-#[tauri::command]
-pub async fn grid_geometry_set(
-    app: AppHandle,
-    x: i64,
-    y: i64,
-    width: i64,
-    height: i64,
-) -> Result<(), String> {
-    let json = serde_json::to_string(&GridGeometry { x, y, width, height })
-        .map_err(|err| format!("序列化挂件几何失败：{err}"))?;
-    let conn = connect(&app)?;
-    conn.execute(
-        "INSERT INTO grid_meta (key, value) VALUES (?1, ?2) \
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        params![META_KEY_GEOMETRY, json],
-    )
-    .map_err(|err| format!("写入挂件几何失败：{err}"))?;
-    Ok(())
+/// V83 一次性清理：删掉历史遗留的窗口几何缓存（见上方「为什么几何不再持久化」）。
+///
+/// 幂等（删不存在的行也是成功），失败无所谓 —— 反正已经没有任何代码读它了。
+fn drop_legacy_geometry(app: &AppHandle) {
+    if let Ok(conn) = connect(app) {
+        let _ = conn.execute(
+            "DELETE FROM grid_meta WHERE key = ?1",
+            params![META_KEY_GEOMETRY],
+        );
+    }
 }
 
 // —— 挂件窗生命周期 ——
 
-/// 缺省几何：主显示器工作区（物理 → 逻辑像素换算；读取失败兜底 1280×800）。
+/// 开窗几何：主显示器工作区（物理 → 逻辑像素换算；读取失败兜底 1280×800）。
+///
+/// V83：这只是 `WebviewWindowBuilder` 需要的**逻辑像素初值**，不是持久化来源 ——
+/// 建完窗口立刻由 [`sync_overlay_bounds`] 按物理像素贴一次，把取整误差清零。
 fn default_geometry(app: &AppHandle) -> (f64, f64, f64, f64) {
     if let Ok(Some(monitor)) = app.primary_monitor() {
         let area = monitor.work_area();
@@ -1428,8 +1633,10 @@ fn desktop_host() -> Option<HWND> {
 }
 
 /// 桌面图标视图（`SHELLDLL_DefView` → `SysListView32`）。
+///
+/// V81 起对外可见：`platform::desktop_handoff` 要在系统菜单期间操作它。
 #[cfg(target_os = "windows")]
-fn desktop_icon_view() -> Option<HWND> {
+pub(crate) fn desktop_icon_view() -> Option<HWND> {
     use windows::core::PCWSTR;
     use windows::Win32::UI::WindowsAndMessaging::FindWindowExW;
 
@@ -1593,6 +1800,85 @@ fn place_above_desktop(hwnd: HWND) -> Result<(), String> {
         )
         .map_err(|err| format!("把挂件窗贴回桌面正上方失败：{err}"))
     }
+}
+
+/// 把挂件窗抬到**当前屏幕最前**（工具箱快捷调出，V72）。
+///
+/// 挂件窗默认带 `WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW` 并锚定桌面层（见
+/// [`make_unfocusable`] / [`place_above_desktop`]），于是它**永远在普通窗口之下**，
+/// 在别的程序里按快捷键也看不见。用户原话：「工具箱快捷调出后应该在当前屏幕最前面」。
+///
+/// 这里临时清掉 `WS_EX_NOACTIVATE`（保留 `WS_EX_TOOLWINDOW`，仍不进 Alt+Tab / 任务栏），
+/// 并用 `SetWindowPos(HWND_TOP)` + `set_focus()` 把它顶到当前屏幕最前、可收键盘焦点
+/// （工具箱里要打字 / 搜索）。不改动「桌面常驻」基准层 —— 用户切回桌面它依旧在，
+/// 点别的程序它自然落到后面（标准顶层窗口行为）。
+#[tauri::command]
+pub fn panel_raise_front(app: AppHandle) -> Result<(), String> {
+    raise_panel_front(&app)
+}
+
+/// 把挂件窗复位成「不抢焦点、锚定桌面层」的常驻态（与 [`panel_raise_front`] 配对，V72）。
+///
+/// 工具箱用完（切换 / 收起）后调用，让面板回到「不挡工作」的桌面挂件行为，
+/// 避免它因为被清掉了 `WS_EX_NOACTIVATE` 而一直浮在别的应用上面。
+#[tauri::command]
+pub fn panel_settle_desktop(app: AppHandle) -> Result<(), String> {
+    settle_panel_desktop(&app)
+}
+
+#[cfg(target_os = "windows")]
+fn raise_panel_front(app: &AppHandle) -> Result<(), String> {
+    let Some(win) = app.get_webview_window(GRID_LABEL) else {
+        return Err("挂件窗不存在，无法置前".to_string());
+    };
+    let _ = win.show();
+    let hwnd = overlay_hwnd(&win)?;
+    // 清掉 NOACTIVATE：让窗口可激活、可收键盘焦点（工具箱输入需要）。
+    // 保留 TOOLWINDOW：仍不进 Alt+Tab / 任务栏（skip_taskbar 已保证不进任务栏）。
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_NOACTIVATE,
+    };
+    // SAFETY: 有效 HWND；只改写本窗口扩展样式位。
+    unsafe {
+        let cur = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let cleared = cur & !(WS_EX_NOACTIVATE.0 as isize);
+        if cleared != cur {
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, cleared);
+        }
+    }
+    // 顶到 Z 序最前（不动几何）。HWND_TOP 不带 SWP_NOACTIVATE ⇒ 同时激活置前。
+    use windows::Win32::UI::WindowsAndMessaging::{SetWindowPos, HWND_TOP, SWP_NOMOVE, SWP_NOSIZE};
+    // SAFETY: 有效 HWND；SetWindowPos 只改 Z 序，不改几何。
+    unsafe {
+        let _ = SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+    }
+    win.set_focus()
+        .map_err(|err| format!("聚焦挂件窗失败：{err}"))?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn raise_panel_front(_app: &AppHandle) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn settle_panel_desktop(app: &AppHandle) -> Result<(), String> {
+    let Some(win) = app.get_webview_window(GRID_LABEL) else {
+        return Ok(());
+    };
+    let Ok(hwnd) = overlay_hwnd(&win) else {
+        return Ok(());
+    };
+    // 复位成「不抢焦点、锚定桌面层」的常驻态（与初始创建时一致）。
+    make_unfocusable(hwnd);
+    let _ = place_above_desktop(hwnd);
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn settle_panel_desktop(_app: &AppHandle) -> Result<(), String> {
+    Ok(())
 }
 
 /// 按基准层把挂件窗放到位。
@@ -2318,8 +2604,15 @@ fn ensure_poller(app: AppHandle) {
             let mut hidden_ticks: u64 = 0;
             // 「原生图标是否又露出来了」的观察节奏（V48）：每 4 拍（≈100ms）看一次。
             let mut icon_watch_ticks: u64 = 0;
+            // 「显示器配置变了没」的复核节奏（V83）：每 40 拍（≈1 秒）看一次。
+            let mut bounds_ticks: u64 = 0;
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS));
+                // V82：系统菜单期间把桌面还给系统 —— 事件旁听的**轮询兜底**。
+                // 放在最前面：菜单可能在任何一刻弹出，而它弹出后用户马上就会去点
+                // 「新建文件夹」，能否在菜单还开着的时候就借出，直接决定那一条菜单项
+                // 生效不生效（详见 `platform::desktop_handoff` 的文件头）。
+                crate::platform::desktop_handoff::poll_menu();
                 let Some(win) = app.get_webview_window(GRID_LABEL) else {
                     // 窗口已销毁 → 图标若仍在代管必须先还回去
                     release_icons_if_taken(&app);
@@ -2347,6 +2640,21 @@ fn ensure_poller(app: AppHandle) {
                     continue;
                 };
                 missing_ticks = 0;
+                // V83：**显示器配置随时可能变** —— 插上/拔掉外接屏、改分辨率或缩放、
+                // 把「主显示器」换到另一台。变了就三件事：把窗口贴回新的工作区、
+                // 告诉前端重排（格子立刻铺满新的可用区），用户不必去点「整理」。
+                //
+                // 为什么必须在轮询线程里做：`ensure_overlay_window` 只在**开窗那一次**
+                // 对齐，而窗口是常驻的 —— 用户插上外接屏的那一刻，没有任何人会再叫它一次。
+                // 1 秒一次足够（人插线到看清桌面远不止 1 秒），开销也只是一次
+                // `app.primary_monitor()`。
+                //
+                // ⚠️ `sync_overlay_bounds` 内部遇到「桌面正借给系统」会直接返回 false，
+                // 这里不需要再判一次 `handoff_active()`。
+                bounds_ticks += 1;
+                if bounds_ticks % BOUNDS_CHECK_TICKS == 0 && sync_overlay_bounds(&app) {
+                    let _ = app.emit_to(GRID_LABEL, EVENT_BOUNDS_CHANGED, ());
+                }
                 // V35：Win+D /「显示桌面」会给所有顶层窗发最小化 —— 挂件窗虽然贴在桌面
                 // 正上方，但并不是桌面的子窗口，一样会被最小化掉。这里每轮检查一次，
                 // 被最小化就立刻还原（用户看到的是「格子一直都在」）。
@@ -2377,6 +2685,13 @@ fn ensure_poller(app: AppHandle) {
                     // 只能靠用户去托盘「显示/隐藏」瞎点。
                     // 1 秒宽限避开 show/hide 切换与 Explorer 重建的瞬态；
                     // 每 25ms 一次不可能每轮查库，所以按 tick 计数后再查。
+                    // V81：系统菜单期间挂件窗是**我们自己**临时收起的
+                    // （`platform::desktop_handoff` 把桌面借给系统）。这时它「不可见」是
+                    // 预期状态，绝不能被当成「被外部隐藏」自愈回来 —— 那层一旦糊回来，
+                    // 刚还回去的原生桌面又被盖住，用户新建的文件夹照样看不见。
+                    if handoff_active() {
+                        continue;
+                    }
                     hidden_ticks += 1;
                     if hidden_ticks % VISIBLE_RECOVER_TICKS == 0 {
                         if read_overlay_visible(&app) {
@@ -2496,6 +2811,30 @@ fn ensure_poller(app: AppHandle) {
 /// V30.1 用户实测踩坑：最小化 Handy 后原生桌面回来了、图标却还是空的。
 static ICONS_TAKEN: AtomicBool = AtomicBool::new(false);
 
+/// 当前是否处于接管态（原生桌面图标被我们藏着）。
+///
+/// V81：给 `platform::desktop_handoff` 用 —— 它在**收回桌面的那一刻**要重新问一次，
+/// 因为菜单里就有我们注入的「退出桌面整理」，用户点了之后图标必须留着。
+pub fn icons_taken() -> bool {
+    ICONS_TAKEN.load(Ordering::Relaxed)
+}
+
+/// 桌面此刻是否被我们**主动**借给了系统（见 `platform::desktop_handoff`）。
+///
+/// 借出期间「原生图标露着」和「挂件窗不可见」都是我们自己造成的，所有接管自愈
+/// （[`reassert_takeover`] / 窗口不可见恢复 / 连续不可见归还）都必须让路，
+/// 否则「还回去的桌面」会在 100ms 内被抢回来 —— 那与没修是一样的。
+fn handoff_active() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        crate::platform::desktop_handoff::is_active()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
+}
+
 /// 上一次观察到的「原生桌面图标是否露着」（V48）。
 ///
 /// # 为什么需要一个记忆位
@@ -2511,6 +2850,12 @@ static ICONS_WERE_VISIBLE: AtomicBool = AtomicBool::new(false);
 ///
 /// 存在的理由见 [`OVERLAY_AWAY_GRACE_SECS`]。
 static OVERLAY_AWAY_SINCE: AtomicU64 = AtomicU64::new(0);
+
+/// 显示器几何的连续纠正次数（超过 [`BOUNDS_MAX_FIXES`] 就退避）。
+static BOUNDS_FIXES: AtomicU32 = AtomicU32::new(0);
+
+/// 显示器几何纠正的退避截止时间（unix 秒）。
+static BOUNDS_RETRY_AT: AtomicU64 = AtomicU64::new(0);
 
 /// 挂件层连续不可见多久才把图标还给系统（V40）。
 ///
@@ -2586,6 +2931,11 @@ fn release_icons_if_taken(app: &AppHandle) {
 /// 所以这里补上对称的另一半：只要偏好还是「接管」，就周期性确认图标确实被藏住了，
 /// 没藏住就重新藏。与 Z 序自检同节奏（[`REASSERT_INTERVAL_MS`]）、同样带保险丝。
 fn reassert_takeover(app: &AppHandle) {
+    // V81：桌面被借给系统期间（菜单开着），「原生图标露着」是我们主动造成的，
+    // 不是被系统恢复 —— 这里若照常纠正，就会把菜单期间新建的文件再一次藏进暗处。
+    if handoff_active() {
+        return;
+    }
     if !read_takeover(app) {
         // 用户没选接管：清零计数，下次开启接管时从干净状态开始
         TAKEOVER_FIXES.store(0, Ordering::Relaxed);
@@ -2645,27 +2995,31 @@ fn reassert_takeover(app: &AppHandle) {
 /// 新建与复用两条路径共用，避免 `show_overlay` / `show_launcher_only` 各写一遍建窗逻辑。
 fn ensure_overlay_window(app: &AppHandle) -> Result<WebviewWindow, String> {
     let mode = read_attach_mode(app);
-    // 已存在 → 先 show 再归位。
+    // V83：清掉历史遗留的几何缓存（见 [`primary_work_area`] 上方的说明）。
+    // 放在最前面：无论新建还是复用，这条脏数据都不该再有任何机会被读到。
+    drop_legacy_geometry(app);
+    // 已存在 → **先按当前显示器对齐**，再 show 再归位。
     //
     // ⚠️ 顺序不能反（V34 修的关键 bug）：`show()` 会把窗口提到 Z 序**顶层**，
     // 若先 `apply_attach` 贴到桌面层、再 `show`，刚贴好的层级立刻被顶掉 ——
     // 用户看到的就是「格子跑到我其他窗口上面了」。正确顺序：先显示，再贴回桌面层。
+    //
+    // V83 把「对齐」插在这一串的最前面：复用分支才是**绝大多数情况**（应用每次启动、
+    // 每次「显示格子」都走这里），而窗口可能是在**另一套显示器配置**下建的 ——
+    // 接/拔第二块屏、改分辨率或缩放之后，不重新对齐就一直是错的尺寸
+    // （用户 09-28 截图：内容挤在 1138×608 的角落里）。放在 `show()` 之前是必要的：
+    // 先摆对位置再显示，否则用户会看到它「先在错位置出现、再跳一下」。
     if let Some(existing) = app.get_webview_window(GRID_LABEL) {
+        sync_overlay_bounds(app);
         let _ = existing.show();
         let _ = apply_attach(&existing, mode);
         return Ok(existing);
     }
 
-    // 几何：DB 优先（逻辑像素），缺省 = 主显示器工作区
-    let (x, y, width, height) = match read_geometry(app)? {
-        Some(g) if g.width > 0 && g.height > 0 => (
-            g.x as f64,
-            g.y as f64,
-            g.width as f64,
-            g.height as f64,
-        ),
-        _ => default_geometry(app),
-    };
+    // 几何：**实时**取主显示器工作区（V83：不再读 `grid_meta.overlay_geometry` ——
+    // 那份缓存会在换显示器 / 改缩放后变成错值，而窗口 `resizable(false)`，用户
+    // 根本没有调整它的途径，持久化它只有害处）。
+    let (x, y, width, height) = default_geometry(app);
 
     let win = WebviewWindowBuilder::new(app, GRID_LABEL, WebviewUrl::App(GRID_URL.into()))
         .title("桌面挂件 · Handy")
@@ -2699,6 +3053,10 @@ fn ensure_overlay_window(app: &AppHandle) -> Result<WebviewWindow, String> {
 
     // 默认点击穿透；光标命中盒子区域后由轮询线程开放交互
     force_ignore(&win, true);
+    // V83：上面 `inner_size` / `position` 走的是**逻辑像素**，主屏缩放不是整数时
+    // （125% / 150% / 175% 都是）必然带取整误差 ⇒ 再按物理像素贴一次，让窗口严丝合缝
+    // 对齐主显示器工作区。必须在 `show()` 之前 —— 先摆对再显示，不让用户看到跳动。
+    sync_overlay_bounds(app);
     // 先 show 再归位：顺序理由同上（`show()` 会把窗口顶到 Z 序顶层）
     let _ = win.show();
     let _ = apply_attach(&win, mode);
@@ -2712,6 +3070,9 @@ fn ensure_overlay_window(app: &AppHandle) -> Result<WebviewWindow, String> {
 fn show_overlay(app: &AppHandle) -> Result<(), String> {
     let _ = ensure_overlay_window(app)?;
     let _ = write_overlay_visible(app, true);
+    // V79：广播给已经挂载好的前端（冷启动时前端还没起来，那次广播必然丢 ——
+    // 前端挂载时会用 `grid_overlay_status` 补上，两条路互为兜底）。
+    emit_visibility(app, true);
     // 冷启动基线：给 webview 启动 + React 挂载留出宽限（判定见轮询线程）
     mark_overlay_shown();
     // 新窗从零开始，自愈状态一并复位
@@ -2719,6 +3080,9 @@ fn show_overlay(app: &AppHandle) -> Result<(), String> {
     apply_takeover_pref(app);
     grid_log("显示挂件层（复用/新建窗口）");
     ensure_poller(app.clone());
+    // V81：接管之后才有「系统菜单期间把桌面还回去」这回事（没接管时原生视图本来就在）。
+    // 幂等，进程内只起一次旁听线程。
+    crate::platform::desktop_handoff::ensure_watcher(app);
     Ok(())
 }
 
@@ -2732,6 +3096,9 @@ fn show_launcher_only(app: &AppHandle) -> Result<(), String> {
     let _ = ensure_overlay_window(app)?;
     // 桌面恢复原生图标（与 `grid_overlay_hide` 对称）；`overlay_visible` 保持原值（false）
     let _ = takeover_icons(app, false);
+    // V79：这条路的语义就是「内容收起」，必须告诉前端 —— 启动期前端还没挂载，
+    // 广播会丢，但那时前端本来就以「收起」为初值（见 `contentHidden` 的 useState）。
+    emit_visibility(app, false);
     mark_overlay_shown();
     reset_reassert_state();
     grid_log("显示桌面工具栏（格子内容收起，原生图标恢复）");
@@ -2765,6 +3132,29 @@ pub fn read_overlay_visible(app: &AppHandle) -> bool {
         )
         .ok();
     raw.as_deref() == Some("1")
+}
+
+/// 通知常驻挂件窗「整理层现在是显示还是收起」（V79）。
+///
+/// # 为什么必须补这一步（用户 09-25 实测：「整理没有退出」）
+///
+/// 前端的 `contentHidden` 是**它自己的 state**，只有两个更新来源：
+/// 挂载时查一次 `grid_overlay_status`，以及收到本事件。
+/// 而 V48–V78 期间，`grid:visibility` **只有托盘那条路会发**（`tray.rs`）——
+/// 于是所有「不由前端发起」的显隐变化都只改了库、没改界面：
+///
+///   · 桌面右键菜单「退出桌面整理」→ `--hide-grid` → [`hide_overlay_now`]
+///   · 桌面右键菜单「打开 Handy 桌面整理」→ `--show-grid` → [`show_overlay_now`]
+///   · 轮询线程发现窗口不见了、按偏好自动重建（[`show_overlay`]）
+///
+/// 症状就是用户截图里那句：日志照打「收起挂件层」，桌面上的格子却一直在 ——
+/// 用户连点四次「退出」都没反应（`handy.log` 11:19–11:20 四条 `收起挂件层`）。
+///
+/// ★ 这条与 V61「一个跨线程可变状态只许一个记账人」是同一条纪律：
+/// `overlay_visible` 是唯一真源，**任何改它的地方都要把结果广播出去**，
+/// 不许只在某一条路上广播。
+fn emit_visibility(app: &AppHandle, visible: bool) {
+    let _ = app.emit_to(GRID_LABEL, "grid:visibility", visible);
 }
 
 /// 写「挂件层是否应处于显示状态」。
@@ -2846,6 +3236,9 @@ pub fn hide_overlay_now(app: &AppHandle) {
     // 收起格子层即交还桌面：系统图标恢复显示（与 show 时隐藏对称）
     takeover_icons(app, false);
     let _ = write_overlay_visible(app, false);
+    // V79：**这里以前漏了广播** —— 桌面右键菜单「退出桌面整理」（`--hide-grid`）走的就是
+    // 这条路，没有前端的参与，于是库改了、界面不知道，桌面上的格子一直在。
+    emit_visibility(app, false);
     // 收起时把 Z 序自愈的计数清零：下次显示是干净的一轮
     reset_reassert_state();
     grid_log("收起挂件层");
@@ -3240,6 +3633,108 @@ pub async fn shell_context_menu(
     {
         let _ = (app, path, extended);
         Err("当前平台暂未适配原生右键菜单".to_string())
+    }
+}
+
+/// 弹出「桌面**背景**」的原生右键菜单，并把用户「新建」出来的项**作为返回值**带回（V87/V89）。
+///
+/// 用户 10-08 原话：「我们只是把桌面上的图标整理移动到整齐的位置上，你现在是直接把桌面
+/// 完全改掉了呢？新建文件夹 / 新建文本文档等右键功能都不是原生的，问题很多」。
+///
+/// V81–V86 那一整套「菜单期间把桌面借给系统、收工时再收回」的补丁，到此让位给
+/// **我们自己把那张菜单弹出来** —— 不再赌 `#32768` 的类名语义（Win11 25H2 的新式菜单
+/// 根本不是它），不再需要「安静 1.5s」与 120s 超时，也不再有「只有第一次新建成功」。
+///
+/// # V89：命令直接返回「新建结果」而非事件
+///
+/// 菜单必须在有消息循环的主线程上弹（`run_on_main_thread`）。V88 那套「弹完广播
+/// `grid:item-created` 事件 + 前端 30ms 竞速认领」会在**菜单还没弹出来时**就被竞速判成
+/// 「没新建」而触发整层刷新——这正是「卡 + 整体刷新」的残留根因。V89 改用 `std::sync::mpsc`
+/// 通道：主线程把菜单弹完、把「新建」产出的 [`crate::platform::shell_menu::CreatedItem`]
+/// 发回命令线程，命令直接 `return` 这个值。前端据此决定「增量认领 + 原地改名」还是
+/// 「全量对账」，桌面**永不翻白**、新建**不再整层刷新**。
+///
+/// 实现见 [`crate::platform::shell_menu::show_background_context_menu`]。
+#[tauri::command]
+pub async fn shell_desktop_background_menu(
+    app: AppHandle,
+    extended: Option<bool>,
+) -> Result<Option<crate::platform::shell_menu::CreatedItem>, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let handle = app.clone();
+        let want_extended = extended.unwrap_or(false);
+        // 菜单在主线程弹；用通道把「新建结果」带回命令线程（它不是 `Send` 友好类型，但
+        // `CreatedItem` 是 `Clone + Serialize`，跨线程发一份没问题）。
+        let (tx, rx) =
+            std::sync::mpsc::channel::<Option<crate::platform::shell_menu::CreatedItem>>();
+        app.run_on_main_thread(move || {
+            use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
+            let win = handle
+                .get_webview_window(GRID_LABEL)
+                .or_else(|| handle.get_webview_window("main"));
+            let hwnd = win
+                .and_then(|w| w.hwnd().ok())
+                .map(|h| HWND(h.0 as *mut std::ffi::c_void))
+                .unwrap_or_default();
+            let hwnd_raw = hwnd.0 as isize;
+
+            // V90：原生菜单的宿主是**隐藏的** `SHELLDLL_DefView`。先把前台给一个**可见**窗口
+            // （就是我们自己这层挂件窗），否则 Explorer 弹出的菜单会「点外面不消失」（Win32 经典坑）。
+            unsafe {
+                let _ = SetForegroundWindow(hwnd);
+            }
+
+            // —— 首选：转发给 Explorer 的桌面视图，让它弹**它自己的完整原生菜单**（V90）——
+            // 那条链上有「查看 / 排序方式 / 刷新」和完整的 ShellNew「新建」14 项 —— 这两块
+            // 都不经过 IContextMenu，复刻拿不到（用户 10-08 23:01 的对比图就是在说这个）。
+            //
+            // V91：转发**立刻返回**（XAML 宿主在别的线程弹出），所以「等菜单出现 / 等收起」
+            // 必须挪到后台线程 —— 在这条 UI 线程上 sleep 会把整个前端冻住。
+            let state = match crate::platform::shell_menu::forward_desktop_view_menu() {
+                Ok(state) => state,
+                Err(err) => {
+                    grid_log(&format!("桌面右键转发失败：{err}"));
+                    let _ = tx.send(None);
+                    return;
+                }
+            };
+
+            let fallback_handle = handle.clone();
+            std::thread::spawn(move || {
+                if crate::platform::shell_menu::await_desktop_view_menu(&state) {
+                    // 原生完整菜单走完了。用户点了什么我们不知道（新建 / 粘贴 / 删除 / 排序…）
+                    // ⇒ 交给前端做增量对账：新增进竖条并进改名、有删除才重排。
+                    let _ = tx.send(None);
+                    return;
+                }
+                // —— 回退：V89 的复刻菜单（这台机器不吃转发时的保底）——
+                // `TrackPopupMenuEx` 要求宿主窗口所在线程有消息泵 ⇒ 必须回 UI 线程弹。
+                let tx2 = tx.clone();
+                let posted = fallback_handle.run_on_main_thread(move || {
+                    let h = HWND(hwnd_raw as *mut std::ffi::c_void);
+                    let result = crate::platform::shell_menu::show_background_context_menu(
+                        h,
+                        want_extended,
+                    );
+                    // 菜单已收起（含「新建」落地 / 取消），把结果发回；失败按「没新建」处理。
+                    let _ = tx2.send(result.unwrap_or(None));
+                });
+                if posted.is_err() {
+                    let _ = tx.send(None);
+                }
+            });
+        })
+        .map_err(|err| format!("投递桌面背景菜单失败：{err}"))?;
+        // 阻塞等结果。注意：UI 线程只做了「转发」就撒手了（不睡眠），真正在等菜单的是上面
+        // 那个后台线程 —— 所以前端不会冻。Tauri 主线程自身跑着消息循环，也不会死锁。
+        rx.recv()
+            .map_err(|err| format!("读取新建结果失败：{err}"))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (app, extended);
+        Err("当前平台暂未适配桌面背景菜单".to_string())
     }
 }
 
@@ -4582,30 +5077,26 @@ fn content_plan_batch(items: &[usize], band: SlotRect, icon: i64) -> ContentPlan
 /// 一套候选解：`(分列, 各格高, 各格宽, 这套尺寸有没有被夹窄过)`。
 type ColumnPick = (Vec<Vec<usize>>, Vec<i64>, Vec<i64>, bool);
 
-/// 挑列数（V71 重写）：`k` 从大到小，**每个 `k` 内部先试自然宽度、再试夹到 `zone_w / k` 的宽度**，
-/// 取第一个「宽高都装得下」的。
+/// 挑列数与尺寸（V84 定稿）：在 `k = 1..=capacity`、每个 k「先自然宽度、再夹到
+/// `zone_w / k`」的所有候选里，取 **`min(横向填充率, 纵向填充率)` 最大**的那个解。
 ///
 /// 返回 `(命中解, 兜底解)`：
-///   · 命中解 = 宽高都装得下（列数最多的那个 `k`）；
+///   · 命中解 = 宽高都装得下、两轴填充率较小者最大的解；
 ///   · 兜底解 = 宽度装得下、但高度越界里**最矮**的那个（随后交给 [`fit_column_heights`] 压列高）。
 ///
-/// # 为什么「夹宽度」必须放进 `k` 的循环里（V71 修的就是这个）
+/// # 这条判据是两代用户反馈合成的
 ///
-/// V69 把「夹到 `zone_w / k`」放在**所有 k 都失败之后**才试。真机（09-23 截图）于是出现：
-/// 3 个格子（18 / 8 / 8 项）、收纳区可用 637 宽 ——
+/// · **09-23（V71）**：「文档」独占一列、下方空掉 501px，两个小格挤在另一列 ——
+///   用户骂「怎么还是补补丁一样的」 ⇒ **不能只顾少列**：一列空半截、另一列摞满的解，
+///   纵向填充率被拉低，`min` 直接淘汰。
+/// · **09-29（V84）**：「搞成那么多列，却空了大量的空白，格子宽度反而压缩到文件名
+///   都看不清了」「这部分完全可以合并到一列里面」 ⇒ **也不能铺满列数**：真机 6 个格子
+///   920×968 排成 5 列、占高只有 717，每列 ~176px。列一多，竖向大片空白，
+///   `min` 同样把它拉低。
 ///
-/// | 试到的 k | 自然宽度合计 | 判定 |
-/// |---|---|---|
-/// | 3 | 372 + 232 + 232 + 2×24 = **884** > 637 | 淘汰 |
-/// | 2 | 372 + 232 + 24 = 628 ≤ 637 | **命中并返回** |
-///
-/// 结果：「文档」独占第一列、下方空掉 501px，另外两个挤在第二列 —— 用户看到的正是
-/// 「怎么还是补补丁一样的」。**病根是把「自然宽度放不下」当成了「这个列数不可行」**：
-/// 宽度其实是**软约束**（夹窄了格子变高，但还能用），**列数才是用户看得见的那个东西**。
-///
-/// 现在每个 `k` 内部先试自然、再试夹宽 ⇒ **能多铺一列就多铺一列，尺寸去适配列宽**，
-/// 而不是少开一列让尺寸舒服。同一 `k` 里自然尺寸在前，是为了「不夹也放得下时就别夹」
-/// （只有 2 个格子时 `k = 3` 有一列是空的、不占宽，自然尺寸就先命中了）。
+/// 也就是说 `min(横, 纵)` 同时否掉两个方向的畸形：**横向铺满、纵向空一半（列太多）**，
+/// 和**纵向摞满、横向空一半（列太少 / 补丁洞）**。平局时先到先得 —— `k` 从小到大、
+/// 同一个 k 里自然尺寸在前 —— 于是「能少一列就少一列、能不夹宽就不夹宽」。
 ///
 /// `capped_at(k)` 给出「这一套尺寸夹到 `zone_w / k` 之后」的 `(各格高, 各格宽)`；
 /// 与自然尺寸完全相同时会跳过，不做重复劳动。
@@ -4617,8 +5108,9 @@ fn pick_columns(
     zone_h: i64,
     capped_at: impl Fn(usize) -> (Vec<i64>, Vec<i64>),
 ) -> (Option<ColumnPick>, Option<(i64, ColumnPick)>) {
+    let mut best: Option<(i64, ColumnPick)> = None;
     let mut fallback: Option<(i64, ColumnPick)> = None;
-    for k in (1..=capacity).rev() {
+    for k in 1..=capacity {
         let mut trials: Vec<(Vec<i64>, Vec<i64>, bool)> =
             vec![(natural_h.to_vec(), natural_w.to_vec(), false)];
         let (ch, cw) = capped_at(k);
@@ -4627,20 +5119,29 @@ fn pick_columns(
         }
         for (hs, ws, capped) in trials {
             let cols = pack_columns(&hs, k);
+            let used_w = packed_total_width(&cols, &ws);
             // 宽度装不下直接淘汰 —— 这是「不许压到挂件带 / 工作台上」的硬约束
-            if packed_total_width(&cols, &ws) > zone_w {
+            if used_w > zone_w {
                 continue;
             }
             let tallest = cols.iter().map(|c| col_stack_h(c, &hs)).max().unwrap_or(0);
-            if tallest <= zone_h {
-                return (Some((cols, hs, ws, capped)), fallback);
+            if tallest > zone_h {
+                // 高度越界 ⇒ 只进兜底（全都不装时取「最矮」的，交给 fit_column_heights 压）
+                if fallback.as_ref().map_or(true, |(t, _)| tallest < *t) {
+                    fallback = Some((tallest, (cols, hs, ws, capped)));
+                }
+                continue;
             }
-            if fallback.as_ref().map_or(true, |(t, _)| tallest < *t) {
-                fallback = Some((tallest, (cols, hs, ws, capped)));
+            // 两轴填充率的较小者（交叉乘积通分比较，避免浮点）：
+            //   横向 = used_w/zone_w，纵向 = tallest/zone_h。
+            // 严格更优才替换 ⇒ 平局保持先到者：k 更小、自然尺寸优先。
+            let score = (used_w * zone_h).min(tallest * zone_w);
+            if best.as_ref().map_or(true, |(s, _)| score > *s) {
+                best = Some((score, (cols, hs, ws, capped)));
             }
         }
     }
-    (None, fallback)
+    (best.map(|(_, pick)| pick), fallback)
 }
 
 /// 把 `order` 里这些格子（条目数查 `items`）排进 `band`。
@@ -4697,7 +5198,8 @@ fn content_plan_in(order: &[usize], items: &[usize], band: SlotRect, icon: i64) 
         (hs, ws)
     };
 
-    // ①② 挑列数：**每个 `k` 内部先试自然宽度、再试夹宽**（V71 —— 见 [`pick_columns`]）。
+    // ①② 挑列数与尺寸：每个 `k` 先试自然宽度、再试夹宽，在全部装得下的候选里取
+    // **两轴填充率较小者最大**的解（V84 —— 见 [`pick_columns`] 的注释）。
     let (pick, over) = pick_columns(&natural_h, &natural_w, capacity, zone_w, zone_h, capped_at);
 
     // ③ 落定：命中解优先；否则用「最矮」的兜底（随后压列高，格子内部滚而不是整层滚）
@@ -4711,11 +5213,42 @@ fn content_plan_in(order: &[usize], items: &[usize], band: SlotRect, icon: i64) 
         },
     };
 
-    // ④ 落位：列从左到右依次排开，列内自上而下紧挨着摞（只有一道 ARRANGE_GAP_Y 的缝）
+    // ④ 落位（V85 重写）：
+    //   · **列从右往左排**（右锚定）—— 第一列贴着便签 / 工作台一侧，排完后剩下的空间留在
+    //     左边给「未归类」竖条 / 快捷方式。用户 09-29 晚原话：「格子应该从右往左开始排，
+    //     而不是从左到右排，不是说了排完后剩余空间给快捷方式等不整理的图标部分吗」。
+    //     右锚定仍是**内容的纯函数**（总宽由内容算出）⇒ 幂等不受影响；也不碰带下空间的
+    //     「`band_b` 的 x 严格大于 `band_a`」纪律 —— `band_a` 最右一列的右沿就是 zone 右沿，
+    //     仍在 `band_b` 左沿之左（见 [`content_plan_with_lower_band`] ①）。
+    //   · **列内撑满列宽**：一列的宽度 = 该列最宽那格；比它窄的格子**撑到列宽**、按新宽度
+    //     重算高度（宽了行数就少 ⇒ 只会更矮，不可能因此越界）。用户：「上面是宽的 下面放在
+    //     一个小的小格子 宽度没有占满……合理利用空间才好看吧」。⚠️ 这只**撑宽**、不**夹窄**
+    //     —— V71「不许比自然宽度更窄」的底线原样保留。
     let mut slots = vec![SlotRect { x: band.x, y: band.y, w: 0, h: 0 }; order.len()];
-    let mut x = band.x;
-    for col in cols.iter().filter(|c| !c.is_empty()) {
-        let group: Vec<i64> = col.iter().map(|&i| heights[i]).collect();
+    let col_ws: Vec<i64> = cols
+        .iter()
+        .filter(|c| !c.is_empty())
+        .map(|c| c.iter().map(|&i| widths[i]).max().unwrap_or(MIN_BOX_W))
+        .collect();
+    // 右沿从 band 右沿起、每摆完一列向左退一道缝：第一列（最大的格子）贴便签一侧，
+    // 后面的列依次向左排。⚠️ 别写成「x = 右沿 − 总宽」再往左摆 —— 那是块**左**端的位置，
+    // 整块会向左溢出 band（真机测出 x = −57 就是这么来的）。
+    let mut right = band.x + zone_w;
+    for (ci, col) in cols.iter().filter(|c| !c.is_empty()).enumerate() {
+        let col_w = col_ws[ci];
+        let x = (right - col_w).max(band.x);
+        let group: Vec<i64> = col
+            .iter()
+            .map(|&i| {
+                if widths[i] < col_w {
+                    // 撑满列宽：高度按新宽度重算（`order[i]` 才是条目数的下标 ——
+                    // `heights` / `widths` / `slots` 都按摆放序的位置编号）
+                    box_height_at(items[order[i]], col_w, icon, zone_h)
+                } else {
+                    heights[i]
+                }
+            })
+            .collect();
         let natural = group.iter().copied().sum::<i64>() + (group.len() as i64 - 1).max(0) * ARRANGE_GAP_Y;
         let fitted = if natural > zone_h {
             squeezed = true;
@@ -4728,12 +5261,12 @@ fn content_plan_in(order: &[usize], items: &[usize], band: SlotRect, icon: i64) 
             slots[i] = SlotRect {
                 x,
                 y,
-                w: widths[i],
+                w: col_w,
                 h: fitted[j],
             };
             y += fitted[j] + ARRANGE_GAP_Y;
         }
-        x += col.iter().map(|&i| widths[i]).max().unwrap_or(MIN_BOX_W) + ARRANGE_GAP_X;
+        right = x - ARRANGE_GAP_X;
     }
     let limit = band.y + band.h;
     let overflowed = slots.iter().any(|s| s.y + s.h > limit);
@@ -4871,17 +5404,27 @@ fn loose_cell_size(icon: i64) -> (i64, i64) {
     (icon + CELL_EXTRA_W, icon + CELL_EXTRA_H)
 }
 
-/// 竖条最多几列 —— 再多就把桌面左半边吃掉了，分类格会没地方站。
-const LOOSE_MAX_COLUMNS: i64 = 4;
+/// 竖条宽度的**占比上限**（V86）：竖条最多占「工作区宽度的一半 − 一道边距」。
+///
+/// # 为什么不再拍一个固定列数（V86）
+///
+/// 原来夹死 `LOOSE_MAX_COLUMNS = 4`：真机 42 个条目、每列 8 行 ⇒ 需要 6 列却被夹回
+/// 4 列，多出的 10 个条目全滚进竖条内部的隐藏滚动区 —— 用户 09-30 原话：
+/// 「快捷方式这里应该从左到右依次往下排列，满了就换第二列，现在怎么成了**下面空了**，
+/// 正常应该是**右边空**」。列数放开后：每列都满高、不满的只是**最右一列**的下部；
+/// 极端条目数撞到宽度上限时，仍由竖条内部滚动兜底（契约见下方测试）。
+const LOOSE_MAX_WIDTH_NUM: i64 = 1;
+const LOOSE_MAX_WIDTH_DEN: i64 = 2;
 
-/// 「未归类」竖条的矩形与列数（V42；V59 追加了「列数撞上限」的契约）。
+/// 「未归类」竖条的矩形与列数（V42；V59 追加了「列数撞上限」的契约；V86 改按宽度封顶）。
 ///
 /// # 列数被夹住时，`rect.h` 会小于前端需要的高度 —— 这是**有意**的
 ///
 /// 行数先按「一列放得下几行」（`rows_per_col`）反推需要几列，再把列数夹在
-/// [`LOOSE_MAX_COLUMNS`]。列数一旦被夹住，`rows = ceil(n / 4)` 就**可能大于**
-/// `rows_per_col`；此时这里把高度封顶到 `avail_h`（竖条绝不许越出工作区下边界），
-/// 而前端渲染的行数仍然是 `ceil(n / columns)` —— 于是**内容天然比 `rect.h` 高**。
+/// 「竖条最多占工作区一半宽」内（[`LOOSE_MAX_WIDTH_DEN`]）。列数一旦被夹住，`rows`
+/// 就**可能大于** `rows_per_col`；此时这里把高度封顶到 `avail_h`（竖条绝不许越出
+/// 工作区下边界），而**前端渲染的行数仍然是 `ceil(n / columns)`** —— 于是**内容天然比
+/// `rect.h` 高**。
 ///
 /// 那几行不会溢出去：前端竖条自己带 `overflow-y-auto`，**在容器内部滚**
 /// （与收纳格「装不下就内部出滚动条」同一口径，用户 09-21 第 ③ 条）。
@@ -4898,10 +5441,16 @@ fn loose_strip_rect(work_w: i64, work_h: i64, count: usize, icon: i64) -> Option
     let (cell_w, cell_h) = loose_cell_size(icon);
     // 纵向一格的完整占位（含行距）—— 用「能放下几行」反推需要几列
     let pitch_y = cell_h + GRID_GAP;
+    let pitch_x = cell_w + GRID_GAP;
     let avail_h = (work_h - 2 * ARRANGE_MARGIN).max(cell_h);
     let rows_per_col = (avail_h / pitch_y).max(1);
     let n = count as i64;
-    let columns = ((n + rows_per_col - 1) / rows_per_col).clamp(1, LOOSE_MAX_COLUMNS);
+    // V86：列数 = ceil(n / rows_per_col) 自然算出，被「最多占工作区一半宽」夹住
+    //（不再夹固定 4 列 —— 那会把多出的条目全藏进内部滚动区，用户看到「下面空了」）。
+    let max_cols = (((work_w * LOOSE_MAX_WIDTH_NUM) / LOOSE_MAX_WIDTH_DEN - ARRANGE_MARGIN)
+        / pitch_x)
+        .max(1);
+    let columns = ((n + rows_per_col - 1) / rows_per_col).clamp(1, max_cols);
     let rows = (n + columns - 1) / columns;
     let w = (columns * cell_w + (columns - 1) * GRID_GAP)
         .min((work_w - 2 * ARRANGE_MARGIN).max(cell_w));
@@ -5890,11 +6439,29 @@ fn layout_icon_size() -> i64 {
 ///
 /// 优先用挂件窗自身的尺寸 —— 格子的 `pos_x/pos_y` 本来就是**相对挂件窗客户区**的，
 /// 拿显示器尺寸去算会在「窗口没铺满屏幕」时把格子推到窗口外面。
-/// 窗口还没建时退回主显示器工作区；都拿不到给 1280×720。
+/// **优先**取主显示器工作区（实时真源）；只有问不到显示器时才退回归宿到窗口尺寸。
+///
+/// V83 把顺序倒了过来。以前是「窗口尺寸优先、显示器兜底」，理由是「窗口就是桌面」——
+/// 但**接/拔显示器那一刻**窗口尺寸可能还是旧的（`sync_overlay_bounds` 晚一拍），
+/// 于是会先按错尺寸排一次、再重排一次，用户看到格子抖一下。布局本来就该以**主屏**
+/// 为准（窗口只是它的呈现载体，两者最终必然相等），所以问不到主屏时才退回窗口。
 ///
 /// V38 补上高度：排布改成「一列自上而下摆满再往左推一列」之后，**没有高度就算不出
 /// 一列能放几个**，格子在纵向会越排越出去（用户实测截图里就是一路排到桌面底部之外）。
 fn layout_work_size(app: &AppHandle) -> (i64, i64) {
+    // V83：**先问主显示器工作区**（真源），再退回窗口尺寸 —— 理由见函数头。
+    if let Ok(Some(monitor)) = app.primary_monitor() {
+        let scale = monitor.scale_factor();
+        if scale > 0.0 {
+            let area = monitor.work_area();
+            if area.size.width > 0 && area.size.height > 0 {
+                return (
+                    (f64::from(area.size.width) / scale).round() as i64,
+                    (f64::from(area.size.height) / scale).round() as i64,
+                );
+            }
+        }
+    }
     if let Some(win) = app.get_webview_window(GRID_LABEL) {
         if let (Ok(size), Ok(scale)) = (win.inner_size(), win.scale_factor()) {
             if scale > 0.0 && size.width > 0 && size.height > 0 {
@@ -5903,16 +6470,6 @@ fn layout_work_size(app: &AppHandle) -> (i64, i64) {
                     (f64::from(size.height) / scale).round() as i64,
                 );
             }
-        }
-    }
-    if let Ok(Some(monitor)) = app.primary_monitor() {
-        let scale = monitor.scale_factor();
-        if scale > 0.0 {
-            let area = monitor.work_area();
-            return (
-                (f64::from(area.size.width) / scale).round() as i64,
-                (f64::from(area.size.height) / scale).round() as i64,
-            );
         }
     }
     (1280, 720)
@@ -7345,6 +7902,7 @@ mod flow_placer_tests {
     use super::{
         auto_box_size, box_height_at, box_own_size, box_width_for_columns, column_bottom,
         column_capacity, content_plan, content_zone_right, desired_box_width, fit_column_heights,
+        bounds_need_fix,
         content_plan_with_lower_band, is_content_kind, own_sizes, pack_columns, placement_order,
         ContentPlan,
         item_columns_at, loose_cell_size,
@@ -7355,11 +7913,44 @@ mod flow_placer_tests {
         BOX_BORDER_H, CALENDAR_BOX_W, WST_BOX_W,
         BOX_CELL_EXTRA_H, BOX_FIT_SLACK, BOX_HEADER_H, CELL_EXTRA_W, GRID_GAP, GRID_PAD_X,
         GRID_PAD_Y, GRID_SCROLLBAR_W,
-        LOOSE_MAX_COLUMNS, MIN_BOX_H, MIN_BOX_W,
+        MIN_BOX_H, MIN_BOX_W,
     };
 
     /// 没有挂件时的挂件带左界（= 工作区右沿）—— `needs_placement` 的硬右界参数。
     const NO_WIDGET_BAND: i64 = WORK_W - ARRANGE_MARGIN;
+
+    /// V83：**「差 1–2px 算已对齐」这条容差必须成立** —— 它是「显示器几何对齐」不死循环的开关。
+    ///
+    /// 非整数缩放（125% / 150% / 175%）下，`SetWindowPos` 写进去的物理像素与
+    /// `GetWindowRect` 读回来的会差 1–2px。若按严格相等判，每 1 秒的复核都会认为
+    /// 「还没对齐」⇒ 再 `set` 一次 ⇒ 永远不一致：用户看到窗口每秒闪一下、
+    /// 前端每秒重排一次（`grid:bounds-changed` 每秒广播一次）。
+    ///
+    /// 变异对照：把 [`bounds_need_fix`] 里的 `> BOUNDS_TOLERANCE` 改成 `!= 0`，
+    /// 第二组断言立刻变红。
+    #[test]
+    fn window_bounds_tolerance_swallows_rounding_noise() {
+        let target = (0, 0, 1920u32, 1032u32);
+
+        // 完全一致 ⇒ 位置和尺寸都不动
+        assert_eq!(bounds_need_fix((0, 0), (1920, 1032), target), (false, false));
+        // ±2px 的取整噪声 ⇒ 仍然当作「已对齐」
+        assert_eq!(bounds_need_fix((1, 2), (1919, 1031), target), (false, false));
+        assert_eq!(bounds_need_fix((-2, -1), (1922, 1034), target), (false, false));
+        // 3px 起才认作真的错位（那是缩放 / 显示器变了，不是取整）
+        assert_eq!(bounds_need_fix((3, 0), (1920, 1032), target), (true, false));
+        assert_eq!(bounds_need_fix((0, 0), (1917, 1032), target), (false, true));
+
+        // 位置与尺寸**分开**判：只错一样就只动一样（`set_size` 会触发 webview 重排）
+        assert_eq!(bounds_need_fix((500, 0), (1920, 1032), target), (true, false));
+        assert_eq!(bounds_need_fix((0, 0), (1280, 1032), target), (false, true));
+
+        // 主屏换到另一台显示器（副屏在左 ⇒ 主屏原点 x = 1920）：位置跟过去、尺寸不变
+        assert_eq!(
+            bounds_need_fix((0, 0), (1920, 1032), (1920, 0, 1920, 1032)),
+            (true, false)
+        );
+    }
 
     /// 真机那一组（V71）：收纳区 637×848、条目数 18 / 8 / 8 —— 见 [`pick_columns`] 里那张表。
     const REAL_ITEMS: [usize; 3] = [18, 8, 8];
@@ -7393,10 +7984,14 @@ mod flow_placer_tests {
         assert!(!plan.overflowed, "并排铺开之后不该再越过可用区的下沿");
     }
 
-    /// V71：**放得下就不许夹窄**（`pick_columns` 里「同一个 k 里自然尺寸在前」那一条）。
+    /// V71 → V85：**放得下就不许夹窄**（`pick_columns` 里「同一个 k 里自然尺寸在前」那一条）。
     ///
     /// 「多铺一列」是好事，但**不能拿格子宽度去换** —— 空间明明够，却把格子挤窄去凑列数，
     /// 用户看到的是「图标少了一个 / 排数变多」。
+    ///
+    /// ⚠️ V85 起判据从「宽度必须等于自然宽」放宽为「**不许比自然宽更窄**」：同一列里比列宽
+    /// 窄的格子会被**撑到列宽**（用户 09-29 晚：「上面是宽的 下面放在一个小的小格子 宽度没有
+    /// 占满……合理利用空间才好看吧」）。撑宽是设计内行为，夹窄才是回归。
     ///
     /// ⚠️ 场景必须选成「**同一个 k 里两套尺寸都可行、但只有自然尺寸不夹**」，否则这条用例
     /// 抓不住「夹宽优先」这个破坏（第一版拿 2 个 8 项试就栽在这儿：`capacity` 被
@@ -7418,28 +8013,41 @@ mod flow_placer_tests {
             "这条用例的前提是「自然宽度刚好放得下」，前提不成立就换场景：{natural:?}"
         );
         for (i, s) in plan.slots.iter().enumerate() {
-            assert_eq!(
-                s.w, natural[i],
+            assert!(
+                s.w >= natural[i],
                 "第 {i} 个格子被夹窄到 {}（自然宽度 {}）—— 空间够时不许为「多开一列 / 凑整齐」把格子挤窄",
                 s.w, natural[i]
             );
         }
     }
 
-    /// V71：用户原话「**然后把零散的少量的格子补在下面即可**」。
+    /// V71 → V84：用户原话「**然后把零散的少量的格子补在下面即可**」—— 这半句一直有效；
+    /// 变的是列数（见 [`pick_columns`] 的注释）。
     ///
-    /// 5 个格子（18 / 8 / 8 / 8 / 4 项）3 列 ⇒ 顶行正好是**最大的三个**（每列一个），
-    /// 剩下的两个补在它们下面 —— 不是「随机塞进哪条列」。
+    /// V71 时期这条用例钉的是「3 列、顶行 = 最大的三个」；09-29 用户明确反对
+    /// 「搞成那么多列，格子宽度反而压缩到文件名都看不清了」，判据改为两轴填充率取
+    /// `min` 之后，这批数据的最优解是 **2 列自然宽度**（填充率 0.88，高于 3 列夹宽的
+    /// 0.85，且一个格子都不用夹窄）。「大格子在上、零散的补在下面」的落位精神不变：
+    /// 顶行 = 18 项 + 一个 8 项，剩下的 8 / 8 / 4 全部补在下面。
     #[test]
     fn small_boxes_fill_in_below_the_big_ones() {
         let items = [18usize, 8, 8, 8, 4];
         let plan = content_plan(&items, REAL_ZONE_W, REAL_ZONE_H, REAL_ICON, REAL_MIN_X);
         assert_eq!(
             plan.column_count(),
-            3,
-            "5 个格子在 637 宽里应当铺满 3 列，实际只开了 {} 列",
+            2,
+            "5 个格子在 637 宽里应当收成 2 列自然宽度（V84），实际开了 {} 列",
             plan.column_count()
         );
+        // 不许为了凑列数把任何格子夹窄（V71 的精神；V85 起撑宽到列宽是设计内行为）
+        for (i, s) in plan.slots.iter().enumerate() {
+            let natural = box_own_size(items[i], REAL_ZONE_W, REAL_ZONE_H, REAL_ICON).0;
+            assert!(
+                s.w >= natural,
+                "第 {i} 个格子被夹窄到 {}（自然宽度 {}）",
+                s.w, natural
+            );
+        }
         let mut top: Vec<usize> = items
             .iter()
             .zip(plan.slots.iter())
@@ -7448,7 +8056,7 @@ mod flow_placer_tests {
             .collect();
         top.sort_unstable();
         top.reverse();
-        assert_eq!(top, vec![18, 8, 8], "顶行应当正好是最大的三个（每列一个）");
+        assert_eq!(top, vec![18, 8], "顶行应当是最大的两个（每列一个）");
         let mut below: Vec<usize> = items
             .iter()
             .zip(plan.slots.iter())
@@ -7457,8 +8065,84 @@ mod flow_placer_tests {
             .collect();
         below.sort_unstable();
         below.reverse();
-        assert_eq!(below, vec![8, 4], "零散的少量格子应当补在下面");
+        assert_eq!(below, vec![8, 8, 4], "零散的少量格子应当补在下面");
         assert!(!plan.overflowed, "补在下面之后也不该越界");
+    }
+
+    /// V84：用户 09-29 的真机场景 —— 6 个格子（13 / 12 / 8 / 2 / 1 / 1 项）在 920×968 的
+    /// 收纳区里曾被「k 从大到小」排成 **5 列**、每列 ~176px（用户原话「格子宽度反而压缩到
+    /// 文件名都看不清了」「空了大量的空白」）。判据改为两轴填充率取 `min` 之后必须收成
+    /// **少量宽列**：2 列、全部自然宽度、纵向填过半。
+    #[test]
+    fn six_boxes_pack_into_wide_natural_columns_not_five_cramped_ones() {
+        let items = [13usize, 12, 8, 2, 1, 1];
+        let (zone_w, zone_h) = (920i64, 968i64);
+        let plan = content_plan(&items, zone_w, zone_h, 32, ARRANGE_MARGIN);
+        assert!(
+            plan.column_count() <= 3,
+            "不许再开 5 列（用户：「搞成那么多列」）：实际 {} 列",
+            plan.column_count()
+        );
+        for (i, s) in plan.slots.iter().enumerate() {
+            let natural = box_own_size(items[i], zone_w, zone_h, 32).0;
+            assert!(
+                s.w >= natural,
+                "第 {i} 个格子被夹窄到 {}（自然宽度 {}）—— 宁可少一列也不夹窄",
+                s.w, natural
+            );
+        }
+        let bottom = plan.slots.iter().map(|s| s.y + s.h).max().unwrap() - ARRANGE_MARGIN;
+        assert!(
+            bottom * 2 > zone_h,
+            "纵向填充必须过半（{bottom}/{zone_h}）—— 列多到竖向空一半就是又回到 5 列的老路"
+        );
+        assert!(!plan.overflowed, "不许越出可用区下沿");
+    }
+
+    /// V85：**列从右往左排（右锚定）+ 列内撑满列宽**。
+    ///
+    /// 用户 09-29 晚（附截图）：「格子应该从右往左开始排，而不是从左到右排，不是说了排完
+    /// 后剩余空间给快捷方式等不整理的图标部分吗」「上面是宽的 下面放在一个小的小格子 宽度
+    /// 没有占满……合理利用空间才好看吧」。
+    ///
+    /// 场景故意把可用宽压到 500：`k = 2` 的自然宽度 628 放不下 ⇒ 只能收成一列，
+    /// 8 项那格必须撑到 18 项的列宽（旧行为是保持 232、右边空一截）。
+    #[test]
+    fn columns_anchor_right_and_narrow_boxes_fill_the_column_width() {
+        let items = [18usize, 8];
+        let (zone_w, zone_h) = (500i64, 848i64);
+        let plan = content_plan(&items, zone_w, zone_h, REAL_ICON, REAL_MIN_X);
+
+        // ① 右锚定：最右一格的右沿 == 可用区右沿（便签一侧），剩余空间留在左边
+        let zone_right = REAL_MIN_X + zone_w;
+        let used_right = plan.slots.iter().map(|s| s.x + s.w).max().unwrap();
+        assert_eq!(
+            used_right, zone_right,
+            "格子必须贴着可用区右沿（便签一侧）排，剩余空间留给左边"
+        );
+        let used_left = plan.slots.iter().map(|s| s.x).min().unwrap();
+        assert!(used_left > REAL_MIN_X, "剩余空间应该留在左边（未归类竖条一侧）");
+
+        // ② 列内撑满：一列的宽度 = 该列最宽那格，其余格子同宽（不许「上宽下窄」）
+        let col_w_expected = items
+            .iter()
+            .map(|n| box_own_size(*n, zone_w, zone_h, REAL_ICON).0)
+            .max()
+            .unwrap();
+        for s in &plan.slots {
+            assert_eq!(
+                s.w, col_w_expected,
+                "列内格子宽度必须撑满列宽（用户：「宽度没有占满」）：{s:?}"
+            );
+        }
+        // ③ 撑宽之后高度按新宽度重算（几何自洽：宽了行数就少）—— 两格都不能越界
+        assert!(!plan.overflowed, "撑满列宽之后不许越界");
+        // ④ 幂等仍是算出来的：同样的内容排两遍一字不差
+        let again = content_plan(&items, zone_w, zone_h, REAL_ICON, REAL_MIN_X);
+        let snap = |p: &ContentPlan| -> Vec<(i64, i64, i64, i64)> {
+            p.slots.iter().map(|s| (s.x, s.y, s.w, s.h)).collect()
+        };
+        assert_eq!(snap(&plan), snap(&again), "同一个输入排两次结果不同");
     }
 
     fn overlap(a: &SlotRect, b: &SlotRect) -> bool {
@@ -7842,28 +8526,62 @@ mod flow_placer_tests {
         assert_eq!(strip.rect.w, cell_w);
         assert_eq!(strip.rect.h, 5 * cell_h + 4 * GRID_GAP);
 
-        // 条目多到一列放不下 → 往右铺成多列，且**不超过列数上限**
+        // 条目多到一列放不下 → 往右铺成多列，列数被「最多占工作区一半宽」夹住（V86）
+        let pitch_x = cell_w + GRID_GAP;
+        let pitch_y = cell_h + GRID_GAP;
+        let rows_per_col = ((WORK_H - 2 * ARRANGE_MARGIN) / pitch_y).max(1);
+        let max_cols = ((WORK_W / 2 - ARRANGE_MARGIN) / pitch_x).max(1);
+        let expected_cols = max_cols.min((400 + rows_per_col - 1) / rows_per_col);
         let many = loose_strip_rect(WORK_W, WORK_H, 400, 32).expect("必须有区域");
-        assert_eq!(many.columns, LOOSE_MAX_COLUMNS, "列数被上限夹住");
-        assert_eq!(many.rect.w, LOOSE_MAX_COLUMNS * cell_w + (LOOSE_MAX_COLUMNS - 1) * GRID_GAP);
+        assert_eq!(
+            many.columns, expected_cols,
+            "列数 = min(自然列数, 宽度上限)；本机参数下应由宽度上限夹住"
+        );
+        assert_eq!(many.rect.w, expected_cols * cell_w + (expected_cols - 1) * GRID_GAP);
         assert!(
             many.rect.y + many.rect.h <= WORK_H - ARRANGE_MARGIN,
             "竖条不得越出下边界"
         );
 
-        // V59：列数被夹住 ⇒ 前端渲染的行数（ceil(n/4)）**必然高于**这里给的 `rect.h`。
-        // 这是有意为之的契约：多出来的行由竖条自己 `overflow-y-auto` 内部滚（前端
-        // `GridOverlay` 的竖条容器），**不许**靠放开 `h` 的封顶来「解决」—— 那会让竖条压到
-        // 任务栏上，或者把溢出交给桌面根画布、让整个桌面变成可滚的（V59 就是这么回归的）。
-        // 这条断言把契约钉住：将来若有人把 `h` 改成不封顶，这里会立刻变红。
-        let natural_rows = (400 + LOOSE_MAX_COLUMNS - 1) / LOOSE_MAX_COLUMNS;
+        // V59 / V86：列数被宽度上限夹住 ⇒ 前端渲染的行数（ceil(n/columns)）**必然高于**
+        // 这里给的 `rect.h`（rows 超过 rows_per_col）。这是有意为之的契约：多出来的行由
+        // 竖条自己 `overflow-y-auto` 内部滚（前端 `GridOverlay` 的竖条容器），**不许**靠
+        // 放开 `h` 的封顶来「解决」—— 那会让竖条压到任务栏上，或者把溢出交给桌面根画布、
+        // 让整个桌面变成可滚的（V59 就是这么回归的）。这条断言把契约钉住：将来若有人把
+        // `h` 改成不封顶，这里会立刻变红。
+        let natural_rows = (400 + expected_cols - 1) / expected_cols;
         let natural_h = natural_rows * (cell_h + GRID_GAP) - GRID_GAP;
         assert!(
             natural_h > many.rect.h,
-            "列数撞上限时，前端需要的自然高度（{natural_h}）应当高于给定区域（{}）——\
+            "列数撞宽度上限时，前端需要的自然高度（{natural_h}）应当高于给定区域（{}）——\
              说明 h 的封顶被放开了，竖条会压到任务栏或把桌面层变成可滚的",
             many.rect.h
         );
+    }
+
+    /// V86：真机场景 —— 42 个条目、1920×1032。
+    ///
+    /// 用户 09-30 原话：「快捷方式这里应该从左到右依次往下排列，满了就换第二列，
+    /// 现在怎么成了**下面空了**，正常应该是**右边空**」。旧逻辑夹死 4 列 ⇒ 11 行，
+    /// 下面空出一段；新逻辑列数自然算出（42 / 14 行 = 3 列），每列都满高，
+    /// 剩余的空白在**右边**。
+    #[test]
+    fn loose_strip_fills_columns_full_height_and_leaves_room_on_the_right() {
+        let strip = loose_strip_rect(1920, 1032, 42, 32).expect("必须有区域");
+        let cell_h = loose_cell_size(32).1;
+        let pitch_y = cell_h + GRID_GAP;
+        let rows_per_col = ((1032 - 2 * ARRANGE_MARGIN) / pitch_y).max(1);
+        // 本场景自然列数（3 列）远小于宽度上限，直接按自然列数断言：
+        let cols = (42 + rows_per_col - 1) / rows_per_col;
+        assert_eq!(
+            strip.columns, cols,
+            "42 个条目应当按每列 {rows_per_col} 行自然分 {cols} 列（不许夹回 4 列）"
+        );
+        // 每列都满高：高度正好 = 行数 × 行距（行数 = ceil(42 / 列数)），没有「下面空一段」
+        let rows = (42 + cols - 1) / cols;
+        assert_eq!(strip.rect.h, rows * pitch_y - GRID_GAP);
+        // 也不越界（不出滚动条的前提）
+        assert!(strip.rect.y + strip.rect.h <= 1032 - ARRANGE_MARGIN);
     }
 
     #[test]
@@ -8846,14 +9564,18 @@ mod layout_pipeline_tests {
             xs.len() >= 2,
             "本样本（16 / 8 / 2 / 1 …）至少要排出两列，实际 x = {xs:?}"
         );
-        assert_eq!(
-            xs[0], ARRANGE_MARGIN,
-            "第一列的左沿就是收纳区左沿（本样本没有未归类竖条）"
-        );
         // V68：挂件带左沿 / 下沿 —— 用来区分「挂件左侧那条带」（从收纳区上沿起排）
         // 与「挂件**下方**那条带」（从挂件下沿起排）。
         let widgets_all: Vec<&BoxRow> = boxes.iter().filter(|b| !is_content(&b.kind)).collect();
         let widget_left = widgets_all.iter().map(|b| b.x).min().expect("本批至少有一个挂件");
+        // V85 右锚定：最右一列贴着收纳区右沿（= 挂件带左沿 − 一道缝），
+        // 排完后剩余的空间留在左边给「未归类」竖条 / 快捷方式。
+        let zone_right = widget_left - ARRANGE_GAP_X;
+        let used_right = content.iter().map(|b| b.x + b.w).max().unwrap();
+        assert_eq!(
+            used_right, zone_right,
+            "最右一列必须贴着收纳区右沿（V85 右锚定），实际只到 {used_right} / 右沿 {zone_right}"
+        );
         let band_bottom = widgets_all.iter().map(|b| b.y + b.h).max().unwrap() + ARRANGE_GAP_Y;
         for x in &xs {
             let mut ys: Vec<i64> = content.iter().filter(|b| b.x == *x).map(|b| b.y).collect();
@@ -9362,18 +10084,30 @@ mod layout_pipeline_tests {
             .map(|b| b.x)
             .collect();
         // V66.1：列数是**动态算**的 —— 先把高度收进一屏（这三格总高 784 ≤ 848，一列也够），
-        // 再把宽度尽量占满（在 [高度下限, 宽度容量] 里取装得下的最大 k）。本样本三个格子
-        // 宽 366 / 226 / 160：排到第三列用掉 800 / 935，再开一列（+184）就顶出可用宽度，
-        // 所以落在三列上 —— 这正是「合理的计算分布、把已有空间占满」。
-        // 这里只留两个锚点：第一列贴收纳区左沿、列 x 自左向右严格递增（列式落位的定义）。
+        // 再把宽度尽量占满。本样本三个格子宽 366 / 226 / 160：排到第三列用掉 800 / 935，
+        // 再开一列（+184）就顶出可用宽度，所以落在三列上。
+        // 这里留两个锚点（V85 右锚定）：最右一列贴收纳区右沿（本样本没有未归类竖条）、
+        // 列 x 自左向右严格递增（列式落位的定义）。
         assert!(
             column_xs.len() >= 2,
             "宽度装得下就不该只排一列（要占满空间）：{column_xs:?}"
         );
+        let zone_right = first
+            .iter()
+            .filter(|b| !is_content(&b.kind))
+            .map(|b| b.x)
+            .min()
+            .expect("本样本有一个日历挂件")
+            - ARRANGE_GAP_X;
+        let used_right = first
+            .iter()
+            .filter(|b| is_content(&b.kind))
+            .map(|b| b.x + b.w)
+            .max()
+            .unwrap();
         assert_eq!(
-            column_xs.iter().next(),
-            Some(&ARRANGE_MARGIN),
-            "第一列必须从收纳区左沿起（本样本没有未归类竖条）"
+            used_right, zone_right,
+            "最右一列必须贴着收纳区右沿（V85 右锚定），实际只到 {used_right} / 右沿 {zone_right}"
         );
         let xs: Vec<i64> = column_xs.iter().copied().collect();
         assert!(
@@ -9420,10 +10154,9 @@ mod layout_pipeline_tests {
             .iter()
             .find(|b| b.name == "安装包")
             .expect("安装包必须在");
-        // V66：顺序的读法变了 —— 列式布局的天然读序是**列优先** `(x, y)`（见 `layout_all_boxes_with`
-        // 里那段「读回顺序必须与落位顺序同构」）。用户这次把「文档」拖到 `x=120`（比引擎格
-        // 「安装包」的 `x=397` 更靠左），于是它在序列里排在前面 —— 重排后应落在
-        // 「安装包」的**上方或左侧**。
+        // V66：顺序的读法是列优先 `(x, y)`；V85 起落位**右锚定** —— 摆放序第一（内容最大）
+        // 的列贴着收纳区**右沿**。用户这次把「文档」拖到 `x=120`，它在读序里排在
+        // 「安装包」前面 —— 重排后应落在「安装包」的**上方或右侧**（第一列 = 最右列）。
         // ⚠️ 位置**只决定先后**（尺寸与坐标一律重算）：所以这里同时钉住「它没有被留在手工坐标上」。
         assert_ne!(
             (doc.x, doc.y),
@@ -9431,9 +10164,8 @@ mod layout_pipeline_tests {
             "手工坐标也必须被重排覆盖（V66：位置只决定先后，不决定坐标）"
         );
         assert!(
-            doc.y < install.y || (doc.y == install.y && doc.x < install.x),
-            "手工格「文档」(x={manual_x} < {}) 应排在引擎格「安装包」之前（上方或左侧）：doc=({},{}), install=({},{})",
-            install.x,
+            doc.y < install.y || (doc.y == install.y && doc.x > install.x),
+            "手工格「文档」应排在引擎格「安装包」之前（上方或右侧，V85 第一列贴右）：doc=({},{}), install=({},{})",
             doc.x,
             doc.y,
             install.x,

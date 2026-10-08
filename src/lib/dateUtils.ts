@@ -58,12 +58,28 @@ export function daysInMonth(year: number, monthIndex: number): number {
 }
 
 /**
- * 月历网格（6 行 × 7 列 = 42 天），首格为包含该月 1 号的**那周的周一**。
- * 固定 42 格可保证月份切换时行高不跳动。
+ * 月历网格，首格为包含该月 1 号的**那周的周一**。
+ *
+ * - `fit = false`（默认）：固定 6 行 × 7 列 = 42 天。工作台整页日历（`CalendarPanel`）
+ *   用这一档 —— 它靠 `flex-1` 把整片网格铺满剩余高度，行数固定反而好看、翻月不跳动。
+ * - `fit = true`：**自适应行数**（5 或 6 行），只覆盖「当月实际占用的周」。桌面挂件
+ *   日历（`CalendarWidget`）用这一档 —— 它住在固定 400px 宽的常驻列里、`aspect-square`
+ *   的日期格约 54px 见方，月底若硬塞 6 行（如 2026-09 第 6 行整行都是下月、纯属浪费约
+ *   54px 高度）会挤掉下方「计划清单」的空间。自适应后 9 月只渲染 5 行，少一行白边。
+ *
+ * ⚠️ 调用方若依赖「恒为 42」请显式传 `false`；默认就是 `false`，不传行为不变。
  */
-export function buildMonthGrid(year: number, monthIndex: number): number[] {
+export function buildMonthGrid(year: number, monthIndex: number, fit = false): number[] {
   const gridStart = startOfWeek(new Date(year, monthIndex, 1).getTime());
-  return Array.from({ length: 42 }, (_, index) => addDays(gridStart, index));
+  if (!fit) {
+    return Array.from({ length: 42 }, (_, index) => addDays(gridStart, index));
+  }
+  // 自适应：从「含 1 号的那周周一」到「含月末那周的周日」，算实际要几行。
+  const dim = daysInMonth(year, monthIndex);
+  const lastDay = new Date(year, monthIndex, dim).getTime();
+  const lastWeekStart = startOfWeek(lastDay);
+  const weeks = Math.round((lastWeekStart - gridStart) / DAY_MS / 7) + 1;
+  return Array.from({ length: weeks * 7 }, (_, index) => addDays(gridStart, index));
 }
 
 /** 同一天？ */

@@ -51,8 +51,8 @@ const LUNAR_INFO: readonly number[] = [
 /** 农历 1900 年正月初一 = 公历 1900-01-31（UTC 零点，只用来数天数） */
 const LUNAR_BASE_UTC = Date.UTC(1900, 0, 31);
 const DAY_MS = 86_400_000;
-const MIN_YEAR = 1900;
-const MAX_YEAR = 2100;
+export const LUNAR_MIN_YEAR = 1900;
+export const LUNAR_MAX_YEAR = 2100;
 
 /** 十天干 */
 const GAN: readonly string[] = ['甲', '乙', '丙', '丁', '戊', '己', '庚', '辛', '壬', '癸'];
@@ -120,7 +120,7 @@ const SOLAR_FESTIVALS: Readonly<Record<string, string>> = {
 
 /** 某农历年闰哪个月（0 = 无闰月） */
 function leapMonth(year: number): number {
-  return LUNAR_INFO[year - MIN_YEAR]! & 0xf;
+  return LUNAR_INFO[year - LUNAR_MIN_YEAR]! & 0xf;
 }
 
 /** 某农历年闰月的天数（无闰月返回 0） */
@@ -128,12 +128,12 @@ function leapMonthDays(year: number): number {
   if (leapMonth(year) === 0) {
     return 0;
   }
-  return (LUNAR_INFO[year - MIN_YEAR]! & 0x10000) !== 0 ? 30 : 29;
+  return (LUNAR_INFO[year - LUNAR_MIN_YEAR]! & 0x10000) !== 0 ? 30 : 29;
 }
 
 /** 某农历年某月（`month` 1..12，不含闰月）的天数：29 或 30 */
 function monthDays(year: number, month: number): number {
-  return (LUNAR_INFO[year - MIN_YEAR]! & (0x10000 >> month)) !== 0 ? 30 : 29;
+  return (LUNAR_INFO[year - LUNAR_MIN_YEAR]! & (0x10000 >> month)) !== 0 ? 30 : 29;
 }
 
 /** 农历月槽位 */
@@ -174,7 +174,7 @@ function monthsOfYear(year: number): LunarMonthSlot[] {
 function yearDays(year: number): number {
   let sum = 348; // 12 个月各 29 天
   for (let bit = 0x8000; bit > 0x8; bit >>= 1) {
-    sum += (LUNAR_INFO[year - MIN_YEAR]! & bit) !== 0 ? 1 : 0;
+    sum += (LUNAR_INFO[year - LUNAR_MIN_YEAR]! & bit) !== 0 ? 1 : 0;
   }
   return sum + leapMonthDays(year);
 }
@@ -215,7 +215,7 @@ function monthLabel(month: number, leap: boolean): string {
  * @returns 农历日期；超出支持范围返回 `null`
  */
 export function solarToLunar(year: number, month: number, day: number): LunarDate | null {
-  if (year < MIN_YEAR || year > MAX_YEAR) {
+  if (year < LUNAR_MIN_YEAR || year > LUNAR_MAX_YEAR) {
     return null;
   }
   const target = Date.UTC(year, month - 1, day);
@@ -225,9 +225,9 @@ export function solarToLunar(year: number, month: number, day: number): LunarDat
   }
 
   // 逐年扣减，定位到农历年
-  let lunarYear = MIN_YEAR;
+  let lunarYear = LUNAR_MIN_YEAR;
   let remaining = offset;
-  while (lunarYear <= MAX_YEAR) {
+  while (lunarYear <= LUNAR_MAX_YEAR) {
     const days = yearDays(lunarYear);
     if (remaining < days) {
       break;
@@ -235,7 +235,7 @@ export function solarToLunar(year: number, month: number, day: number): LunarDat
     remaining -= days;
     lunarYear += 1;
   }
-  if (lunarYear > MAX_YEAR) {
+  if (lunarYear > LUNAR_MAX_YEAR) {
     return null;
   }
 
@@ -277,7 +277,7 @@ export function solarTermDay(year: number, termIndex: number): { month: number; 
     return null;
   }
   const stamp =
-    31_556_925_974.7 * (year - MIN_YEAR) +
+    31_556_925_974.7 * (year - LUNAR_MIN_YEAR) +
     TERM_OFFSET_MINUTES[termIndex]! * 60_000 +
     Date.UTC(1900, 0, 6, 2, 5);
   const date = new Date(stamp);
@@ -299,7 +299,7 @@ export function solarTermOf(year: number, month: number, day: number): string | 
 /** 干支纪年（如「丙午」）与生肖（如「马」） */
 export function ganZhi(year: number): { ganZhi: string; zodiac: string } {
   // 1900 年为庚子年（干支序号 36）
-  const index = (year - MIN_YEAR + 36) % 60;
+  const index = (year - LUNAR_MIN_YEAR + 36) % 60;
   return {
     ganZhi: `${GAN[index % 10] ?? ''}${ZHI[index % 12] ?? ''}`,
     zodiac: ZODIAC[index % 12] ?? '',

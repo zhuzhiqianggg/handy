@@ -6,7 +6,7 @@ use tauri::{
     async_runtime,
     menu::{MenuBuilder, MenuItemBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Emitter, AppHandle,
+    AppHandle,
 };
 
 use crate::commands;
@@ -57,16 +57,18 @@ pub fn setup(app: &AppHandle) -> Result<(), String> {
             }
             "toggle-overlay" => {
                 // 桌面整理：显示/隐藏切换（V44.3）—— 隐藏后工具栏仍常驻，托盘是兜底入口。
-                // 切换后向挂件窗发 `grid:visibility` 事件，前端据此收起 / 展开格子内容。
+                //
+                // V79：这里**不再自己发** `grid:visibility`。以前只有这一条路会发，于是
+                // 「桌面右键菜单 / 轮询线程自动重建」这些同样改 `overlay_visible` 的路径
+                // 都只改库、不改界面（用户 09-25 实测「退出桌面整理，格子一直在」）。
+                // 广播已下沉到 `commands::grid` 的 `show_overlay` / `show_launcher_only` /
+                // `hide_overlay_now` —— 谁写真源谁广播，只此一处。
                 let app2 = app.clone();
                 async_runtime::spawn(async move {
-                    let engaged = commands::grid::read_overlay_visible(&app2);
-                    if engaged {
-                        let _ = commands::grid::grid_overlay_hide(app2.clone()).await;
-                        let _ = app2.emit_to(commands::grid::GRID_LABEL, "grid:visibility", false);
+                    if commands::grid::read_overlay_visible(&app2) {
+                        let _ = commands::grid::grid_overlay_hide(app2).await;
                     } else {
-                        let _ = commands::grid::grid_overlay_show(app2.clone()).await;
-                        let _ = app2.emit_to(commands::grid::GRID_LABEL, "grid:visibility", true);
+                        let _ = commands::grid::grid_overlay_show(app2).await;
                     }
                 });
             }

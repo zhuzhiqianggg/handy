@@ -193,6 +193,7 @@ export function CsvJson({ initialInput = '' }: CommandProps): React.JSX.Element 
   return (
     <CommandShell
       title="CSV ⇄ JSON"
+      onPaste={(t) => setInput(t)}
       description="CSV 与 JSON 双向转换"
       icon={<Table2 className="h-4 w-4" />}
       onBack={shell.onBack}

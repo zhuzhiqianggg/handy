@@ -81,6 +81,22 @@ const libRs = read(LIB_RS);
 // 的一部分 —— 见 ⑫ 的最后两条。
 const WIDGETS = 'src/modules/desktop-grid/DesktopWidgets.tsx';
 const widgets = read(WIDGETS);
+// V79：托盘的「桌面整理：显示/隐藏」以前是**唯一**会广播 `grid:visibility` 的地方，
+// 于是其余改真源的路径全成了「只改库、不改界面」—— 见 ⑮。
+const TRAY_RS = 'src-tauri/src/tray.rs';
+const trayRs = read(TRAY_RS);
+// V80：日历可以跳到任意年份了（用户要回 1988 年记生日），而农历年表只有 1900–2100
+// 这一份 —— 年份上下限必须是**从年表导出**的那一份，见 ⑯。
+const LUNAR = 'src/lib/lunar.ts';
+const lunar = read(LUNAR);
+// V81：系统菜单期间要把桌面「暂时还给系统」—— 借出去的那段时间里，
+// 接管自愈（看到原生图标露着就藏）必须让路，见 ⑰。
+const HANDOFF_RS = 'src-tauri/src/platform/desktop_handoff.rs';
+const handoffRs = read(HANDOFF_RS);
+// V83：窗口几何**不再持久化** —— 前端那条「moved / resized 写库」的路径和 ipc 里的
+// 两个命令一起删掉了。要断「不许有」，得连 ipc 层一起看，见 ⑩。
+const IPC_TS = 'src/lib/ipc.ts';
+const ipcTs = read(IPC_TS);
 
 /**
  * 把注释剥掉后再断「不许有」——本文件里有一大段解释**为什么**删掉那些东西的注释，
@@ -99,6 +115,10 @@ const overlayCode = stripComments(overlay);
 const rustCmdCode = stripComments(rustCmd);
 const workstationCode = stripComments(workstation);
 const widgetsCode = stripComments(widgets);
+const trayCode = stripComments(trayRs);
+const lunarCode = stripComments(lunar);
+const handoffCode = stripComments(handoffRs);
+const ipcCode = stripComments(ipcTs);
 
 /** 数一下源码里出现次数 */
 function count(src, re) {
@@ -136,7 +156,10 @@ ok('有 beginDragSession / beginItemDrag / beginLooseDrag / resetDragVisuals 四
     .every((name) => new RegExp(`const ${name} = useCallback\\(`).test(overlay)));
 ok('主循环挂了 window mousemove', /window\.addEventListener\('mousemove', onMove\)/.test(overlay));
 ok('主循环挂了 window mouseup', /window\.addEventListener\('mouseup', onUp\)/.test(overlay));
-ok('拖拽中可按 Esc 取消', /event\.key === 'Escape' && dragSessionRef\.current !== null/.test(overlay));
+ok('拖拽中可按 Esc 取消（V86：没在拖拽时 Esc 清除选中）',
+  /event\.key === 'Escape'/.test(overlay)
+  && /dragSessionRef\.current\.cancelled = true;/.test(overlay)
+  && /} else if \(selectedPathsRef\.current\.size > 0\) \{/.test(overlay));
 ok('指针移出窗口要作废会话（否则永久卡在拖拽态）',
   /document\.documentElement\.addEventListener\('mouseleave', onAbort\)/.test(overlay));
 ok('卸载时把四个监听都摘掉', count(overlay, /removeEventListener\(/g) >= 4);
@@ -149,8 +172,8 @@ ok('卸载时把四个监听都摘掉', count(overlay, /removeEventListener\(/g)
 ok('用位移阈值判定「真的在拖了吗」',
   /if \(moved < DRAG_THRESHOLD\) \{\s*return;/.test(overlay),
   '正则没匹配到：阈值判据被改过，请人工确认双击还能用');
-ok('没过阈值 / 按过 Esc 一律不落点',
-  /if \(!active \|\| cancelled\) \{\s*return;/.test(overlay));
+ok('没过阈值 / 按过 Esc 一律不落点（V86：没取消的单击转为「选择点击」）',
+  /if \(!active \|\| cancelled\) \{[\s\S]{0,260}?applySelectionClick\(/.test(overlay));
 ok('条目 onMouseDown 里先 stopPropagation 再 beginItemDrag',
   /event\.stopPropagation\(\);\s*\/\/[\s\S]{0,200}?beginItemDrag\(item, event\);/.test(overlay)
   || /beginItemDrag\(item, event\)/.test(overlay));
@@ -163,9 +186,14 @@ ok('竖条条目 onMouseDown 里也走 beginLooseDrag',
 
 ok('落点用 hitDock 判快捷入口', /hitDock\(event\.clientX, event\.clientY\)/.test(overlay));
 ok('落点用 hitBoxId 判格子', /hitBoxId\(event\.clientX, event\.clientY\)/.test(overlay));
-ok('拖到入口 = 收藏成快捷方式', /addDockLink\(item\.displayName, item\.filePath\)/.test(overlay));
-ok('拖出所有格子 = 移出格子', /if \(boxId === null\) \{\s*removeItem\(item\);/.test(overlay));
-ok('拖进格子 = 改引用归属', /moveItem\(\{ item, itemId: item\.id, fromBoxId: item\.boxId \}, boxId\)/.test(overlay));
+ok('拖到入口 = 收藏成快捷方式（V86 多选：按 batch 整批走）',
+  /for \(const path of batch\) \{\s*addDockLink\(nameOf\(path\), path\);/.test(overlay));
+ok('拖出所有格子 = 移出格子（V86 多选：按 batch 整批走）',
+  /if \(boxId === null\) \{\s*for \(const path of batch\) \{\s*const it = itemByPath\(path\);\s*if \(it !== null\) \{\s*removeItem\(it\);/.test(overlay));
+ok('拖进格子 = 改引用归属（V86 多选：按 batch 整批走）',
+  /moveItem\(\{ item: it, itemId: it\.id, fromBoxId: it\.boxId \}, boxId\);/.test(overlay));
+ok('V86 多选：拖的若是已选中的一项，整个选中集合一起走',
+  /sel\.has\(session\.item\.filePath\) && sel\.size > 1/.test(overlay));
 
 /* ================================================================== *
  * ⑤ 不许关掉 Tauri 的原生拖放（关了它，真实文件就再也拿不到路径）
@@ -578,24 +606,22 @@ ok('视图模式切换后写回 localStorage',
 }
 
 /* ================================================================== *
- * ⑭ 「能多铺一列就多铺一列」（V71）
+ * ⑭ 列数判据：两轴填充率取 min（V71 → V84）
  *
  * 用户 09-23（附截图）：「你看整体效果怎么还是补补丁一样的，三个图表最多的不应该 2 3 列
  * 上面开始平均放置，然后把零散的少量的格子补在下面即可哇，至于便签这个列前面的空间不够再放」
+ * —— 钉下「一列空半截、另一列摞满」的解必须淘汰。
  *
- * 真机现场（3 个收纳格 18 / 8 / 8 项，收纳区只剩 637 宽）：
- *   · `k = 3` 的自然宽度要 372 + 232 + 232 + 2×24 = 884 > 637 ⇒ 淘汰；
- *   · `k = 2` 自然宽度 628 ≤ 637 ⇒ 直接命中并返回。
- * 于是「文档」独占第一列、下方空掉 501px，另外两个挤在第二列 —— 正是用户说的「补丁」。
+ * 用户 09-29（附截图）：「搞成那么多列，却空了大量的空白，格子宽度反而压缩到文件名都
+ * 看不清了」「这部分完全可以合并到一列里面」 —— V71 的「k 从大到小、能多铺一列就多铺
+ * 一列」被推翻：真机 6 格 920×968 被排成 5 列、每列 ~176px。
  *
- * 病根：把「自然宽度放不下」当成了「这个列数不可行」。宽度是**软约束**（夹窄了格子变高，
- * 但还能用），**列数才是用户看得见的那个东西** —— 所以要「能多铺一列就多铺一列，
- * 尺寸去适配列宽」，而不是少开一列让尺寸舒服。
- *
- * ⚠️ 这一段的断言都是**结构**。真正的行为判据在 Rust 侧那三条用例里
+ * V84 定稿：`k = 1..=capacity` **从小到大**、每个 k 先自然宽度再夹宽，在全部装得下的
+ * 候选里取 `min(横向填充率, 纵向填充率)` 最大者 —— 「补丁洞」（纵空）与「列多空白」
+ * （横空）是同一个判据否掉的两个方向。行为判据在 Rust 侧
  * （`cargo test --lib`）：`the_biggest_boxes_share_the_top_row_instead_of_piling_up` /
- * `small_boxes_fill_in_below_the_big_ones` / `a_roomy_zone_keeps_natural_box_widths`，
- * 两条方向的破坏（夹宽挪出循环、夹宽排到自然之前）都验证过会变红。
+ * `small_boxes_fill_in_below_the_big_ones` / `a_roomy_zone_keeps_natural_box_widths` /
+ * `six_boxes_pack_into_wide_natural_columns_not_five_cramped_ones`。
  * mjs 这边只确认「这段结构还在」，防止重构时整块丢掉、而没人发现。
  * ================================================================== */
 
@@ -604,15 +630,390 @@ ok('视图模式切换后写回 localStorage',
   ok('Rust 里有挑列数的实现（pick_columns）',
     at >= 0,
     '函数被改名/搬走 ⇒ 下面两条断言会全部落空，必须同步本守卫');
-  const body = at < 0 ? '' : rustCmdCode.slice(at, at + 2400);
+  const body = at < 0 ? '' : rustCmdCode.slice(at, at + 2600);
   ok('列数循环里同时准备「自然宽度」与「夹到 zone_w/k」两套尺寸，且自然在前',
     /vec!\[\(natural_h\.to_vec\(\), natural_w\.to_vec\(\), false\)\][\s\S]{0,260}?trials\.push\(\(ch, cw, true\)\)/.test(body),
     '把「夹宽」挪出列数循环（或排到自然之前）⇒ 宽度一紧张就少开一列，布局又变成「补补丁一样」');
-  ok('两套尺寸都在同一个 k 循环里被试（不是「全败之后才夹宽」）',
-    /for k in \(1\.\.=capacity\)\.rev\(\)/.test(body) &&
-      body.indexOf('for k in (1..=capacity).rev()') <
-        body.indexOf('trials.push((ch, cw, true))'),
-    'V69 的老写法（夹宽在循环外）产出的正是用户这次截图里那份布局');
+  ok('k 从小到大扫全部候选，并用两轴填充率的 min 挑最优（V84，不是 V71 的 k 从大到小）',
+    body.indexOf('for k in 1..=capacity') >= 0 &&
+      body.indexOf('for k in 1..=capacity') < body.indexOf('trials.push((ch, cw, true))') &&
+      /\(used_w \* zone_h\)\.min\(tallest \* zone_w\)/.test(body),
+    'V71 的「k 从大到小」会重新产出用户 09-29 截图里的 5 列窄格；丢掉 min 评分会退回「补丁洞」或「列多空白」二者之一');
+}
+
+/* ================================================================== *
+ * ⑮ 挂件显隐：唯一真源 `overlay_visible`，**谁写谁广播**（V79）
+ *
+ * 用户 09-25（附截图，图上任务栏时钟 11:17）：
+ *   「退出桌面整理也是格子一直都在桌面……整理没有退出」
+ * `handy.log` 11:19:25 / 11:20:39 / 11:20:47 / 11:20:57 **连打四条 `收起挂件层`** ——
+ * 库确实改了，界面却一直在，用户于是连点四次。
+ *
+ * 根因不是「忘了广播」这么简单，而是**广播只挂在一条路上**：
+ * 前端的 `contentHidden` 只在挂载时查一次 `grid_overlay_status`，之后只认
+ * `grid:visibility` 事件；而 V48–V78 期间只有 `tray.rs` 会发这个事件。
+ * 于是凡是「不由前端发起」的显隐变化（桌面右键菜单 `--hide-grid` / `--show-grid`、
+ * 轮询线程按偏好自动重建挂件层）全都只改库、不改界面。
+ * 这与 V61 那条「一个跨线程可变状态只许一个记账人」是同一条纪律。
+ *
+ * 另一半是**冷启动的初值**：挂件窗 `show()` 之后 React 立刻按初值画了一屏格子，
+ * 而此刻 `grid_overlay_status()` 还没回来 —— 后端明明决定了「只留工具栏」。
+ * 初值必须是「收起」（fail-closed）：没问清楚之前绝不画格子。
+ * ================================================================== */
+
+{
+  // —— ① Rust：三处写入真源的地方，后面都必须紧跟广播 ——
+  const writesThenEmits = (value) =>
+    new RegExp(
+      `write_overlay_visible\\(app, ${value}\\)[\\s\\S]{0,240}?emit_visibility\\(app, ${value}\\)`,
+    ).test(rustCmdCode);
+
+  ok('show_overlay 写完真源后广播「已显示」',
+    writesThenEmits('true'),
+    '桌面右键「打开 Handy 桌面整理」走的这条路，不广播 ⇒ 前端不知道已经切到显示态');
+  ok('hide_overlay_now 写完真源后广播「已收起」',
+    writesThenEmits('false'),
+    '桌面右键「退出桌面整理」走的正是这条路；用户实测连点四次都收不起来');
+  ok('show_launcher_only 也广播「已收起」',
+    /emit_visibility\(app, false\)[\s\S]{0,240}?grid_log\("显示桌面工具栏/.test(rustCmdCode),
+    '启动期判定「未接管」时前端同样要收到收起态，否则会按初值摊开格子');
+
+  // —— ② 广播只此一处：不许哪个模块再自己 emit 一份 ——
+  ok('`grid:visibility` 的广播在整个 Rust 侧只有一处',
+    count(rustCmdCode, /emit_to\(GRID_LABEL, "grid:visibility"/g) === 1,
+    '散成两处正是这次 bug 的成因：改真源的地方不广播、广播的地方不改真源');
+  ok('托盘不再自己发 `grid:visibility`（改由 grid 模块统一广播）',
+    !/emit_to\([\s\S]{0,80}?"grid:visibility"/.test(trayCode),
+    '托盘那条路的广播已下沉到 grid_overlay_show / hide，留在这里就是第二个记账人');
+
+  // —— ③ 前端：初值 fail-closed + 先监听后查询 ——
+  ok('`contentHidden` 初值是 true（没问清楚之前绝不画格子）',
+    /const \[contentHidden, setContentHidden\] = useState\(true\)/.test(overlayCode),
+    '初值 false ⇒ 冷启动必然先摊开一屏格子，且查询失败就永远停在摊开态');
+  {
+    const listenerAt = overlayCode.indexOf("listen('grid:visibility'");
+    const statusAt = overlayCode.indexOf('gridOverlayStatus()');
+    ok('先注册 `grid:visibility` 监听、再查 `grid_overlay_status`',
+      listenerAt > 0 && statusAt > listenerAt,
+      '反过来的话，查询在途时后端广播的那一次会丢 —— 界面停在初值，与后端长期不一致');
+  }
+}
+
+/* ================================================================== *
+ * ⑯ 日历：年份可直接指定 + 纪念日可增删（V80）
+ *
+ * 用户 09-25：「日历上不能选年呢？例如我想回到 1988 年我生日那天记录下我的生日
+ * 或者我记录别人的生日等 或者特殊日期现在怎么没有添加了。」
+ *
+ * 两件事都不是「加个按钮」而已，各藏着一条会**静默退化**的陷阱：
+ *
+ *   ① **年份**：只有 ±1 月箭头时，2026 → 1988 是 456 次点击 —— 功能上等于没有。
+ *      而一旦允许任意年份，就必然撞上农历年表的边界（`LUNAR_INFO` 只有 1900–2100）：
+ *      越界后 `LUNAR_INFO[year - 1900]` 取到 `undefined`，农历列整片空白 ——
+ *      **不报错、不崩溃**，只是「日历坏了」，最难查的那种。所以跳转必须夹范围。
+ *      另一半是「翻页时选中日必须跟着走」：月份翻到 1988 年 6 月、下面「……的计划」
+ *      却还停在出发那个月，用户以为在给 1988 年加计划，其实加到了今天。
+ *
+ *   ② **纪念日**：桌面日历以前只**读**设置里的 `anniversaries` 画蛋糕标记，能加的
+ *      地方在工作台，用户根本找不到入口。加了写入又冒出第三个坑：写设置必须走
+ *      `patchSettings`（read-modify-write）—— 直接 `writeSettings` 整份覆盖会把
+ *      Rust 侧刚写进去的 `modules` 冲掉（`store.ts` 里明写着这条注意）。
+ * ================================================================== */
+
+{
+  // —— ① 年份能直接指定，不是只能一月一月点 ——
+  ok('日历有可键入的年份（yearDraft 受控 + 失焦即生效）',
+    /const \[yearDraft, setYearDraft\] = useState/.test(widgetsCode) &&
+      /onBlur=\{applyYearDraft\}/.test(widgetsCode),
+    '只剩 ±1 月箭头 ⇒ 回到 1988 年要点 456 次，等于没有选年');
+  ok('快选面板有 12 个月宫格（不是只做年份）',
+    /const MONTHS = Array\.from\(\{ length: 12 \}/.test(widgetsCode) && /MONTHS\.map/.test(widgetsCode),
+    '月份写死成 12 个 button 或干脆漏掉，都会让「回到 1988 年 6 月」走不通');
+
+  {
+    // ⚠️ 取**函数体内**（而不是全文件）：只 import 了常量、却没在跳转时用上它，
+    //    全文件正则照样通过 —— 而越界的正是那一年。
+    const at = widgetsCode.indexOf('const jumpTo = useCallback(');
+    const body = at < 0 ? '' : widgetsCode.slice(at, at + 600);
+    ok('跳转前把年份夹进农历年表范围（1900–2100）',
+      body.includes('LUNAR_MIN_YEAR') && body.includes('LUNAR_MAX_YEAR'),
+      '不夹 ⇒ 跳到 1899 时 LUNAR_INFO 取到 undefined，农历列整片空白且不报错');
+    ok('跳转时「选中日」跟着走（否则计划清单与输入框还指着出发那个月）',
+      /setSelected\(/.test(body),
+      '月份翻走了、下面却还是别的月的计划 ⇒ 用户以为在给 1988 年加，其实加到了今天');
+  }
+
+  // —— ② 纪念日：能增删，且写盘走 patchSettings ——
+  ok('纪念日可新增 / 可删除（两处写入，不是只读展示）',
+    count(widgetsCode, /patchSettings\(\{ anniversaries:/g) >= 2,
+    '桌面日历以前只画蛋糕标记不给入口 —— 用户 09-25「特殊日期现在怎么没有添加了」');
+  ok('写设置走 patchSettings（read-modify-write），不许整份覆盖',
+    count(widgetsCode, /writeSettings\(/g) === 0,
+    'writeSettings 整份覆盖会把 Rust 侧刚写的 modules 冲掉');
+  ok('点纪念日能跳到那一天（1988 年的生日要能回看）',
+    /const gotoAnniversary = useCallback\(/.test(widgetsCode) &&
+      /onClick=\{\(\) => gotoAnniversary\(item\)\}/.test(widgetsCode),
+    '列表只能看不能跳 ⇒ 用户还得自己翻 456 次回到那天');
+
+  // —— ③ 面板展开会改变高度：必须进「自然高度上报」的依赖 ——
+  {
+    // `rows.length,` 带逗号只出现在那个依赖数组里（`rows.length === 0` 没有逗号）
+    const at = widgetsCode.indexOf('rows.length,');
+    const deps = at < 0 ? '' : widgetsCode.slice(at, at + 400);
+    ok('showPicker / showAnniversaries 进了高度上报的依赖',
+      deps.includes('showPicker') && deps.includes('showAnniversaries'),
+      '面板展开后盒子高度不变 ⇒ 计划区被顶出可视区，看着像「日历少了一截」');
+  }
+  ok('两个面板互斥（同时展开会把计划区顶出盒子）',
+    /setShowAnniversaries\(false\)/.test(widgetsCode) && /setShowPicker\(false\)/.test(widgetsCode),
+    '400px 宽的挂件装不下两块面板叠着开');
+
+  // —— ④ 年份范围只有一个真源：农历年表 ——
+  ok('农历年表导出年份范围常量（挂件从这里取，不另写一份）',
+    /export const LUNAR_MIN_YEAR = 1900;/.test(lunarCode) &&
+      /export const LUNAR_MAX_YEAR = 2100;/.test(lunarCode),
+    '挂件里另写一份 1900/2100 ⇒ 哪天换了年表，两边立刻对不上');
+}
+
+/* ================================================================== *
+ * ⑰ V81：系统菜单期间「把桌面暂时还给系统」
+ *
+ * 用户 09-27 原话：「在桌面右键新建文件夹非常慢而且也不能点击两下重命名操作……
+ * 现在功能变成我创建了文本文件和文件夹完全没有生效了」。
+ *
+ * 根因不是菜单是假的（桌面空白处右键会**穿透**到系统桌面，弹的就是 Explorer 原生菜单），
+ * 而是**接管态把 `SysListView32` 藏了**：新建的文件夹真的建了、原位改名编辑框真的开了，
+ * 但都在那个隐藏的视图里 —— 用户看到的就是「什么都没发生」。
+ *
+ * 修法是「菜单期间把桌面借给系统」，于是冒出四条**新的不变量**，全是
+ * 「编译通过、类型正确、单测全绿」也守不住的：
+ *
+ *   ① 借出期间「原生图标露着 / 挂件窗不可见」是我们自己造成的，接管自愈若照常纠正，
+ *      会在 100ms 内把桌面抢回来 —— 与没修完全一样；
+ *   ② 收回前必须复核「是否仍接管」：菜单里就有我们注入的「退出桌面整理」，
+ *      用户点了它之后图标必须留着；
+ *   ③ 菜单收起**不能立刻收回**：原生「新建」是菜单关闭之后才进原位改名的，
+ *      早收回一步，编辑框就又藏回暗处；
+ *   ④ 只认**桌面**的菜单：同一个 explorer.exe 里还开着资源管理器窗口，
+ *      在它里面右键也要弹菜单，误判的代价是用户的格子莫名消失。
+ * ================================================================== */
+
+{
+  // —— ① 借出期间，接管自愈必须让路 ——
+  {
+    const at = rustCmdCode.indexOf('fn reassert_takeover(app: &AppHandle) {');
+    const body = at < 0 ? '' : rustCmdCode.slice(at, at + 400);
+    ok('接管自愈在「桌面借给系统」期间让路',
+      body.includes('handoff_active()') && body.includes('return;'),
+      '不让路 ⇒ 刚还回去的桌面 100ms 内又被藏起来，用户新建的文件夹照样看不见');
+  }
+  {
+    // 取 `hidden_ticks += 1;` 之前的那一小段：那里的自愈会把挂件窗 show 回来
+    const at = rustCmdCode.indexOf('hidden_ticks += 1;');
+    const before = at < 0 ? '' : rustCmdCode.slice(Math.max(0, at - 400), at);
+    ok('挂件窗不可见的自愈在借出期间跳过（菜单期间它就是我们自己收的）',
+      before.includes('handoff_active()') && before.includes('continue;'),
+      '不跳过 ⇒ 这一层在菜单上头糊回来，刚还回去的原生桌面又被盖住');
+  }
+
+  // —— ② 收回前复核接管态 + 通知前端重扫 ——
+  {
+    const at = handoffCode.indexOf('fn end_handoff(app: &AppHandle) {');
+    const body = at < 0 ? '' : handoffCode.slice(at, at + 800);
+    ok('收回前复核「是否仍接管」（菜单里就有「退出桌面整理」）',
+      body.includes('icons_taken()') && body.includes('SW_HIDE'),
+      '不复核 ⇒ 用户点了「退出桌面整理」，图标又被藏回去，变成「点了没反应」');
+    ok('收回后通知前端重扫桌面（新建的文件要马上出现在未归类里）',
+      body.includes('grid:desktop-changed'),
+      '不通知 ⇒ 文件建好了、用户却只看到「什么都没干」');
+  }
+
+  // —— ③ 菜单收起后还要等原位改名结束 ——
+  {
+    const at = handoffCode.indexOf('fn schedule_takeback() {');
+    const body = at < 0 ? '' : handoffCode.slice(at, at + 1400);
+    ok('菜单收起后等「原位改名」结束再收回',
+      body.includes('label_editing()'),
+      '不等 ⇒ 新建后刚弹出的改名编辑框被一起藏掉，用户还是改不了名');
+    ok('收回前要求「安静满宽限」或「见过改名编辑框」（V84：编辑框比菜单晚几百毫秒才出现）',
+      body.includes('HANDOFF_QUIET_GRACE') && body.includes('saw_edit'),
+      '菜单一收就收回 ⇒ 编辑框还没出现桌面就被藏起来，用户看到「点了新建没反应」（09-29 三次反馈）');
+    ok('借出有硬上限（事件不配对时挂件窗必须回来）',
+      /const MAX_HANDOFF_SECS: u64 = \d+/.test(handoffCode) && body.includes('deadline'),
+      '没有上限 ⇒ 挂件窗可能永远不回来，用户找不到入口（死路）');
+  }
+
+  // —— ③.1 编辑框借出（V86：Win11 新式菜单不是 #32768，认菜单会全程落空） ——
+  //
+  // 用户 09-30 原话：「创建一个文件夹 文本文档还是特别慢……除了第一次新建文件夹成功了，
+  // 后面的新建都没有反应了」。这台机器是 Win11 25H2 且没恢复经典菜单：桌面背景右键
+  // 弹的是**新式菜单宿主窗口**，`poll_menu` 里 `FindWindowW("#32768")` 永远落空
+  // ⇒ 一条借出都没有 ⇒ 新建全部发生在隐藏视图里。
+  // 修法是第三条路：**原位改名编辑框**（`SysListView32` 的 `Edit` 子窗）一出现就借出
+  // —— 不管菜单长什么样，新建的终点都是这个编辑框，这是绕不过去的直接观测量。
+  {
+    const at = handoffCode.indexOf('pub fn poll_menu()');
+    const body = at < 0 ? '' : handoffCode.slice(at, at + 1700);
+    ok('V86：原位改名编辑框一出现就借出（不赌菜单窗口类名）',
+      body.includes('label_editing()') && /begin_handoff\(\);\s*return;/.test(body),
+      '删掉这条 ⇒ Win11 上新建文件夹又藏回隐藏视图 = 用户看到的「没反应 / 要手动刷新」');
+  }
+
+  // —— ④ 只认桌面的菜单，不误伤资源管理器窗口 ——
+  ok('只认桌面的菜单（同进程 + 桌面宿主双重判据）',
+    /GetWindowThreadProcessId\(hwnd/.test(handoffCode) && handoffCode.includes('Progman'),
+    '只看同进程 ⇒ 在资源管理器窗口里右键也会触发，用户的格子会莫名其妙消失');
+
+  // —— ⑤ 接线：接管时启动旁听；前端随之重扫 ——
+  ok('接管显示时启动菜单旁听（没接管时原生视图本来就在，无需借还）',
+    /desktop_handoff::ensure_watcher\(app\)/.test(rustCmdCode),
+    '不启动 ⇒ 整套借还都不发生，等于没修');
+  ok('前端监听 grid:desktop-changed 并立刻重扫桌面',
+    /listen\('grid:desktop-changed'/.test(overlayCode),
+    '不监听 ⇒ 新建的文件要等下一次周期对账才出现');
+  ok('桌面空白右键不再调那条从来没成功过的 CLSID 复刻菜单',
+    !overlayCode.includes('::{00021400-0000-0000-C000-000000000046}'),
+    '那条路径几百条「拿不到 shell 对象：参数错误」；就算成功弹的也是用户反对的复刻菜单');
+
+  /* ------------------------------------------------------------------
+   * V82：借出机制在真机上**一次都没触发过**（用户 09-27 二次反馈）
+   * ------------------------------------------------------------------
+   * 日志里只有「旁听已启动」、一条借出记录都没有 ⇒ 事件参数没被认出来
+   * （`EVENT_SYSTEM_MENUPOPUPSTART` 的 hwnd 实测给的是菜单窗 `#32768` 自己，
+   * 而旧判据只看「就是桌面视图」和「顶层是 Progman/WorkerW」—— 双双落空）。
+   * 下面这几条守的就是这次修正不被改回去。
+   * ------------------------------------------------------------------ */
+
+  // —— ⑥ 认菜单窗：先换 owner 再认 ——
+  {
+    const at = handoffCode.indexOf('unsafe fn is_desktop_menu(hwnd: HWND) -> bool {');
+    const body = at < 0 ? '' : handoffCode.slice(at, at + 2600);
+    ok('认桌面菜单时先换菜单窗（#32768）的 owner 再判',
+      body.includes('"#32768"') && /GetWindow\(hwnd, GW_OWNER\)/.test(body),
+      '不换 owner ⇒ 菜单窗的顶层就是它自己，两个旧判据双双落空（V81 实测就是这个后果）');
+    ok('认桌面菜单时有「前台是不是别的应用」的兜底',
+      body.includes('GetForegroundWindow'),
+      '少了这条 ⇒ 用户在 Handy 挂件窗上点过之后前台就变了，桌面菜单也跟着认不出来');
+    ok('认桌面菜单时会看「菜单压在谁身上」（前台不是桌面时也能认出来）',
+      body.includes('window_under_menu(hwnd)') && handoffCode.includes('WindowFromPoint'),
+      '只靠前台窗口 ⇒ 用户刚点过浏览器 / IDE 再回来右键桌面，前台仍是那个应用，'
+      + '那一下右键又被静默判掉');
+  }
+
+  // —— ⑦ 事件之外再加一条直接观测量：菜单窗在不在 ——
+  ok('有一条「直接问 #32768 在不在」的轮询兜底（不再把机制赌在事件参数语义上）',
+    /pub fn poll_menu\(\)/.test(handoffCode) && handoffCode.includes('"#32768"'),
+    '只信事件 ⇒ 事件语义一变整套机制就静默失效，正是 V81 的下场');
+  ok('轮询兜底挂在保险循环里（每拍都问一次）',
+    /desktop_handoff::poll_menu\(\)/.test(rustCmdCode),
+    '不挂 ⇒ 那条兜底函数根本不会被调用，等于没写');
+
+  // —— ⑧ 收回线程只能有一个 ——
+  {
+    const at = handoffCode.indexOf('fn schedule_takeback() {');
+    const body = at < 0 ? '' : handoffCode.slice(at, at + 500);
+    ok('「等改名结束」的收回线程有去重闸门',
+      body.includes('TAKEBACK_PENDING') && body.includes('swap(true'),
+      '不去重 ⇒ 轮询每 25ms spawn 一个线程，菜单收起后几百个线程同时抢着收回桌面');
+  }
+
+  // —— ⑨ 系统图标（此电脑 / 回收站）的右键也必须交回原生 ——
+  {
+    ok('系统入口（此电脑 / 回收站）的右键也走原生 Shell 菜单',
+      !/!entry\.isSystem/.test(overlayCode)
+        && /shellContextMenu\(entry\.path, event\.shiftKey\)/.test(overlayCode),
+      '把系统图标排除在外 ⇒ 右键「此电脑」弹的是只有两行的复刻菜单'
+      + '（用户 09-27 贴图报的正是这个：「我的电脑都变成这样了」）');
+    ok('原生菜单拿不到时**才**回落到 Handy 自己的菜单（降级成兜底）',
+      /shellContextMenu\(entry\.path, event\.shiftKey\)[\s\S]{0,420}setMenuLoose\(/.test(overlayCode),
+      '原先是无条件回落 ⇒ 系统图标的右键永远到不了 Shell');
+  }
+
+  // —— ⑩ 窗口几何：只由**主显示器实时决定**，不再持久化（V83）——
+  //
+  // 用户 09-28 接了双显示器后，格子全挤在 1138×608 的角落里，屏幕右侧近 800px、
+  // 下方 400 多 px 全空。根因是几何被持久化：前端挂载时读一次 `scaleFactor`，之后
+  // 窗口 `moved` / `resized` 就用**过期 DPI** 换算写库，而后端开窗「DB 优先」
+  // ⇒ 尺寸永久锁死。窗口是 `resizable(false)` + `decorations(false)`，用户根本没有
+  // 调整它的途径，持久化它只有害处。这一段每一条都是那次事故的直接防线。
+  {
+    ok('前端不再把窗口几何写回数据库（V83 的根因就是这条）',
+      !overlayCode.includes('gridGeometrySet') && !ipcCode.includes('gridGeometrySet'),
+      '写回去 ⇒ 换显示器 / 改缩放那一次用的是**过期的** scaleFactor，'
+      + '换算出的错值自此永久生效，屏幕再大也白搭');
+
+    ok('后端不再从 DB 读窗口几何，开窗一律实时取主显示器',
+      !rustCmdCode.includes('fn read_geometry') && !rustCmdCode.includes('grid_geometry_get'),
+      '留着读路径 ⇒ 只要库里还躺着一条脏记录，开出来的窗口就是错的尺寸');
+
+    ok('历史脏键会被清掉（不做清理它就永远是个"看起来还有用"的键）',
+      (() => {
+        const at = rustCmdCode.indexOf('fn drop_legacy_geometry');
+        const body = at < 0 ? '' : rustCmdCode.slice(at, at + 400);
+        return body.includes('DELETE FROM grid_meta') && body.includes('META_KEY_GEOMETRY');
+      })(),
+      'META_KEY_GEOMETRY 已废弃 ⇒ 必须有一次性的删除动作。'
+      + '（判据限定在这个函数体内 —— 删布局快照那条也写了 DELETE FROM grid_meta，'
+      + '不能让它冒充。）');
+
+    ok('存在「主显示器工作区」这个唯一真源（物理像素）',
+      /fn primary_work_area\(app: &AppHandle\) -> Option<\(i32, i32, u32, u32\)>/.test(rustCmdCode)
+        && rustCmdCode.includes('app.primary_monitor()'),
+      '几何必须有明确真源，否则迟早出现第二条写路'
+      + '（V61 的教训：一个跨线程可变状态只许一个记账人）');
+
+    ok('对齐窗口用**物理像素**，不走逻辑换算',
+      /fn sync_overlay_bounds\(app: &AppHandle\) -> bool/.test(rustCmdCode)
+        && rustCmdCode.includes('PhysicalPosition::new')
+        && rustCmdCode.includes('PhysicalSize::new'),
+      '逻辑像素要按"窗口所在屏的缩放"换算，而窗口正是要被摆到那块屏上的 —— '
+      + '拿它的 DPI 算它自己的位置是循环论证，跨屏 / 改缩放时必然错位');
+
+    ok('对齐判定带容差（否则非整数缩放下会变成每秒纠正一次的死循环）',
+      /const BOUNDS_TOLERANCE: i32 = \d+;/.test(rustCmdCode)
+        && /\.abs\(\) > BOUNDS_TOLERANCE/.test(rustCmdCode),
+      '125% / 150% / 175% 下 `SetWindowPos` 与 `GetWindowRect` 会差 1–2px：'
+      + '用严格相等 ⇒ 窗口每秒闪一下、前端每秒重排一次');
+
+    ok('连续纠正失败会退避（不和系统互相较劲）',
+      rustCmdCode.includes('BOUNDS_MAX_FIXES') && rustCmdCode.includes('BOUNDS_RETRY_AT'),
+      '第三方窗口管理工具下"我们要的尺寸"可能永远得不到，每秒硬掰只会一直闪');
+
+    ok('复用窗口时**先对齐再显示**（复用才是每次启动都走的那条路）',
+      /\{\s*sync_overlay_bounds\(app\);\s*let _ = existing\.show\(\);/.test(rustCmdCode),
+      '不对齐 ⇒ 窗口可能是在另一套显示器配置下建的，之后一直错尺寸；'
+      + '放在 show 之后 ⇒ 用户会看到它"先在错位置出现、再跳一下"');
+
+    ok('新建窗口也在 show() 之前按物理边界贴一次',
+      /sync_overlay_bounds\(app\);\s*let _ = win\.show\(\);/.test(rustCmdCode),
+      '逻辑像素换算有取整误差，不贴一次就与主屏工作区差几个像素');
+
+    ok('保险循环里周期性复核显示器配置（否则插上外接屏永远不会重新对齐）',
+      /bounds_ticks % BOUNDS_CHECK_TICKS == 0 && sync_overlay_bounds\(&app\)/.test(rustCmdCode),
+      '开窗只对齐那一次，而窗口是**常驻**的 —— 用户插上外接屏的那一刻，'
+      + '没有任何人会再叫它一次（他也不会为此去点「整理」）');
+
+    ok('几何变了要提醒前端重排（不然窗口对了、格子还按旧尺寸摆着）',
+      rustCmdCode.includes('EVENT_BOUNDS_CHANGED')
+        && /emit_to\(GRID_LABEL, EVENT_BOUNDS_CHANGED/.test(rustCmdCode)
+        && overlayCode.includes("'grid:bounds-changed'"),
+      '少一环 ⇒ 用户得自己去点一次「整理」才看得到新布局');
+
+    {
+      const at = rustCmdCode.indexOf('fn layout_work_size(app: &AppHandle) -> (i64, i64) {');
+      const body = at < 0 ? '' : rustCmdCode.slice(at, at + 900);
+      const monAt = body.indexOf('primary_monitor');
+      const winAt = body.indexOf('get_webview_window');
+      ok('布局尺寸**优先**问主屏、窗口尺寸只作兜底',
+        monAt >= 0 && winAt >= 0 && monAt < winAt,
+        '反过来写 ⇒ 接上第二块屏那一瞬间会先按旧窗口尺寸排一次、纠正后再排一次，'
+        + '用户看到格子抖一下');
+    }
+
+    ok('前端不再自己取 scaleFactor 做几何换算',
+      !/\bonMoved\(|\bonResized\(/.test(overlayCode),
+      '挂载时取一次的 scaleFactor 会过期 —— 那正是 V83 事故里的换算环节');
+  }
 }
 
 /* ================================================================== *

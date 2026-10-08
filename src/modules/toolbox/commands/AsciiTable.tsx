@@ -104,6 +104,7 @@ export function AsciiTable({ initialInput = '' }: CommandProps): React.JSX.Eleme
   return (
     <CommandShell
       title="ASCII 表"
+      onPaste={(t) => setInput(t)}
       description="字符编码查询与 0-127 ASCII 速查表"
       icon={<Table2 className="h-4 w-4" />}
       onBack={shell.onBack}

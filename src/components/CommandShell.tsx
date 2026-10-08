@@ -1,11 +1,11 @@
 import * as React from 'react';
-import { ArrowLeft, Check, Clock, Copy, Star } from 'lucide-react';
+import { ArrowLeft, Check, Clock, ClipboardPaste, Copy, Star } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { SampleBar, type SampleEntry } from '@/components/SampleBar';
 import { Separator } from '@/components/ui/separator';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { toast } from '@/components/ui/toast';
-import { copyText as writeClipboardText } from '@/lib/clipboard';
+import { copyText as writeClipboardText, readClipboardText } from '@/lib/clipboard';
 import { cn } from '@/lib/utils';
 
 /** 示例条目类型再导出，工具页可只从本模块取用（少一条 import 路径） */
@@ -47,6 +47,12 @@ export interface CommandShellProps {
    * （如从结果区当前值取值）。与 `copyText` 二选一。
    */
   getCopyText?: () => string;
+  /**
+   * 一键读剪贴板：传入后标题栏出现「粘贴」按钮，点击读取系统剪贴板文本并回传，
+   * 由工具自行决定填入哪个输入框（典型：主输入）。读取失败或为空时给 toast 提示。
+   * 依赖 `lib/clipboard.readClipboardText`（Tauri 优先，浏览器降级）。
+   */
+  onPaste?: (text: string) => void;
   /** 主操作（如「执行」） */
   primaryAction?: CommandShellPrimaryAction;
   /**
@@ -87,6 +93,7 @@ export function CommandShell({
   onOpenHistory,
   copyText,
   getCopyText,
+  onPaste,
   primaryAction,
   fill = false,
   shortcutHint = 'Enter 执行 · Esc 返回',
@@ -151,6 +158,22 @@ export function CommandShell({
     }
   }, [resolveCopyText]);
 
+  const [pasted, setPasted] = React.useState(false);
+  const handlePaste = React.useCallback(async (): Promise<void> => {
+    if (typeof onPaste !== 'function') {
+      return;
+    }
+    const text = (await readClipboardText()).replace(/\r\n/g, '\n').trim();
+    if (!text) {
+      toast.error('剪贴板为空或无法读取');
+      return;
+    }
+    onPaste(text);
+    setPasted(true);
+    toast.success('已从剪贴板填入');
+    window.setTimeout(() => setPasted(false), 1500);
+  }, [onPaste]);
+
   return (
     <div className="flex h-full flex-col">
       {/* 标题栏 */}
@@ -200,6 +223,26 @@ export function CommandShell({
                 </Button>
               </TooltipTrigger>
               <TooltipContent>{copied ? '已复制' : '复制'}</TooltipContent>
+            </Tooltip>
+          ) : null}
+
+          {typeof onPaste === 'function' ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  aria-label={pasted ? '已粘贴' : '从剪贴板粘贴'}
+                  onClick={handlePaste}
+                >
+                  {pasted ? (
+                    <Check className="h-4 w-4 text-brand" />
+                  ) : (
+                    <ClipboardPaste className="h-4 w-4" />
+                  )}
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>{pasted ? '已粘贴' : '从剪贴板粘贴'}</TooltipContent>
             </Tooltip>
           ) : null}
 

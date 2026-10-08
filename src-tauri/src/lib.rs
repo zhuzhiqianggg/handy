@@ -214,12 +214,12 @@ pub fn run() {
             commands::grid::grid_item_add,
             commands::grid::grid_item_delete,
             commands::grid::grid_item_move,
+            commands::grid::grid_item_rename,
             commands::grid::grid_item_list,
-            commands::grid::grid_geometry_get,
-            commands::grid::grid_geometry_set,
             commands::grid::grid_open_path,
             commands::grid::desktop_open_view,
             commands::grid::shell_context_menu,
+            commands::grid::shell_desktop_background_menu,
             commands::grid::grid_reveal_path,
             commands::grid::grid_loose_list,
             // —— 接口测试（api-tester，V28）：Rust 直发 HTTP，绕开 webview CORS ——
@@ -249,6 +249,11 @@ pub fn run() {
             commands::grid::grid_layout_list,
             commands::grid::grid_layout_restore,
             commands::grid::grid_layout_delete,
+            // V72：工具箱快捷调出后置顶到当前屏幕最前（pair：用完复位成桌面常驻）
+            commands::grid::panel_raise_front,
+            commands::grid::panel_settle_desktop,
+            // V72：端口占用查询（工具箱「端口占用查询」）
+            commands::misc::port_occupants,
             // —— 系统快捷动作（工作台「快捷入口」；白名单制，前端只传动作 id）——
             commands::sys::sys_action_list,
             commands::sys::sys_action_run,

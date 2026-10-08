@@ -135,6 +135,7 @@ export function JsonToTs({ initialInput = '' }: CommandProps): React.JSX.Element
   return (
     <CommandShell
       title="JSON → TypeScript"
+      onPaste={(t) => setInput(t)}
       description="粘贴 JSON，生成 TypeScript 接口定义"
       icon={<FileCode className="h-4 w-4" />}
       onBack={shell.onBack}

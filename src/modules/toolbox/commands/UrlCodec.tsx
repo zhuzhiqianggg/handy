@@ -229,6 +229,7 @@ export function UrlCodec({ initialInput = '' }: CommandProps): React.JSX.Element
   return (
     <CommandShell
       title="URL 编解码"
+      onPaste={(t) => setInput(t)}
       description="三种编码方法 + 结构化解析重建 + 查询参数解析 + 编码对照表与历史"
       icon={<Link2 className="h-4 w-4" />}
       onBack={shell.onBack}

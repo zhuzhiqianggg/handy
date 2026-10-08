@@ -323,6 +323,7 @@ export function RegexTester({ initialInput = '' }: CommandProps): React.JSX.Elem
   return (
     <CommandShell
       title="正则表达式测试"
+      onPaste={(t) => patch({ test: t })}
       description="30 条实战正则 + 配套示例（逐条自检命中数）+ 多行真实样本 + 替换预览 + 语法解释"
       icon={<Regex className="h-4 w-4" />}
       onBack={shell.onBack}

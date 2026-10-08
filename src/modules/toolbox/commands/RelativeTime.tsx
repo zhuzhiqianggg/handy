@@ -172,6 +172,7 @@ export function RelativeTime({ initialInput = '' }: CommandProps): React.JSX.Ele
   return (
     <CommandShell
       title="相对时间"
+      onPaste={(t) => setDateInput(t)}
       description="日期 ⇄ 人性化相对时间（中文）"
       icon={<Hourglass className="h-4 w-4" />}
       onBack={shell.onBack}

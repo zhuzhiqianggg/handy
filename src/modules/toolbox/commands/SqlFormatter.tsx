@@ -358,6 +358,7 @@ export function SqlFormatter({ initialInput = '' }: CommandProps): React.JSX.Ele
   return (
     <CommandShell
       title="SQL 格式化 · 检查 · 学习"
+      onPaste={(t) => patch({ input: t })}
       description="美化 SQL、查常见写法错误、顺带把语法点讲清楚（MySQL 8.0 口径）"
       icon={<Database className="h-4 w-4" />}
       onBack={shell.onBack}

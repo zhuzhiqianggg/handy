@@ -268,6 +268,7 @@ export function Base64Codec({ initialInput = '' }: CommandProps): React.JSX.Elem
   return (
     <CommandShell
       title="Base64 编解码"
+      onPaste={(t) => setInput(t)}
       description="文本与 Base64 互转：UTF-8 / UTF-16 / ASCII、URL 安全、MIME 换行、文件读写"
       icon={<Binary className="h-4 w-4" />}
       onBack={shell.onBack}

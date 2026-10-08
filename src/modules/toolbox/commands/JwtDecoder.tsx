@@ -220,6 +220,7 @@ export function JwtDecoder({ initialInput = '' }: CommandProps): React.JSX.Eleme
   return (
     <CommandShell
       title="JWT 解码"
+      onPaste={(t) => setInput(t)}
       description="解析 Header / Payload / Signature，支持 HMAC 验签与过期判定"
       icon={<KeyRound className="h-4 w-4" />}
       onBack={shell.onBack}

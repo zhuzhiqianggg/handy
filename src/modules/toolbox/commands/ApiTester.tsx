@@ -301,6 +301,7 @@ export function ApiTester({ initialInput }: CommandProps): React.JSX.Element {
   return (
     <CommandShell
       title="接口测试"
+      onPaste={(t) => setUrl(t)}
       description="HTTP 接口调试：cURL 导入 / 请求编辑 / 响应检查"
       icon={<Send className="h-4 w-4" />}
       onBack={shell.onBack}

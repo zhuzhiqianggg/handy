@@ -48,6 +48,7 @@ export function FileSize({ initialInput = '' }: CommandProps): React.JSX.Element
   return (
     <CommandShell
       title="文件大小格式化"
+      onPaste={(t) => setBytesInput(t)}
       description="字节 ⇄ 人类可读（base-2 / base-10 切换）"
       icon={<HardDrive className="h-4 w-4" />}
       onBack={shell.onBack}

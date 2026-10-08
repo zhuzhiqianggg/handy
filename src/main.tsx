@@ -108,6 +108,19 @@ function start(): void {
       });
       return;
     }
+
+    // 2.3) 开发调试入口 `?demo=calendar`：直接挂载桌面挂件日历做浏览器回归。
+    // 日历依赖 SQLite / Tauri 的地方都有 try/catch 兜底，浏览器下为空数据也不白屏。
+    if (deepLink.get('demo') === 'calendar') {
+      void import('./dev/CalendarDemo').then(({ default: Demo }) => {
+        ReactDOM.createRoot(rootElement).render(
+          <React.StrictMode>
+            <Demo />
+          </React.StrictMode>,
+        );
+      });
+      return;
+    }
   }
 
   // TooltipProvider 必须**包住所有窗口根**（V45 修）：工具组件（如密码生成器的

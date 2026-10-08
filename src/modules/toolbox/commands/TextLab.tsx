@@ -401,6 +401,7 @@ export function TextLab({ initialInput = '' }: CommandProps): React.JSX.Element 
   return (
     <CommandShell
       title="文本处理台"
+      onPaste={(t) => patch({ text: t })}
       description="查找替换（正则/捕获组） · 行处理 · 取列 · 统计 —— 就地改写，随时撤销"
       icon={<Search className="h-4 w-4" />}
       onBack={shell.onBack}

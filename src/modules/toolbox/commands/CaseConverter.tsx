@@ -75,6 +75,7 @@ export function CaseConverter({ initialInput = '' }: CommandProps): React.JSX.El
   return (
     <CommandShell
       title="大小写转换"
+      onPaste={(t) => setInput(t)}
       description="snake / camel / kebab / Pascal / Title / CONSTANT 互转"
       icon={<CaseSensitive className="h-4 w-4" />}
       onBack={shell.onBack}

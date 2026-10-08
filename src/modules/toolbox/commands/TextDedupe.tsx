@@ -59,6 +59,7 @@ export function TextDedupe({ initialInput = '' }: CommandProps): React.JSX.Eleme
   return (
     <CommandShell
       title="文本去重"
+      onPaste={(t) => setInput(t)}
       description="按行去除重复，支持去空格 / 忽略大小写 / 排序"
       icon={<Filter className="h-4 w-4" />}
       onBack={shell.onBack}

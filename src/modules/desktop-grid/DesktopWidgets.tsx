@@ -1,8 +1,19 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Cake, CalendarDays, ChevronLeft, ChevronRight, Plus } from 'lucide-react';
+import {
+  Cake,
+  CalendarDays,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  ChevronsLeft,
+  ChevronsRight,
+  Gift,
+  Plus,
+  Trash2,
+} from 'lucide-react';
 import { RichMarkdown } from '@/components/RichMarkdown';
 import { ipc } from '@/lib/ipc';
-import { readSettings } from '@/lib/store';
+import { patchSettings, readSettings } from '@/lib/store';
 import {
   buildMonthGrid,
   dayLabel,
@@ -10,8 +21,20 @@ import {
   isSameDay,
   startOfDay,
 } from '@/lib/dateUtils';
-import { anniversariesOf } from '@/lib/anniversaries';
-import { dayInfo, ganZhi, type DayInfo } from '@/lib/lunar';
+import {
+  ANNIVERSARY_KINDS,
+  anniversariesOf,
+  newAnniversaryId,
+  toDateKey,
+  yearsSince,
+} from '@/lib/anniversaries';
+import {
+  dayInfo,
+  ganZhi,
+  LUNAR_MAX_YEAR,
+  LUNAR_MIN_YEAR,
+  type DayInfo,
+} from '@/lib/lunar';
 import { holidayOf, upcomingHolidays } from '@/lib/holidays';
 import type { Todo } from '@/core/data/todosService';
 import type { Anniversary } from '@/core/types';
@@ -131,6 +154,20 @@ export interface CalendarTheme {
   shell: string;
   /** 星期行 */
   week: string;
+  /**
+   * 日期格描边（V77）。
+   *
+   * 用户 09-24 原话：「主要是每个小格子没有边框 上下两个小格子看着穿在一起了」。
+   * 之前格子之间只有 `gap-px` 的 1px 缝、且**只有今天/选中才有底色**，
+   * 其余 30 来个日子全是透明底 —— 相邻两格在视觉上就是连成一片的，
+   * 尤其纵向：上一格的农历和下一格的数字只隔 1px，读起来像同一格里的内容。
+   *
+   * ⚠️ 用 `ring-1 ring-inset` 而不是 `border`：inset ring 是 box-shadow，
+   * **不占布局**，格子尺寸与行距仍然精确是 52/53px（V76 才量过并锁死）。
+   * ⚠️「今天」不再叠这圈边 —— 它自带 `ring-sky-400/80`，再叠一圈会打架
+   * （两个 ring 颜色类同权重，谁生效取决于 CSS 生成顺序，不可靠）。
+   */
+  cell: string;
   /** 日期格非选中态悬停 */
   hover: string;
   /** 今天（未选中） */
@@ -169,6 +206,7 @@ export const CALENDAR_THEMES: Record<GridAccent, CalendarTheme> = {
     // 就是主题的一部分（浅底 + 深字），去掉就看不见字了。
     shell: 'bg-black/[0.12] text-neutral-100',
     week: 'text-neutral-300/70',
+    cell: 'ring-1 ring-inset ring-white/15',
     hover: 'hover:bg-white/15',
     today: 'bg-white/[0.07] ring-1 ring-inset ring-sky-400/80',
     selected: 'bg-sky-500 font-semibold text-white shadow-sm',
@@ -185,6 +223,7 @@ export const CALENDAR_THEMES: Record<GridAccent, CalendarTheme> = {
     label: '暖纸',
     shell: 'bg-gradient-to-b from-amber-50 to-amber-100 text-amber-950 ring-1 ring-amber-900/15',
     week: 'text-amber-900/70',
+    cell: 'ring-1 ring-inset ring-amber-900/20',
     hover: 'hover:bg-amber-900/10',
     today: 'bg-amber-900/10 ring-1 ring-inset ring-amber-600/50',
     selected: 'bg-amber-600 font-semibold text-white shadow-sm',
@@ -201,6 +240,7 @@ export const CALENDAR_THEMES: Record<GridAccent, CalendarTheme> = {
     label: '樱粉',
     shell: 'bg-gradient-to-b from-rose-50 to-rose-100 text-rose-950 ring-1 ring-rose-900/15',
     week: 'text-rose-900/70',
+    cell: 'ring-1 ring-inset ring-rose-900/20',
     hover: 'hover:bg-rose-900/10',
     today: 'bg-rose-900/10 ring-1 ring-inset ring-rose-500/50',
     selected: 'bg-rose-600 font-semibold text-white shadow-sm',
@@ -217,6 +257,7 @@ export const CALENDAR_THEMES: Record<GridAccent, CalendarTheme> = {
     label: '天蓝',
     shell: 'bg-gradient-to-b from-sky-50 to-sky-100 text-sky-950 ring-1 ring-sky-900/15',
     week: 'text-sky-900/70',
+    cell: 'ring-1 ring-inset ring-sky-900/20',
     hover: 'hover:bg-sky-900/10',
     today: 'bg-sky-900/10 ring-1 ring-inset ring-sky-500/50',
     selected: 'bg-sky-600 font-semibold text-white shadow-sm',
@@ -233,6 +274,7 @@ export const CALENDAR_THEMES: Record<GridAccent, CalendarTheme> = {
     label: '薄荷',
     shell: 'bg-gradient-to-b from-emerald-50 to-emerald-100 text-emerald-950 ring-1 ring-emerald-900/15',
     week: 'text-emerald-900/70',
+    cell: 'ring-1 ring-inset ring-emerald-900/20',
     hover: 'hover:bg-emerald-900/10',
     today: 'bg-emerald-900/10 ring-1 ring-inset ring-emerald-600/50',
     selected: 'bg-emerald-600 font-semibold text-white shadow-sm',
@@ -249,6 +291,7 @@ export const CALENDAR_THEMES: Record<GridAccent, CalendarTheme> = {
     label: '藕紫',
     shell: 'bg-gradient-to-b from-violet-50 to-violet-100 text-violet-950 ring-1 ring-violet-900/15',
     week: 'text-violet-900/70',
+    cell: 'ring-1 ring-inset ring-violet-900/20',
     hover: 'hover:bg-violet-900/10',
     today: 'bg-violet-900/10 ring-1 ring-inset ring-violet-500/50',
     selected: 'bg-violet-600 font-semibold text-white shadow-sm',
@@ -265,6 +308,7 @@ export const CALENDAR_THEMES: Record<GridAccent, CalendarTheme> = {
     label: '素白',
     shell: 'bg-gradient-to-b from-slate-50 to-slate-200 text-slate-900 ring-1 ring-slate-900/15',
     week: 'text-slate-600',
+    cell: 'ring-1 ring-inset ring-slate-900/20',
     hover: 'hover:bg-slate-900/10',
     today: 'bg-slate-900/10 ring-1 ring-inset ring-slate-600/50',
     selected: 'bg-slate-800 font-semibold text-white shadow-sm',
@@ -407,6 +451,23 @@ const WEEKDAYS = ['一', '二', '三', '四', '五', '六', '日'];
 /** 计划行高（逻辑像素）：父级据「内容自然高度」反推盒子该多高，所以这里要是准的 */
 const PLAN_ROW_H = 20;
 
+/** 快选面板的月份宫格（1–12 月） */
+const MONTHS = Array.from({ length: 12 }, (_, index) => index + 1);
+
+/**
+ * 跳到某年月时默认选中哪一天：**当月就选今天，别的年月选那月 1 号**。
+ *
+ * 选 1 号而不是「保持原来的日号」，是因为跨月时日号未必存在（1 月 31 日 → 2 月），
+ * 而 `new Date(y, m, 31)` 会静默滚到 3 月 —— 静默兜底比显式取 1 号更容易骗人。
+ */
+function defaultSelectedOf(year: number, month: number): number {
+  const now = new Date();
+  if (now.getFullYear() === year && now.getMonth() === month) {
+    return startOfDay(Date.now());
+  }
+  return new Date(year, month, 1).getTime();
+}
+
 /**
  * 日历挂件：工作台 `CalendarPanel` 的桌面版。
  *
@@ -444,6 +505,16 @@ export function CalendarWidget({
   });
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
+  /** 年月快选面板（V80）：见下方「翻到 1988 年」 */
+  const [showPicker, setShowPicker] = useState(false);
+  /** 年份输入框草稿（受控字符串：允许中途为空 / 打到一半的 `198`） */
+  const [yearDraft, setYearDraft] = useState(() => String(new Date().getFullYear()));
+  /** 纪念日面板（V80）：生日 / 特殊日期就在这里加，不必回工作台 */
+  const [showAnniversaries, setShowAnniversaries] = useState(false);
+  const [anniLabel, setAnniLabel] = useState('');
+  const [anniDate, setAnniDate] = useState('');
+  const [anniKind, setAnniKind] = useState<Anniversary['kind']>('birthday');
+  const [anniYearly, setAnniYearly] = useState(true);
 
   /** 内容根节点：用来量「自然高度」 */
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -483,7 +554,8 @@ export function CalendarWidget({
     };
   }, [refresh, refreshAnniversaries]);
 
-  const cells = useMemo(() => buildMonthGrid(view.year, view.month), [view]);
+  // 桌面挂件日历：自适应行数（fit=true），月底少塞一行白边（见 `buildMonthGrid`）。
+  const cells = useMemo(() => buildMonthGrid(view.year, view.month, true), [view]);
   const todayMs = startOfDay(Date.now());
 
   /** 每格的农历 / 节气 / 节假日：一次算完，避免渲染里重复推导 */
@@ -522,15 +594,118 @@ export function CalendarWidget({
   const selectedTodos = byDay.get(selected) ?? [];
   const showUndated = isSameDay(selected, todayMs);
 
+  /**
+   * 纪念日按「年内顺序」排（先月日、再年）：生日这种每年重复的条目，
+   * 用户关心的是「一年里排在几月」，不是「哪一年登记的」。
+   */
+  const sortedAnniversaries = useMemo(
+    () =>
+      [...anniversaries].sort(
+        (a, b) => a.date.slice(5).localeCompare(b.date.slice(5)) || a.date.localeCompare(b.date),
+      ),
+    [anniversaries],
+  );
+
   const nextHolidays = useMemo(() => upcomingHolidays(Date.now(), 1), []);
   const gz = ganZhi(view.year);
 
-  const shiftMonth = useCallback((delta: number): void => {
-    setView((prev) => {
-      const next = new Date(prev.year, prev.month + delta, 1);
-      return { year: next.getFullYear(), month: next.getMonth() };
-    });
+  /**
+   * 跳到指定年月（V80，用户 09-25「日历上不能选年呢？例如我想回到 1988 年」）。
+   *
+   * 以前只有 ±1 月的箭头 —— 从 2026 回到 1988 要点 456 次，等于没有。所以年月
+   * 必须能**直接指定**（点标题开快选面板：年份可键入、月份 12 宫格任选）。
+   *
+   * 同时把「选中日」一起带过去：**月份翻走了、下面「……的计划」清单和输入框却还
+   * 指着出发那个月**，是最容易骗人的一类 bug —— 用户以为在给 1988 年 6 月加计划，
+   * 实际加到了今天。约定：跳到当月就选今天，跳到别的年月就选那月 1 号。
+   */
+  const jumpTo = useCallback((year: number, month: number): void => {
+    const y = Math.min(LUNAR_MAX_YEAR, Math.max(LUNAR_MIN_YEAR, Math.round(year)));
+    setView({ year: y, month });
+    setSelected(defaultSelectedOf(y, month));
   }, []);
+
+  /** 年份输入框生效（回车 / 失焦）：解析草稿并跳转，非法值夹回 1900–2100 */
+  const applyYearDraft = useCallback((): void => {
+    const parsed = Number.parseInt(yearDraft, 10);
+    if (!Number.isFinite(parsed)) {
+      setYearDraft(String(view.year));
+      return;
+    }
+    jumpTo(parsed, view.month);
+  }, [yearDraft, jumpTo, view]);
+
+  /** 年份 ±delta（快选面板的 « ‹ › »，以及 Shift+点左右箭头） */
+  const shiftYear = useCallback(
+    (delta: number): void => {
+      jumpTo(view.year + delta, view.month);
+    },
+    [jumpTo, view],
+  );
+
+  const shiftMonth = useCallback(
+    (delta: number): void => {
+      const next = new Date(view.year, view.month + delta, 1);
+      jumpTo(next.getFullYear(), next.getMonth());
+    },
+    [jumpTo, view],
+  );
+
+  /** 年份框跟着实际年份走（翻页 / 键入跳转后都要同步，否则框里是旧值） */
+  useEffect(() => {
+    setYearDraft(String(view.year));
+  }, [view.year]);
+
+  /** 新增纪念日：日期留空 = 用当前选中的那一天（V80） */
+  const addAnniversary = useCallback((): void => {
+    const label = anniLabel.trim();
+    if (label.length === 0) {
+      return;
+    }
+    const fallback = new Date(selected);
+    const date =
+      anniDate !== ''
+        ? anniDate
+        : toDateKey(fallback.getFullYear(), fallback.getMonth() + 1, fallback.getDate());
+    const next: Anniversary = {
+      id: newAnniversaryId(),
+      label,
+      date,
+      yearly: anniYearly,
+      kind: anniKind,
+    };
+    // `patchSettings` 是 read-modify-write：只覆盖 `anniversaries` 这一项，
+    // 不会把 Rust 侧刚写进设置里的 `modules` 冲掉。
+    void patchSettings({ anniversaries: [...anniversaries, next] })
+      .then(() => {
+        setAnniLabel('');
+        setAnniDate('');
+        return refreshAnniversaries();
+      })
+      .catch(() => undefined);
+  }, [anniLabel, anniDate, anniYearly, anniKind, anniversaries, refreshAnniversaries, selected]);
+
+  const removeAnniversary = useCallback(
+    (id: string): void => {
+      const next = anniversaries.filter((item) => item.id !== id);
+      setAnniversaries(next); // 先本地生效（写盘失败也不至于点了没反应）
+      void patchSettings({ anniversaries: next }).catch(() => undefined);
+    },
+    [anniversaries],
+  );
+
+  /** 点列表里某条 = 跳到那一天（1988 年生日就靠这个回看） */
+  const gotoAnniversary = useCallback(
+    (item: Anniversary): void => {
+      const [y, m, d] = item.date.split('-').map((part) => Number.parseInt(part, 10));
+      if (!y || !m || !d) {
+        return;
+      }
+      jumpTo(y, m - 1);
+      setSelected(new Date(y, m - 1, d).getTime());
+    },
+    [jumpTo],
+  );
 
   const toggle = useCallback(
     (todo: Todo): void => {
@@ -582,7 +757,18 @@ export function CalendarWidget({
       }
     });
     return () => window.cancelAnimationFrame(raf);
-  }, [onContentHeight, rows.length, view, selected, anniversaries.length, nextHolidays.length]);
+    // V80：两个面板展开 / 收起都会改变自然高度，必须进依赖，
+    // 否则盒子高度停在旧值 —— 面板一展开就把下面的计划区挤出可视区。
+  }, [
+    onContentHeight,
+    rows.length,
+    view,
+    selected,
+    anniversaries.length,
+    nextHolidays.length,
+    showPicker,
+    showAnniversaries,
+  ]);
 
   return (
     <div
@@ -593,16 +779,27 @@ export function CalendarWidget({
     >
       <div className="flex shrink-0 items-center gap-1">
         <CalendarDays className="h-4 w-4 opacity-70" />
-        <span className="text-[13px] font-semibold">
+        {/* V80：标题本身是个按钮 —— 点开快选面板，年份可以直接键入。
+            以前只能一个月一个月点箭头，回到 1988 年要点 456 次。 */}
+        <button
+          type="button"
+          title="选年份 / 月份（可直接输入年份，如 1988）"
+          onClick={() => {
+            setShowPicker((prev) => !prev);
+            setShowAnniversaries(false); // 两个面板互斥：都展开会把下面的计划区顶出盒子
+          }}
+          className={`flex items-center gap-0.5 rounded px-1 py-px text-[13px] font-semibold transition ${theme.hover}`}
+        >
           {view.year} 年 {view.month + 1} 月
-        </span>
+          <ChevronDown className={`h-3 w-3 transition ${showPicker ? 'rotate-180' : ''}`} />
+        </button>
         <span className="rounded bg-black/10 px-1 py-px text-[10px] font-medium">
           {gz.ganZhi}年 · 属{gz.zodiac}
         </span>
         <button
           type="button"
-          title="上个月"
-          onClick={() => shiftMonth(-1)}
+          title="上个月（按住 Shift 点 = 上一年）"
+          onClick={(event) => (event.shiftKey ? shiftYear(-1) : shiftMonth(-1))}
           className={`ml-auto rounded p-0.5 opacity-75 transition hover:opacity-100 ${theme.hover}`}
         >
           <ChevronLeft className="h-4 w-4" />
@@ -611,10 +808,8 @@ export function CalendarWidget({
           type="button"
           title="回到今天"
           onClick={() => {
-            const parts = startOfDay(Date.now());
-            const now = new Date(parts);
-            setView({ year: now.getFullYear(), month: now.getMonth() });
-            setSelected(parts);
+            const now = new Date();
+            jumpTo(now.getFullYear(), now.getMonth());
           }}
           className={`rounded px-1 py-px text-[11px] font-medium opacity-75 transition hover:opacity-100 ${theme.hover}`}
         >
@@ -622,13 +817,201 @@ export function CalendarWidget({
         </button>
         <button
           type="button"
-          title="下个月"
-          onClick={() => shiftMonth(1)}
+          title="下个月（按住 Shift 点 = 下一年）"
+          onClick={(event) => (event.shiftKey ? shiftYear(1) : shiftMonth(1))}
           className={`rounded p-0.5 opacity-75 transition hover:opacity-100 ${theme.hover}`}
         >
           <ChevronRight className="h-4 w-4" />
         </button>
+        {/* V80：纪念日入口。以前只有工作台日历里能加，桌面日历只画标记不能编辑 ——
+            用户 09-25「或者特殊日期现在怎么没有添加了」。 */}
+        <button
+          type="button"
+          title={`纪念日（生日 / 特殊日期）${anniversaries.length > 0 ? `· ${anniversaries.length} 条` : ''}`}
+          onClick={() => {
+            setShowAnniversaries((prev) => !prev);
+            setShowPicker(false);
+          }}
+          className={`rounded p-0.5 transition ${
+            showAnniversaries ? 'opacity-100' : 'opacity-75 hover:opacity-100'
+          } ${theme.hover}`}
+        >
+          <Gift className="h-4 w-4" />
+        </button>
       </div>
+
+      {/* —— 年月快选（V80）—— */}
+      {showPicker ? (
+        <div className={`shrink-0 space-y-1 rounded-md border p-1.5 ${theme.divider}`}>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              title="上十年"
+              onClick={() => shiftYear(-10)}
+              className={`rounded px-1 py-0.5 transition ${theme.hover}`}
+            >
+              <ChevronsLeft className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              title="上一年"
+              onClick={() => shiftYear(-1)}
+              className={`rounded px-1 py-0.5 transition ${theme.hover}`}
+            >
+              <ChevronLeft className="h-3.5 w-3.5" />
+            </button>
+            <input
+              value={yearDraft}
+              onChange={(event) => setYearDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  applyYearDraft();
+                }
+              }}
+              onBlur={applyYearDraft}
+              inputMode="numeric"
+              aria-label="年份"
+              className={`w-16 rounded px-1 py-0.5 text-center text-[12px] tabular-nums outline-none ${theme.input}`}
+            />
+            <span className={`text-[11px] ${theme.sub}`}>年</span>
+            <button
+              type="button"
+              title="下一年"
+              onClick={() => shiftYear(1)}
+              className={`rounded px-1 py-0.5 transition ${theme.hover}`}
+            >
+              <ChevronRight className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              title="下十年"
+              onClick={() => shiftYear(10)}
+              className={`rounded px-1 py-0.5 transition ${theme.hover}`}
+            >
+              <ChevronsRight className="h-3.5 w-3.5" />
+            </button>
+            <span className={`ml-auto text-[10px] ${theme.sub}`}>
+              可查 {LUNAR_MIN_YEAR}–{LUNAR_MAX_YEAR}
+            </span>
+          </div>
+          <div className="grid grid-cols-6 gap-1">
+            {MONTHS.map((month) => (
+              <button
+                key={month}
+                type="button"
+                onClick={() => {
+                  const parsed = Number.parseInt(yearDraft, 10);
+                  jumpTo(Number.isFinite(parsed) ? parsed : view.year, month - 1);
+                }}
+                className={`rounded px-1 py-1 text-[11px] tabular-nums transition ${
+                  month === view.month + 1 ? theme.selected : theme.hover
+                }`}
+              >
+                {month}月
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      {/* —— 纪念日（生日 / 特殊日期，V80）——
+          与工作台那个面板写的是**同一份设置**（`settings.anniversaries`），
+          走 `patchSettings` 做读-改-写，两边不会互相覆盖。 */}
+      {showAnniversaries ? (
+        <div className={`shrink-0 space-y-1 rounded-md border p-1.5 ${theme.divider}`}>
+          <div className="flex items-center gap-1">
+            <input
+              value={anniLabel}
+              onChange={(event) => setAnniLabel(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  addAnniversary();
+                }
+              }}
+              placeholder="如：妈妈生日"
+              aria-label="纪念日名称"
+              className={`min-w-0 flex-1 rounded px-1.5 py-1 text-[12px] outline-none ${theme.input}`}
+            />
+            <input
+              type="date"
+              value={anniDate}
+              onChange={(event) => setAnniDate(event.target.value)}
+              title={`日期（留空 = 当前选中的 ${dayLabel(selected)}）`}
+              aria-label="纪念日日期"
+              className={`w-[104px] rounded px-1 py-0.5 text-[11px] tabular-nums outline-none ${theme.input}`}
+            />
+            <select
+              value={anniKind}
+              onChange={(event) => setAnniKind(event.target.value as Anniversary['kind'])}
+              aria-label="纪念日类型"
+              className={`rounded px-1 py-1 text-[11px] outline-none ${theme.input}`}
+            >
+              {ANNIVERSARY_KINDS.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.name}
+                </option>
+              ))}
+            </select>
+            <label
+              className={`flex shrink-0 items-center gap-1 text-[11px] ${theme.sub}`}
+              title="勾上 = 每年都提醒（生日 / 结婚周年）；不勾 = 只在指定那天出现一次"
+            >
+              <input
+                type="checkbox"
+                checked={anniYearly}
+                onChange={(event) => setAnniYearly(event.target.checked)}
+              />
+              每年
+            </label>
+            <button
+              type="button"
+              title="添加纪念日"
+              onClick={addAnniversary}
+              className={`shrink-0 rounded p-1 transition ${theme.hover}`}
+            >
+              <Plus className="h-4 w-4" />
+            </button>
+          </div>
+          {anniversaries.length === 0 ? (
+            <p className={`text-[10px] ${theme.sub}`}>
+              还没有纪念日。名称必填，日期留空就记在当前选中的那天（{dayLabel(selected)}）。
+            </p>
+          ) : (
+            <ul className="max-h-[132px] space-y-0.5 overflow-y-auto">
+              {sortedAnniversaries.map((item) => (
+                <li
+                  key={item.id}
+                  className={`flex items-center gap-1 rounded px-1 py-0.5 text-[11px] ${theme.rowHover}`}
+                >
+                  <button
+                    type="button"
+                    onClick={() => gotoAnniversary(item)}
+                    title="跳到这一天"
+                    className="flex min-w-0 flex-1 items-center gap-1 text-left"
+                  >
+                    <Cake className="h-3 w-3 shrink-0 text-pink-500" />
+                    <span className="min-w-0 flex-1 truncate">{item.label}</span>
+                    <span className="shrink-0 tabular-nums opacity-70">{item.date}</span>
+                    <span className="shrink-0 rounded bg-black/10 px-1 text-[10px] opacity-80">
+                      {item.yearly
+                        ? `第 ${Math.max(0, yearsSince(item, new Date().getFullYear()))} 年`
+                        : '单次'}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => removeAnniversary(item.id)}
+                    title="删除"
+                    className="shrink-0 rounded p-0.5 opacity-70 transition hover:opacity-100"
+                  >
+                    <Trash2 className="h-3 w-3" />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      ) : null}
 
       {/* —— 月历（V48：**正方形日期格**） ——
           用户原话：「貌似日期格子宽度太宽都在浪费快速空间，反而让日历格子左右不均衡，
@@ -687,10 +1070,29 @@ export function CalendarWidget({
                 type="button"
                 title={tooltip}
                 onClick={() => setSelected(dayMs)}
-                // `aspect-square`（V48）：不管盒子多宽，日期格永远是正方形（用户要求）
-                className={`relative flex aspect-square flex-col items-center justify-start rounded-md px-0.5 py-0.5 leading-none transition ${
+                // `aspect-square`（V48）：不管盒子多宽，日期格永远是正方形（用户要求）。
+                // V75：样式保持原样（整块高亮 + 原字号/间距），只把网格行数改成自适应 ——
+                // 月末不再空占一整行，格子比例更合理（观感不变，纯省空间）。
+                // V78：三行内容（数字 13 + 农历 10 + 标记 9，含间距共 38px）装进 52.8px
+                // 的格子后，**实测上留白 2px、下留白 12.8px** —— 底下空了 10.8px
+                // （用户 09-25「上边距和下边距不平衡 我喜欢看上去上下边距都一样」）。
+                // 根因是 `justify-start` 把内容顶在上边。改 `justify-center` 后
+                // 富余的 10.8px 对半分 ⇒ 上下各约 7.4px。
+                // ⚠️ 能用居中是因为**三行都是定高**（农历行也补了 `h-[10px]`），
+                // 内容高恒为 38px —— 否则某格农历为空时它的数字会比邻格低一截。
+                className={`relative flex aspect-square flex-col items-center justify-center rounded-md px-0.5 py-0.5 leading-none transition ${
                   isSelected ? theme.selected : isToday ? theme.today : theme.hover
-                } ${inMonth ? '' : 'opacity-35'}`}
+                  // V76：上/下个月的日期从 `opacity-35` 提到 `opacity-50` —— 用户 09-24
+                  // 「上下每个日 看着也不清晰」的另一半：31 号（上月）与 1-4 号（下月）
+                  // 在深色玻璃主题上淡到几乎读不出数字。50 仍明显弱于当月（一眼能分辨
+                  // 「不属于本月」），但每个字都认得出来。
+                  //
+                  // V77（用户 09-24「每个小格子没有边框 上下两个小格子看着穿在一起了」）：
+                  // 下面的 `theme.cell` 给每格补一圈主题色细边 —— 之前格子之间只有
+                  // `gap-px` 的 1px 缝、且非高亮日全是透明底，邻格在视觉上就是连成
+                  // 一片的。**今天不叠**（自带 sky ring，两圈 ring 颜色类同权重，
+                  // 谁生效取决于 CSS 生成顺序，不可靠）。
+                } ${isToday ? '' : theme.cell} ${inMonth ? '' : 'opacity-50'}`}
               >
                 {/* 第 1 行：公历日（V48：改成与格子同宽的方阵里居中，字号随方块走；
                     V62 随工作台加宽 12 → 13px） */}
@@ -703,7 +1105,10 @@ export function CalendarWidget({
                 </span>
                 {/* 第 2 行：农历 / 节气 / 节日（V62：9 → 10px，在 54px 的方格里才站稳） */}
                 <span
-                  className={`mt-0.5 w-full truncate text-center text-[10px] leading-none ${
+                  // `h-[10px]`（V78）：锁死农历行高度 —— 万一 `badge` 为空，这一行塌成
+                  // 0 会让整块内容高度变化，`justify-center` 就会把该格的数字推得比
+                  // 邻格低。定高后内容高恒为 38px，居中才安全。
+                  className={`mt-0.5 h-[10px] w-full truncate text-center text-[10px] leading-none ${
                     isSelected
                       ? 'opacity-85'
                       : festival !== null
@@ -718,8 +1123,17 @@ export function CalendarWidget({
                 {/* 第 3 行：**标记行** —— 计划（琥珀点，一个点代表有、两个代表 3 条以上）
                     与生日纪念日（蛋糕粉标）；放在专属一行才看得清，不再和休/班挤角落。
                     V62：点 4→5px、蛋糕 7→9px —— 日期格变大后原来那点显得太小、看不清
-                    「这天到底有没有事」。 */}
-                <span className="mt-auto flex h-[9px] items-center justify-center gap-0.5">
+                    「这天到底有没有事」。
+
+                    V76（用户 09-24：「上下每个日 貌似看着也不清晰」）：从 `mt-auto`
+                    改成固定间距 `mt-1`。**根因是实测出来的**：格子 52×52、行距 53px，
+                    `mt-auto` 把标记压到格子最底部 ⇒ 标记中心落在「自己那天的数字」下方
+                    约 35.5px，却只在下一天数字上方约 17.5px —— **标记离下一天的数字
+                    反而更近一半**，肉眼看着就像「这天的点属于下面那天」，整列读下来
+                    分不清哪个点归哪一天。
+                    现在标记紧跟在农历后面（相隔 4px），归属一目了然；数字行因为标记行
+                    恒占 `h-[9px]`、仍全部对齐。 */}
+                <span className="mt-1 flex h-[9px] items-center justify-center gap-0.5">
                   {pending > 0 ? (
                     <>
                       <span

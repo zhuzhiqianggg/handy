@@ -645,6 +645,7 @@ export function TimestampConverter({ initialInput = '' }: CommandProps): React.J
   return (
     <CommandShell
       title="时间戳转换"
+      onPaste={(t) => setText(t)}
       description="Unix 时间戳（秒 / 毫秒）与日期时间互转，多时区多格式"
       icon={<Clock className="h-4 w-4" />}
       onBack={shell.onBack}

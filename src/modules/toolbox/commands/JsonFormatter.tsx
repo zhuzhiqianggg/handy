@@ -455,6 +455,7 @@ export function JsonFormatter({ initialInput = '' }: CommandProps): React.JSX.El
   return (
     <CommandShell
       title="JSON 格式化"
+      onPaste={(t) => setInput(t)}
       description="格式化 / 压缩 / 树视图 / CSV / YAML / TypeScript，支持 JSONPath 查询"
       icon={<Braces className="h-4 w-4" />}
       onBack={shell.onBack}

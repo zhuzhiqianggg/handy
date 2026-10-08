@@ -85,6 +85,14 @@ export const TOOL_CATEGORIES: readonly ToolCategoryMeta[] = [
     chip: 'bg-indigo-50 text-indigo-600',
     order: 60,
   },
+  {
+    id: 'utility',
+    name: '日常工具',
+    hint: '计算、取色、端口、剪贴板历史',
+    icon: 'Calculator',
+    chip: 'bg-orange-50 text-orange-600',
+    order: 12,
+  },
 ];
 
 const CATEGORY_MAP: ReadonlyMap<string, ToolCategoryMeta> = new Map(

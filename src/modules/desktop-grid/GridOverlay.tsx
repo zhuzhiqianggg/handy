@@ -75,7 +75,10 @@ import { DesktopWorkstation, WorkstationSectionLabel, WORKSTATION_W } from './De
  *     本组件把盒子 / 工具栏矩形按 `scaleFactor` 换算为物理像素上报
  *     （`gridOverlayUpdateRegions`），Rust 光标轮询命中后才开放交互；拖拽期间
  *     经 `gridSetInteractive(true)` 显式申请保持可交互，避免拖快了被切回穿透；
- *   - **窗口几何持久化**：moved / resized 停稳 500ms 后写 `grid_geometry_set`；
+ *   - **窗口几何**：**不在前端管**（V83）。以前这里做「moved / resized 停稳 500ms
+ *     → 写库」的持久化，接双屏后会用过期 `scaleFactor` 写进错值并永久锁死窗口尺寸。
+ *     现在几何由 Rust 实时决定（= 当前主显示器工作区），前端只监听
+ *     `grid:bounds-changed` 后重排。详见下方同名的注释块；
  *   - **右侧常驻「工作台」**（V60，见下方 §V60）：日历 + 快捷入口 + 操作按钮（便签 /
  *     格子 / 整理 / 退出整理）合成的**一个整体模块**，组件见 `DesktopWorkstation`。
  *     V44.3 那颗「浮动工具栏」的职能（整理桌面、隐藏挂件）现已并入它。
@@ -184,6 +187,61 @@ const WST_THEME_KEY = 'handy:grid.workstation-theme';
 const BOX_VIEW_MODES_KEY = 'handy:grid.box-view-modes';
 
 /**
+ * 各收纳格的**排序方式**的本地存储键（V87）。
+ *
+ * 与视图模式同样的理由：这是「调过一次就一直用」的偏好，纯内存态重启即丢，用户会以为
+ * 设置没保存。落 localStorage，不占 `settings.json` 的字段。
+ */
+const BOX_SORT_MODES_KEY = 'handy:grid.box-sort-modes';
+
+/**
+ * 排序方式：`manual` = 登记顺序（用户自己拖出来的先后，默认）；
+ * `name` = 按名称；`type` = 按类型（扩展名）再按名称。
+ *
+ * **暂不提供「按大小 / 按修改日期」**：那两项要读每个文件的元数据，
+ * 而 `grid_item_list` 目前只返回路径与显示名 —— 为此给每个条目加一次 `stat`
+ * （桌面动辄几十上百个条目）不值当，等真需要时再按同样的键位加。
+ */
+type BoxSortMode = 'manual' | 'name' | 'type';
+
+const BOX_SORT_MODES: BoxSortMode[] = ['manual', 'name', 'type'];
+
+const BOX_SORT_LABELS: Record<BoxSortMode, string> = {
+  manual: '自定义顺序',
+  name: '按名称',
+  type: '按类型',
+};
+
+/**
+ * 按排序方式排列条目。**不改后端顺序** —— 只影响这一格怎么画。
+ *
+ * 这是刻意的：`grid_items.sort` 记的是用户拖出来的先后（「自定义顺序」），
+ * 排序只是显示偏好，写回库会把用户辛苦排的顺序冲掉。
+ */
+function sortBoxItems<T extends { filePath: string; displayName: string }>(
+  list: T[],
+  mode: BoxSortMode,
+): T[] {
+  if (mode === 'manual') {
+    return list;
+  }
+  const collator = new Intl.Collator('zh-Hans-CN', { numeric: true, sensitivity: 'base' });
+  const extOf = (name: string): string => {
+    const match = /\.([^.]+)$/.exec(name.replace(/\.lnk$/i, ''));
+    return match?.[1]?.toLowerCase() ?? '';
+  };
+  return [...list].sort((a, b) => {
+    if (mode === 'type') {
+      const byExt = collator.compare(extOf(a.displayName), extOf(b.displayName));
+      if (byExt !== 0) {
+        return byExt;
+      }
+    }
+    return collator.compare(a.displayName, b.displayName);
+  });
+}
+
+/**
  * **格子外壳**（非编辑态）—— 收纳格与右下角快捷入口共用同一套观感。
  *
  * 抽成常量是因为「快捷入口就是一个格子」是用户 09-20 的明确要求
@@ -193,8 +251,6 @@ const BOX_VIEW_MODES_KEY = 'handy:grid.box-view-modes';
  */
 const BOX_SHELL_CLASS =
   'border border-white/15 bg-gradient-to-b from-white/[0.06] to-white/[0.02] shadow-[0_20px_60px_rgba(0,0,0,0.5),0_0_0_1px_rgba(255,255,255,0.05),inset_0_1px_0_rgba(255,255,255,0.15)] backdrop-blur-2xl backdrop-saturate-[180%]';
-/** 窗口几何落库防抖（拖动/缩放停稳后写入） */
-const GEOMETRY_SAVE_DEBOUNCE_MS = 500;
 /** 提示条显示时长 */
 const HINT_DURATION_MS = 2600;
 /**
@@ -351,6 +407,10 @@ interface DragSession {
   item: GridItem | null;
   /** 拖的是左侧「未归类」竖条里的条目 */
   loose: LooseEntry | null;
+  /** V86：按下时的修饰键 —— 没越过阈值就松手时，按它把这一下解释成「选择点击」 */
+  mods: { ctrl: boolean; shift: boolean };
+  /** V86：拖拽载荷的路径集合（越过阈值那一刻算出；多选拖拽时 > 1） */
+  batch: string[];
 }
 
 /** 按扩展名粗判是否目录（无扩展名 → 视为文件夹；仅影响展示图标，不影响打开） */
@@ -693,6 +753,16 @@ export function GridOverlay(): React.JSX.Element {
   const [toolbarOpen, setToolbarOpen] = useState(false);
   const [renamingId, setRenamingId] = useState<number | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
+  /**
+   * 正在改名的**条目**（V87）：存**文件路径**，不是 id。
+   *
+   * 因为「未归类」竖条里的桌面文件**没有** `grid_items` 登记行（拿不到 id），
+   * 但用户同样要能给它改名 —— 用路径，格子里的条目与竖条里的文件能共用一套。
+   */
+  const [renamingItemPath, setRenamingItemPath] = useState<string | null>(null);
+  const [itemRenameDraft, setItemRenameDraft] = useState('');
+  /** Explorer 的「单击两次改名」：记上一次单击落在哪个条目、什么时候 */
+  const lastClickRef = useRef<{ path: string; at: number }>({ path: '', at: 0 });
   /** 正在用「填路径」方式添加条目的盒子 id（拖放之外的第二条入口） */
   const [addingBoxId, setAddingBoxId] = useState<number | null>(null);
   const [addPathDraft, setAddPathDraft] = useState('');
@@ -722,6 +792,68 @@ export function GridOverlay(): React.JSX.Element {
   );
   /** 未归类竖条状态（V42）：几何 + 分几列 + 条目；width=0 / 接管关闭时不渲染 */
   const [loose, setLoose] = useState<LooseArea | null>(null);
+
+  // —— V86：条目多选（对齐原生桌面：Ctrl 点选 / Shift 范围 / 单击单选 / 空白清除） ——
+  //
+  // 用户 09-30 原话：「格子里面我想 shift 或者 ctrl 都选中几个文件都没法选中了，
+  // 我们只是把桌面上的图标整理移动到整齐的位置上，你现在是直接把桌面完全改掉了呢？」
+  // —— 交互尽量回到原生的样子，选中这件事是原生桌面的基本功。
+  /** 选中的路径集合（格子里按 `filePath`、竖条按 `path`，两处统一按路径记） */
+  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(() => new Set());
+  /** Shift 范围选择的锚点（哪个容器的第几项；竖条用 `boxId = -1`） */
+  const selectionAnchorRef = useRef<{ boxId: number; index: number } | null>(null);
+  /** `selectedPaths` 的镜像：全局 mouseup 监听（effect 只挂一次）里要读最新值 */
+  const selectedPathsRef = useRef<Set<string>>(selectedPaths);
+  /** `items` / `loose` 的镜像：拖拽主循环里要按路径反查条目（setState 是异步的） */
+  const itemsRef = useRef(items);
+  const looseStateRef = useRef(loose);
+  useEffect(() => {
+    selectedPathsRef.current = selectedPaths;
+    itemsRef.current = items;
+    looseStateRef.current = loose;
+  }, [items, loose, selectedPaths]);
+
+  /** 第 `index` 个选中容器的条目路径（`containerId = -1` 表示未归类竖条） */
+  const containerItemPath = useCallback((containerId: number, index: number): string | null => {
+    if (containerId < 0) {
+      return looseStateRef.current?.items[index]?.path ?? null;
+    }
+    return itemsRef.current[containerId]?.[index]?.filePath ?? null;
+  }, []);
+
+  /** 把「这一次选择点击」落到选中集合上（Ctrl 切换 / Shift 同容器范围 / 普通单选） */
+  const applySelectionClick = useCallback(
+    (containerId: number, index: number, path: string, mods: { ctrl: boolean; shift: boolean }): void => {
+      const cur = selectedPathsRef.current;
+      let next: Set<string>;
+      if (mods.ctrl) {
+        next = new Set(cur);
+        if (next.has(path)) {
+          next.delete(path);
+        } else {
+          next.add(path);
+        }
+        selectionAnchorRef.current = { boxId: containerId, index };
+      } else if (mods.shift && selectionAnchorRef.current?.boxId === containerId) {
+        next = new Set(cur);
+        const anchor = selectionAnchorRef.current.index;
+        const [from, to] = anchor <= index ? [anchor, index] : [index, anchor];
+        for (let i = from; i <= to; i += 1) {
+          const p = containerItemPath(containerId, i);
+          if (p !== null) {
+            next.add(p);
+          }
+        }
+      } else {
+        next = new Set([path]);
+        selectionAnchorRef.current = { boxId: containerId, index };
+      }
+      // 先同步镜像再 setState：mouseup 之后紧跟着的拖拽 / 事件读的是镜像
+      selectedPathsRef.current = next;
+      setSelectedPaths(next);
+    },
+    [containerItemPath],
+  );
   /**
    * 桌面快捷条（V42）的条目 —— 与工作台共用同一份数据（`quicklinks.ts`，localStorage
    * 与主窗口同源），所以这里加一条，工作台的「快捷入口」面板里立刻也有。
@@ -824,10 +956,18 @@ export function GridOverlay(): React.JSX.Element {
    *
    * 根因：之前「隐藏挂件」把整个挂件窗 `hide` 了，工具栏跟着消失，桌面再无任何入口
    * 能重新打开整理（用户实测死路）。现在挂件窗始终显示，只有「内容」收起，工具栏恒在。
-   * 初始值按 `grid_overlay_status().engaged` 定（重启后保持一致），并监听托盘发来的
-   * `grid:visibility` 事件（托盘点「桌面整理：显示/隐藏」时同步）。
+   * 两个更新来源：挂载时查 `grid_overlay_status().engaged`，以及后端广播的
+   * `grid:visibility`（V79 起 **所有** 改 `overlay_visible` 的路径都会发，不再只有托盘）。
+   *
+   * ⚠️ V79：初值从 `false` 改成 **`true`（fail-closed）**。
+   * 用户 09-25 截图实测「每次新打开 handy 后格子都摊在桌面上」：挂件窗在 `ensure_overlay_window`
+   * 里 `show()` 之后 React 立刻按初值 `false` 画了一屏格子，而此刻 `grid_overlay_status()`
+   * 还没回来 —— 后端明明已经决定「只留工具栏」（`show_launcher_only`），界面却先把格子画上了；
+   * 该请求若失败（`.catch` 吞掉）就**永远**停在摊开态。
+   * 改成从「收起」起步：**没问清楚之前绝不画格子**。真该展开时最多晚一帧（一次 IPC 往返），
+   * 而误展开的代价是用户面对一屏不该出现的格子。
    */
-  const [contentHidden, setContentHidden] = useState(false);
+  const [contentHidden, setContentHidden] = useState(true);
   /** 桌面「快捷操作」浮层（V44）已并入右侧统一面板（V45），见 `sidePanel` */
 
   // V53：便签不再有折叠/展开——根据内容自动撑开高度。
@@ -855,6 +995,48 @@ export function GridOverlay(): React.JSX.Element {
       return {};
     }
   });
+  // V87：各格子的**排序方式**（默认「自定义顺序」= 用户自己拖出来的先后）
+  const [boxSortModes, setBoxSortModes] = useState<Record<number, BoxSortMode>>(() => {
+    try {
+      const raw = localStorage.getItem(BOX_SORT_MODES_KEY);
+      if (raw === null) {
+        return {};
+      }
+      const parsed: unknown = JSON.parse(raw);
+      if (typeof parsed !== 'object' || parsed === null) {
+        return {};
+      }
+      // 只认白名单里的值：脏数据不能让格子渲染不出来（与视图模式同一条纪律）
+      const clean: Record<number, BoxSortMode> = {};
+      for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+        const id = Number(key);
+        if (Number.isFinite(id) && BOX_SORT_MODES.includes(value as BoxSortMode)) {
+          clean[id] = value as BoxSortMode;
+        }
+      }
+      return clean;
+    } catch {
+      return {};
+    }
+  });
+
+  /** 切换排序方式：自定义顺序 → 按名称 → 按类型 → 回到自定义顺序 */
+  const cycleBoxSortMode = useCallback((boxId: number): void => {
+    setBoxSortModes((prev) => {
+      const current = prev[boxId] ?? 'manual';
+      const next: BoxSortMode =
+        BOX_SORT_MODES[(BOX_SORT_MODES.indexOf(current) + 1) % BOX_SORT_MODES.length] ??
+        'manual';
+      const merged: Record<number, BoxSortMode> = { ...prev, [boxId]: next };
+      try {
+        localStorage.setItem(BOX_SORT_MODES_KEY, JSON.stringify(merged));
+      } catch {
+        // 存不下不影响本次显示，只是重启后回到默认
+      }
+      return merged;
+    });
+  }, []);
+
   const toggleBoxViewMode = useCallback((boxId: number): void => {
     setBoxViewModes((prev) => {
       const next: Record<number, 'grid' | 'list'> = {
@@ -967,17 +1149,6 @@ export function GridOverlay(): React.JSX.Element {
 
   // —— 首次装配 ——
 
-  /** 拉「未归类」竖条状态（V42）：对账轮询、条目增删 / 移出之后都要刷新 */
-  const refreshLoose = useCallback((): void => {
-    if (!isTauri()) {
-      return;
-    }
-    void ipc
-      .gridLooseList()
-      .then((area) => setLoose(area.width > 0 ? area : null))
-      .catch(() => undefined);
-  }, []);
-
   /** 拉取盒子与条目（挂件窗独立 JS 环境，不与主窗口共享 store） */
   const refresh = useCallback(async (): Promise<void> => {
     const list = await ipc.gridBoxList();
@@ -1016,6 +1187,275 @@ export function GridOverlay(): React.JSX.Element {
         .catch(() => undefined);
     }, RELAYOUT_DEBOUNCE_MS);
   }, [refresh]);
+
+  /** 上一次「未归类」竖条快照：路径序 + 矩形宽（对账时 diff 出新文件 / 宽度变化） */
+  const looseSnapRef = useRef<{ paths: string[]; width: number }>({ paths: [], width: 0 });
+
+  /**
+   * 拉取「未归类」竖条并对账（V84，`announce = true` 时顺带播报新文件）。
+   *
+   * # 为什么要在这条路上重排（09-29 截图 ①「快捷方式积压变形跑到格子下面」）
+   *
+   * 收纳格的可用区是**按上次竖条宽度**算的（竖条右缘 + 缝 = 格子左界）。桌面上一有
+   * 新文件，`grid_loose_list` 返回的竖条矩形是**实时**的 —— 条目多到一列放不下就往右
+   * 多铺一列、整体变宽；而格子落位还停在上次重排的老地方 ⇒ 竖条新的那一列直接压到
+   * 「文件」格左半边上。旧代码这里只 `setLoose`、从不重排，用户点一次「整理」才恢复
+   * —— 病根和 V66「内容变了要让引擎重算」是同一条，只是当时只顾了格子内容。
+   *
+   * # 为什么要播报（09-29 反馈 ①「新建了半天不出结果」）
+   *
+   * 接管态下原生视图是隐藏的：右键新建的文件不会出现在原生桌面上，只能进未归类竖条
+   * —— 而竖条条目多、又按目录序排，新文件多半落在内部滚动区的视野之外。不主动指路，
+   * 用户只会认为「建了没生效」。所以有新文件时：顶部提示 + 把新条目滚进视野。
+   */
+  const fetchLoose = useCallback(
+    async (announce: boolean): Promise<void> => {
+      const area = await ipc.gridLooseList();
+      const prev = looseSnapRef.current;
+      const paths = area.items.map((entry) => entry.path);
+      looseSnapRef.current = { paths, width: area.width };
+      setLoose(area.width > 0 ? area : null);
+      if (!announce) {
+        return;
+      }
+      // 竖条变宽 / 变窄（列数变了）⇒ 让引擎按新宽度重排一次格子（幂等，摆好的格子不动）
+      if (area.width !== prev.width && prev.paths.length > 0) {
+        relayoutSoon();
+      }
+      const added = area.items.filter((entry) => !prev.paths.includes(entry.path));
+      const first = added[0];
+      if (first === undefined || prev.paths.length === 0) {
+        return; // 没有新条目；或本次是启动后第一次拉取（不播报历史存量）
+      }
+      // 没接管 / 内容收起时不播报：原生图标或格子层都还看不见，指路没有意义
+      if (contentHidden || takeover?.enabled !== true) {
+        return;
+      }
+      const clean = (name: string): string => name.replace(/\.lnk$/i, '');
+      const label =
+        added.length === 1 ? `「${clean(first.name)}」` : `「${clean(first.name)}」等 ${added.length} 项`;
+      showHint(`新文件 ${label} 已进入未归类竖条`);
+      // 新条目多半在竖条内部滚动区的视野之外 —— 主动滚过去指给用户看
+      window.setTimeout(() => {
+        looseRef.current
+          ?.querySelector(`[data-path="${CSS.escape(first.path)}"]`)
+          ?.scrollIntoView({ block: 'nearest' });
+      }, 60);
+    },
+    [contentHidden, relayoutSoon, showHint, takeover],
+  );
+
+  /** 拉「未归类」竖条状态（V42）：条目增删 / 移出之后都要刷新（不做新文件播报） */
+  const refreshLoose = useCallback((): void => {
+    if (!isTauri()) {
+      return;
+    }
+    void fetchLoose(false).catch(() => undefined);
+  }, [fetchLoose]);
+
+  // —— V87：条目改名（对齐 Explorer 的「重命名 / F2 / 单击两次」）——
+
+  /**
+   * Explorer 改名的习惯：**只改主文件名，扩展名留着不被选中**。
+   *
+   * 用户给「笔记.md」改名时打「笔记2」，Explorer 得到的是「笔记2.md」—— 顺手改掉
+   * 扩展名会让文件双击打不开。要改扩展名就自己打全，那是显式意图，我们照办。
+   */
+  const keepExtension = useCallback((original: string, typed: string): string => {
+    // 用户自己打了扩展名 = 明确要连扩展名一起改，别拦
+    if (/^(.+)(\.[^.]+)$/.test(typed)) {
+      return typed;
+    }
+    const originExt = /^(.+)(\.[^.]+)$/.exec(original);
+    if (originExt === null) {
+      return typed; // 原名本来就没有扩展名（文件夹 / 无后缀文件）
+    }
+    const ext = originExt[2] ?? '';
+    // 快捷方式的 `.lnk` 只是 Shell 的显示尾巴，用户没看见过，别自作主张补回去
+    if (/^\.lnk$/i.test(ext)) {
+      return typed;
+    }
+    return typed + ext;
+  }, []);
+
+  const beginItemRename = useCallback((path: string, displayName: string): void => {
+    setRenamingItemPath(path);
+    // 快捷方式的显示名里带 `.lnk`，那是 Shell 加的、用户没看见，改名时也不该看到
+    setItemRenameDraft(displayName.replace(/\.lnk$/i, ''));
+  }, []);
+
+  const commitItemRename = useCallback((): void => {
+    const path = renamingItemPath;
+    if (path === null) {
+      return;
+    }
+    const typed = itemRenameDraft.trim();
+    setRenamingItemPath(null);
+    setItemRenameDraft('');
+    if (typed.length === 0) {
+      return;
+    }
+    const original = path.split(/[\\/]/).pop() ?? path;
+    const final = keepExtension(original, typed);
+    if (final === original) {
+      return; // 没改，别白跑一次后端
+    }
+    // 同目录下的新路径。后端只做同目录改名（含 `\` 一律拒绝），所以这里直接换末段。
+    const newPath = path.replace(/[^\\/]+$/, final);
+    void ipc
+      .gridItemRename(path, final)
+      .then(() => {
+        // **本地先改**（V88，用户 10-08：「输入了新名称确定后还是老名字」）。
+        //
+        // 后端返回 Ok 就意味着磁盘已经改完了（`fs::rename` 成功），所以这不是
+        // 乐观猜测、是**事实**。之所以不能只靠 `refresh()`：它是异步的，而且
+        // 里面 `Promise.all` 只要有一次 `gridItemList` 抛错，整批 `items` 就**一次都不更新**
+        // ——`catch(() => undefined)` 还会把错误吞掉，用户看到的就是「改了名但名字没变」。
+        setItems((prev) => {
+          let touched = false;
+          const next: Record<number, GridItem[]> = {};
+          for (const [key, list] of Object.entries(prev)) {
+            const idx = list.findIndex((entry) => entry.filePath === path);
+            if (idx < 0) {
+              next[Number(key)] = list;
+              continue;
+            }
+            const copy = list.slice();
+            const hit = copy[idx];
+            if (hit !== undefined) {
+              copy[idx] = { ...hit, filePath: newPath, displayName: final };
+            }
+            next[Number(key)] = copy;
+            touched = true;
+          }
+          return touched ? next : prev;
+        });
+        setLoose((prev) => {
+          if (prev === null) {
+            return prev;
+          }
+          const idx = prev.items.findIndex((entry) => entry.path === path);
+          if (idx < 0) {
+            return prev;
+          }
+          const entries = prev.items.slice();
+          const hit = entries[idx];
+          if (hit !== undefined) {
+            entries[idx] = { ...hit, path: newPath, name: final };
+          }
+          return { ...prev, items: entries };
+        });
+        setSelectedPaths((prev) => {
+          if (!prev.has(path)) {
+            return prev;
+          }
+          const next = new Set(prev);
+          next.delete(path);
+          next.add(newPath);
+          return next;
+        });
+        // 再跟后端对齐：布局要按新名字重算（长度变化可能换列）
+        void refresh().catch(() => undefined);
+        refreshLoose();
+      })
+      .catch((error: Error) => showHint(error.message));
+  }, [
+    renamingItemPath,
+    itemRenameDraft,
+    keepExtension,
+    refresh,
+    refreshLoose,
+    showHint,
+  ]);
+
+  /**
+   * **桌面 / 格子空白处右键 = 我们自己把原生背景菜单弹出来**（V87）。
+   *
+   * # 为什么不再「借出桌面」
+   *
+   * V81–V86 的做法是：右键时把被我们藏起来的原生图标视图显示回来，让 Explorer 自己弹
+   * 菜单、自己建文件，我们再收回。那是**补丁** —— 要赌 `#32768` 的类名语义（Win11
+   * 25H2 的新式菜单根本不叫这个名字）、要等「安静 1.5s」、要 120s 超时兜底，而用户
+   * 看到的仍然是「卡一下 / 要刷新 / 只有第一次成功」。
+   *
+   * 现在把自己当 Explorer：`IShellFolder::CreateViewObject` 拿桌面的**背景菜单**并自己
+   * 弹。实测它 16 项，含「新建」「下一个桌面背景」「显示设置」「个性化」、我们注入的
+   * 「Handy 桌面整理」子菜单，以及全部第三方扩展（见 `examples/bg_menu_dump.rs`）。
+   * 菜单里每一项都由 Shell 自己执行完，我们不插手。
+   *
+   * # 为什么菜单收起后要「认领新文件」
+   *
+   * Explorer 新建完一个文件夹，会立刻让那一项进入**原位改名**。我们没有原生列表视图，
+   * 所以：重扫桌面 → 只多出一个就让它进入自绘改名框。用户点完「新建文件夹」可以直接
+   * 打字，不用再去找它、再右键重命名。
+   */
+  const openDesktopBackgroundMenu = useCallback(
+    (extended: boolean): void => {
+      // V90：接管态的桌面空白右键**转发给 Explorer 自己的桌面视图**，弹出它的
+      // **完整原生菜单**（查看 / 排序方式 / 刷新 / 撤销 / 完整的 ShellNew「新建」14 项）。
+      //
+      // 用户 10-08 23:01 拿两张图质问「这是你搞得右键菜单，你到底能不能实现原始功能」
+      // —— 对比的就是「退出接管后的原生菜单（图1，齐全）」vs「接管态我们复刻的菜单
+      // （图2，只有新建两项，连查看/排序/刷新都没有）」。那两块钱**不经过 IContextMenu**，
+      // 复刻永远追不平，所以改成转发（详见 `shell_menu::show_desktop_view_context_menu`）。
+      //
+      // 命令在菜单**收起后**才 resolve：
+      //   · 原生路径（首选）→ 回 `null`：用户点了什么我们不知道，做**增量对账** ——
+      //     只把新增项送进竖条 + 原地改名，**只有出现删除 / 改名才重排格子**
+      //     （单纯新建绝不整层 refresh，那才是用户抱怨的「卡 + 整体刷新」）；
+      //   · 复刻菜单回退路径 → 回 `CreatedItem`：直接知道建了什么，省掉对账。
+      void (async () => {
+        // 先记快照：菜单期间可能有轮询先把新文件收进快照，靠「前 / 后 diff」才不会漏判。
+        const before = new Set(looseSnapRef.current.paths);
+        let created: { path: string; name: string } | null = null;
+        try {
+          created = await ipc.shellDesktopBackgroundMenu(extended);
+        } catch (error) {
+          showHint((error as Error).message);
+          return;
+        }
+        await fetchLoose(false).catch(() => undefined);
+        if (created !== null) {
+          // 回退路径（复刻菜单）：命令直接告诉我们建了什么，不用 diff。
+          beginItemRename(created.path, created.name);
+          return;
+        }
+        const after = looseSnapRef.current.paths;
+        const added = after.filter((p) => !before.has(p));
+        const removed = [...before].filter((p) => !after.includes(p));
+        // 有删除 / 改名才需要重建格子；单纯新建只进竖条 —— 不触发整层重排。
+        if (removed.length > 0) {
+          await refresh().catch(() => undefined);
+        }
+        const only = added.length === 1 ? added[0] : undefined;
+        if (only !== undefined) {
+          beginItemRename(only, only.split(/[\\/]/).pop() ?? only);
+        }
+      })();
+    },
+    [beginItemRename, fetchLoose, refresh, showHint],
+  );
+
+  /** F2 改名当前选中的条目（Explorer 的键盘习惯） */
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'F2') {
+        return;
+      }
+      const target = event.target as HTMLElement | null;
+      if (target?.closest?.('input,[contenteditable="true"]')) {
+        return; // 正在打字，F2 归输入框
+      }
+      const first = selectedPathsRef.current.values().next().value as string | undefined;
+      if (first === undefined) {
+        return;
+      }
+      event.preventDefault();
+      beginItemRename(first, first.split(/[\\/]/).pop() ?? first);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [beginItemRename]);
 
   useEffect(() => {
     void refresh().catch((error: Error) => showHint(error.message));
@@ -1058,9 +1498,10 @@ export function GridOverlay(): React.JSX.Element {
     if (report.itemsAdded > 0 || report.pruned > 0) {
       await refresh();
     }
-    // 「未归类」竖条跟着桌面根目录走：桌面多了 / 少了文件都要重算（很便宜，一次扫描）
-    refreshLoose();
-  }, [refresh, refreshLoose]);
+    // 「未归类」竖条跟着桌面根目录走（很便宜，一次扫描）；
+    // 新文件要播报 + 让竖条新占的宽把格子挤开（V84，见 fetchLoose 的注释）
+    await fetchLoose(true);
+  }, [fetchLoose, refresh]);
 
   useEffect(() => {
     if (!isTauri()) {
@@ -1123,13 +1564,12 @@ export function GridOverlay(): React.JSX.Element {
     if (!isTauri()) {
       return;
     }
-    // 启动期已接管（overlay_visible=1）→ 内容展开；否则只常驻工具栏。
-    void ipc
-      .gridOverlayStatus()
-      .then((status) => setContentHidden(!status.engaged))
-      .catch(() => undefined);
-    // 托盘「桌面整理：显示/隐藏」切换时，Rust 会向本窗发事件，保持前后端一致。
+    // ⚠️ V79 顺序很重要：**先注册监听，再查一次状态**。
+    // 反过来的话，「查询在途时后端刚好广播了一次」就会丢 —— 于是界面停在初值上，
+    // 而初值是「收起」，用户就会看到一个收起不了的（或打不开的）桌面。
+    // 先监听后查询 + 后端每条路都广播 = 两个来源互为兜底，任何时序都能收敛。
     let unlisten: (() => void) | null = null;
+    let cancelled = false;
     void (async () => {
       try {
         const { getCurrentWindow } = await import('@tauri-apps/api/window');
@@ -1139,8 +1579,20 @@ export function GridOverlay(): React.JSX.Element {
       } catch {
         /* 事件监听失败不影响工具栏使用 */
       }
+      // 启动期已接管（overlay_visible=1）→ 内容展开；否则只常驻工具栏。
+      // 查询放在监听之后，且以这一份为准（它是唯一真源 `overlay_visible` 的快照）。
+      if (cancelled) {
+        return;
+      }
+      try {
+        const status = await ipc.gridOverlayStatus();
+        setContentHidden(!status.engaged);
+      } catch {
+        /* 查不到就保持「收起」—— 用户仍可从工具栏点「开启桌面整理」 */
+      }
     })();
     return () => {
+      cancelled = true;
       unlisten?.();
     };
   }, []);
@@ -1372,10 +1824,22 @@ export function GridOverlay(): React.JSX.Element {
         height: rect.height * scaleFactor,
       });
     }
+    // V89：接管桌面后，桌面空白区右键必须归 Handy 的菜单（不再穿透给 Explorer 触发借出 / 翻白）。
+    // 上报「整窗」命中区，让 Rust 的命中轮询认为光标始终命中 → 窗口始终可交互 → 右键落到根画布
+    // 的 onContextMenu，由我们弹原生背景菜单。仅在接管且内容可见时开启；其它情况保持穿透。
+    if (takeover?.enabled === true && !contentHidden) {
+      regions.push({
+        x: 0,
+        y: 0,
+        width: window.innerWidth * scaleFactor,
+        height: window.innerHeight * scaleFactor,
+      });
+    }
     void ipc.gridOverlayUpdateRegions(regions).catch(() => undefined);
-    // regionsKey 已覆盖 boxes / 菜单几何变化；contentHidden 翻转时要重算命中区（只留工具栏）
+    // regionsKey 已覆盖 boxes / 菜单几何变化；contentHidden / takeover 翻转时要重算命中区
+    // （contentHidden=false + 接管态 → 整窗命中区开启，桌面空白右键归 Handy 菜单）
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [regionsKey, scaleFactor, contentHidden]);
+  }, [regionsKey, scaleFactor, contentHidden, takeover]);
 
   /**
    * 右键菜单开着期间**强制整窗可交互**（V47）。
@@ -1960,6 +2424,10 @@ export function GridOverlay(): React.JSX.Element {
         cancelled: false,
         item: seed.item,
         loose: seed.loose,
+        // V86：修饰键在按下那一刻定格（松手时按它解释「选择点击」）；
+        // batch 在越过阈值那一刻才算（要用最新的选中集合）。
+        mods: { ctrl: event.ctrlKey || event.metaKey, shift: event.shiftKey },
+        batch: [],
       };
       // ⚠️ 按下就显式保持可交互，**不能等越过阈值再做**：挂件窗平时是 `ignore_cursor_events`
       // 穿透态，靠 Rust 的光标轮询在「指针进入盒子矩形」时临时开放。若指针在阈值内就滑出了
@@ -2055,19 +2523,34 @@ export function GridOverlay(): React.JSX.Element {
         // 越过阈值 —— 到这一刻才是真的在拖：
         // 进入拖拽态（根画布转可交互，由 `beginDragSession` 按下时就已置位）+ 出预览
         session.active = true;
+        // V86：多选拖拽 —— 拖的若是**已选中**的一项，整个选中集合一起走
+        const sel = selectedPathsRef.current;
+        if (session.item !== null) {
+          session.batch =
+            sel.has(session.item.filePath) && sel.size > 1
+              ? [...sel]
+              : [session.item.filePath];
+        } else if (session.loose !== null) {
+          const loosePaths = new Set((looseStateRef.current?.items ?? []).map((e) => e.path));
+          session.batch =
+            sel.has(session.loose.path) && sel.size > 1
+              ? [...sel].filter((p) => loosePaths.has(p))
+              : [session.loose.path];
+        } else {
+          session.batch = [];
+        }
         itemDragRef.current =
           session.item === null
             ? null
             : { item: session.item, itemId: session.item.id, fromBoxId: session.item.boxId };
         looseDragRef.current = session.loose;
         setItemDragging(true);
-        setDragGhost(
-          session.item !== null
-            ? { label: session.item.displayName, path: session.item.filePath }
-            : session.loose === null
-              ? null
-              : { label: session.loose.name, path: session.loose.path },
-        );
+        const ghostPath = session.item?.filePath ?? session.loose?.path ?? '';
+        const ghostLabel =
+          session.batch.length > 1
+            ? `${session.batch.length} 个项目`
+            : (session.item?.displayName ?? session.loose?.name ?? '');
+        setDragGhost(ghostPath !== '' ? { label: ghostLabel.replace(/\.lnk$/i, ''), path: ghostPath } : null);
       }
       // 预览位置直接改 `style`：每帧都 setState 会把整个挂件层重渲染一遍
       const ghost = dragGhostRef.current;
@@ -2088,18 +2571,51 @@ export function GridOverlay(): React.JSX.Element {
       dragSessionRef.current = null;
       session.x = event.clientX;
       session.y = event.clientY;
-      const { active, cancelled, item, loose: looseEntry } = session;
+      const { active, cancelled, item, loose: looseEntry, mods, batch } = session;
       resetDragVisuals();
-      // 没越过阈值 = 普通单击 / 双击；按过 Esc = 取消 —— 两种都什么都不做
+      // 没越过阈值 = 一次点击；按过 Esc = 取消。
+      // V86：没取消的点击是一次「选择点击」（对齐原生桌面：Ctrl 点选 / Shift 范围 / 单选）。
       if (!active || cancelled) {
+        if (!cancelled && item !== null) {
+          const list = itemsRef.current[item.boxId] ?? [];
+          const index = list.findIndex((i) => i.id === item.id);
+          if (index >= 0) {
+            applySelectionClick(item.boxId, index, item.filePath, mods);
+          }
+        } else if (!cancelled && looseEntry !== null) {
+          const list = looseStateRef.current?.items ?? [];
+          const index = list.findIndex((e) => e.path === looseEntry.path);
+          if (index >= 0) {
+            applySelectionClick(-1, index, looseEntry.path, mods);
+          }
+        }
         return;
       }
+      // V86：多选批量操作的路径 → 显示名（快捷入口要展示名字）
+      const nameOf = (path: string): string => {
+        for (const list of Object.values(itemsRef.current)) {
+          const hit = list.find((i) => i.filePath === path);
+          if (hit !== undefined) {
+            return hit.displayName;
+          }
+        }
+        const looseHit = looseStateRef.current?.items.find((e) => e.path === path);
+        return looseHit?.name ?? (path.split(/[\\/]/).pop() ?? path);
+      };
+      // V86：把 batch 里每条路径换回它的条目对象（批量移动 / 移出用）
+      const itemByPath = (path: string): GridItem | null => {
+        for (const list of Object.values(itemsRef.current)) {
+          const hit = list.find((i) => i.filePath === path);
+          if (hit !== undefined) {
+            return hit;
+          }
+        }
+        return null;
+      };
       if (hitDock(event.clientX, event.clientY)) {
-        // 拖到右下角「快捷入口」= 收藏成一条快捷方式（文件本身不动）
-        if (item !== null) {
-          addDockLink(item.displayName, item.filePath);
-        } else if (looseEntry !== null) {
-          addDockLink(looseEntry.name, looseEntry.path);
+        // 拖到右下角「快捷入口」= 收藏成快捷方式（文件本身不动）；多选 = 整批收藏
+        for (const path of batch) {
+          addDockLink(nameOf(path), path);
         }
         return;
       }
@@ -2108,12 +2624,27 @@ export function GridOverlay(): React.JSX.Element {
         // 落在任何格子之外 = 移出格子 → 自动回到左侧「未归类」竖条
         // （用户 V41 原话：「用户直接从格子里面移除自动规划到不整理的部分即可」）
         if (boxId === null) {
-          removeItem(item);
+          for (const path of batch) {
+            const it = itemByPath(path);
+            if (it !== null) {
+              removeItem(it);
+            }
+          }
         } else {
-          moveItem({ item, itemId: item.id, fromBoxId: item.boxId }, boxId);
+          for (const path of batch) {
+            const it = itemByPath(path) ?? item;
+            moveItem({ item: it, itemId: it.id, fromBoxId: it.boxId }, boxId);
+          }
         }
+        // 移动 / 移出之后选中集合已过时，清掉（对齐原生：拖走就不再保持选中）
+        selectedPathsRef.current = new Set();
+        setSelectedPaths(selectedPathsRef.current);
       } else if (looseEntry !== null && boxId !== null) {
-        addItem(boxId, looseEntry.path);
+        for (const path of batch) {
+          addItem(boxId, path);
+        }
+        selectedPathsRef.current = new Set();
+        setSelectedPaths(selectedPathsRef.current);
       }
       // 竖条条目落在空白处 = 它本来就在竖条里，什么都不用做
     };
@@ -2130,10 +2661,15 @@ export function GridOverlay(): React.JSX.Element {
       resetDragVisuals();
     };
 
-    /** 拖拽中按 Esc = 取消本次拖拽 */
+    /** 拖拽中按 Esc = 取消本次拖拽；没在拖拽时按 Esc = 清除选中（对齐原生桌面） */
     const onKey = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape' && dragSessionRef.current !== null) {
-        dragSessionRef.current.cancelled = true;
+      if (event.key === 'Escape') {
+        if (dragSessionRef.current !== null) {
+          dragSessionRef.current.cancelled = true;
+        } else if (selectedPathsRef.current.size > 0) {
+          selectedPathsRef.current = new Set();
+          setSelectedPaths(selectedPathsRef.current);
+        }
       }
     };
 
@@ -2147,7 +2683,7 @@ export function GridOverlay(): React.JSX.Element {
       window.removeEventListener('keydown', onKey);
       document.documentElement.removeEventListener('mouseleave', onAbort);
     };
-  }, [addDockLink, addItem, hitBoxId, hitDock, moveItem, removeItem, resetDragVisuals]);
+  }, [addDockLink, addItem, applySelectionClick, hitBoxId, hitDock, moveItem, removeItem, resetDragVisuals]);
 
   useEffect(() => {
     if (!isTauri()) {
@@ -2214,75 +2750,41 @@ export function GridOverlay(): React.JSX.Element {
     };
   }, [hitBoxId, addItem, addDockLink, hitDock, showHint]);
 
-  // —— 挂件窗几何持久化（moved / resized 停稳 500ms 后写库；同 NoteWindow 方案） ——
+  // —— 窗口几何：**不在这里管**（V83）——
+  //
+  // 这里曾经有一段「moved / resized 停稳 500ms → `gridGeometrySet` 写库」的持久化。
+  // 它有个致命前提：`scaleFactor` 是**挂载时取一次**的。接上第二块屏 / 改系统缩放后，
+  // 系统会移动或改掉我们的窗口尺寸（触发 `resized`），那次换算却还在用过期的 DPI
+  // —— 于是把**错值**写进 `grid_meta.overlay_geometry`，而后端开窗是「DB 优先」：
+  // 窗口尺寸从此**永久锁死**。用户 09-28 的双屏截图就是这么来的
+  // （内容全挤在 1138×608 的角落里，屏幕右侧近 800px、下方 400 多 px 全空）。
+  //
+  // 现在几何完全由 Rust 侧实时决定（`commands::grid::sync_overlay_bounds`：
+  // 严格等于**当前主显示器工作区**，开窗时对齐 + 轮询线程每 1 秒复核），前端只负责
+  // 收到 `grid:bounds-changed` 后重排一次。
+  //
+  // ⚠️ **不要再把几何写回数据库**：窗口是 `resizable(false)` + `decorations(false)`，
+  // 用户没有任何调整它的途径 —— 持久化它只有害处。（Rust 侧连那条历史脏数据都清了：
+  // `drop_legacy_geometry`。）
 
+  // V83：显示器配置变了 —— Rust 把窗口贴回新的主显示器工作区后广播这条，这里重排一次
+  // 让格子立刻铺满新的可用区。没有它的话，用户插上/拔掉外接屏后得自己去点「整理」。
   useEffect(() => {
-    if (!isTauri()) {
-      return;
-    }
-    let cancelled = false;
-    let timer: number | undefined;
-    let unlisteners: Array<() => void> = [];
+    let unlisten: (() => void) | null = null;
     void (async () => {
       try {
         const { getCurrentWindow } = await import('@tauri-apps/api/window');
-        const win = getCurrentWindow();
-        const sf = await win.scaleFactor();
-        const initialPos = (await win.outerPosition()).toLogical(sf);
-        const initialSize = (await win.innerSize()).toLogical(sf);
-        let geo = {
-          x: initialPos.x,
-          y: initialPos.y,
-          width: initialSize.width,
-          height: initialSize.height,
-        };
-        const scheduleSave = (): void => {
-          if (timer !== undefined) {
-            window.clearTimeout(timer);
-          }
-          timer = window.setTimeout(() => {
-            if (!cancelled) {
-              void ipc
-                .gridGeometrySet({
-                  x: Math.round(geo.x),
-                  y: Math.round(geo.y),
-                  width: Math.round(geo.width),
-                  height: Math.round(geo.height),
-                })
-                .catch(() => undefined);
-            }
-          }, GEOMETRY_SAVE_DEBOUNCE_MS);
-        };
-        const onMoved = await win.onMoved(({ payload }) => {
-          const pos = payload.toLogical(sf);
-          geo = { ...geo, x: pos.x, y: pos.y };
-          scheduleSave();
+        unlisten = await getCurrentWindow().listen('grid:bounds-changed', () => {
+          relayoutSoon();
         });
-        const onResized = await win.onResized(({ payload }) => {
-          const size = payload.toLogical(sf);
-          geo = { ...geo, width: size.width, height: size.height };
-          scheduleSave();
-        });
-        if (cancelled) {
-          onMoved();
-          onResized();
-          return;
-        }
-        unlisteners = [onMoved, onResized];
       } catch {
-        /* 几何持久化失败不影响挂件使用 */
+        /* 监听失败不影响其余功能：下次点「整理」照样按新几何排 */
       }
     })();
     return () => {
-      cancelled = true;
-      if (timer !== undefined) {
-        window.clearTimeout(timer);
-      }
-      for (const unlisten of unlisteners) {
-        unlisten();
-      }
+      unlisten?.();
     };
-  }, []);
+  }, [relayoutSoon]);
 
   // —— 工具栏动作 ——
 
@@ -2624,19 +3126,34 @@ export function GridOverlay(): React.JSX.Element {
       // 不再去开独立主窗口（用户：「工具线弹出框就够了吧…没有必要还有一个多一个界面」）。
       // 常量在 Rust `commands/grid.rs`：`PANEL_ACTION_*` / `PANEL_OPEN_PREFIX`。
       if (action === 'panel:toggle-tools') {
-        setSidePanel((prev) => (prev === null ? { tab: 'tools', entry: null } : null));
+        setSidePanel((prev) => {
+          if (prev === null) {
+            // 显示工具箱 → 抬到当前屏幕最前（V72）
+            void ipc.panelRaiseFront();
+            return { tab: 'tools', entry: null };
+          }
+          // 收起工具箱 → 复位成不挡工作的桌面挂件（V72）
+          void ipc.panelSettleDesktop();
+          return null;
+        });
         return;
       }
       if (action === 'panel:tools') {
         openPanel('tools', null);
+        // 工具箱快捷调出后应立即可见、可操作（V72）
+        void ipc.panelRaiseFront();
         return;
       }
       if (action === 'panel:settings') {
         openPanel('settings', null);
+        // 从托盘/快捷键打开设置面板同样应置前（V72）
+        void ipc.panelRaiseFront();
         return;
       }
       if (action.startsWith('panel:open:')) {
         openTarget(action.slice('panel:open:'.length));
+        // 在面板里直接打开某条目/工具 → 置前（V72）
+        void ipc.panelRaiseFront();
         return;
       }
 
@@ -2702,6 +3219,27 @@ export function GridOverlay(): React.JSX.Element {
       unlisten?.();
     };
   }, [takeDesktopAction]);
+
+  // V81：桌面右键弹的是**系统原生菜单**，Rust 在菜单期间会把桌面暂时还给系统
+  // （否则「新建文件夹」建好了也看不见、改名编辑框在隐藏的视图里点不到）。
+  // 菜单收起、Rust 收回桌面后广播 `grid:desktop-changed` —— 这里立刻重扫一次：
+  // 新建出来的文件必须马上出现在「未归类」竖条里，否则用户只会认为「建了没生效」。
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    void (async () => {
+      try {
+        const { getCurrentWindow } = await import('@tauri-apps/api/window');
+        unlisten = await getCurrentWindow().listen('grid:desktop-changed', () => {
+          void syncDesktop();
+        });
+      } catch {
+        /* 监听失败不影响其余功能：周期对账照旧会跑 */
+      }
+    })();
+    return () => {
+      unlisten?.();
+    };
+  }, [syncDesktop]);
 
   /** 手动对账一次（清掉文件已不存在的失效登记，顺带刷新未归类竖条） */
   const syncNow = useCallback((): void => {
@@ -2854,25 +3392,38 @@ export function GridOverlay(): React.JSX.Element {
        * （见下方竖条的 `overflow-y-auto`）。桌面层本身只负责「把东西画在屏幕上」，
        * 它一旦能滚，用户就永远对不齐自己的桌面。 */
       className="fixed inset-0 select-none overflow-hidden"
-      style={{ pointerEvents: itemDragging ? 'auto' : 'none' }}
-      onContextMenu={async (event) => {
-        // V53：桌面空白处右键 → 弹原生 Windows 右键菜单（不覆盖）。
-        // 用户 09-19：「桌面把原生桌面右键菜单都搞没有了」。
-        // 复用已有的 `ipc.shellContextMenu(path)` —— 传桌面文件夹路径，Shell 会弹出
-        // 原生桌面右键菜单（刷新/粘贴/新建/排序/个性化等）。
-        // V58：Shift 照样透传（在 Explorer 里 Shift + 空白处右键 = 扩展菜单），
-        // 与文件/文件夹那两处保持同一套语义 —— 不一致本身就是「改行为」。
-        if (contentHidden) {
-          event.preventDefault();
+      style={{
+        // V89：接管桌面后，桌面空白区的右键必须归 Handy 的菜单（不再穿透给 Explorer
+        // 触发借出 / 桌面翻白）。接管且内容可见时让整窗可交互；拖拽期间本来就要可交互；
+        // 其它情况（没接管 / 内容收起）保持穿透，原生图标与桌面照常可交互。
+        pointerEvents:
+          itemDragging || (takeover?.enabled === true && !contentHidden)
+            ? 'auto'
+            : 'none',
+      }}
+      onContextMenu={(event) => {
+        // V87：**桌面 / 格子空白处右键 = 我们自己弹出原生背景菜单**。
+        //
+        // 之前（V81–V86）这里只是兜底：接管态下右键会**穿透**到被隐藏的原生图标视图，
+        // 由 Explorer 自己弹菜单，我们旁听并在菜单期间「把桌面借出去」。那套补丁要赌
+        // `#32768` 的类名语义（你这台 Win11 25H2 的新式菜单根本不叫这个名字）、要等
+        // 「安静 1.5s」、要 120s 超时兜底 —— 用户看到的仍然是「卡一下 / 要刷新 /
+        // 只有第一次成功」。
+        //
+        // 现在换成 `IShellFolder::CreateViewObject` 给的**背景菜单**：新建 / 粘贴 /
+        // 下一个桌面背景 / 显示设置 / 个性化 + 我们注入的 Handy 子菜单 + 全部第三方
+        // 扩展，由我们弹、由 Shell 执行。见 `openDesktopBackgroundMenu`。
+        //
+        // **格子空白处同样走这里** —— 条目与标题栏各自 `stopPropagation`，格子其余
+        // 位置的右键会冒泡上来。这正是腾讯的行为：**在格子里右键空白也能新建**。
+        event.preventDefault();
+        if (event.ctrlKey) {
+          // Ctrl + 右键 = Handy 自己的菜单（对齐条目那条约定：Ctrl+右键在 Explorer
+          // 里没有任何含义，抢它不改变任何原生行为）
           setMenuDesktop({ x: event.clientX, y: event.clientY });
-        } else {
-          event.preventDefault();
-          try {
-            await ipc.shellContextMenu('::{00021400-0000-0000-C000-000000000046}\\Desktop', event.shiftKey);
-          } catch {
-            setMenuDesktop({ x: event.clientX, y: event.clientY });
-          }
+          return;
         }
+        openDesktopBackgroundMenu(event.shiftKey);
       }}
     >
       {/* 拖拽预览（V59）：整个内部拖拽已改成指针拖拽，系统的拖拽预览（那个跟着光标跑的
@@ -2924,7 +3475,7 @@ export function GridOverlay(): React.JSX.Element {
           style={{ width: contentZoneRight }}
         >
           {visibleBoxes.map((box) => {
-        const boxItems = items[box.id] ?? [];
+        const boxItems = sortBoxItems(items[box.id] ?? [], boxSortModes[box.id] ?? 'manual');
         const isDropTarget = dropTargetId === box.id;
         const isWidget = box.kind === 'note';
         // V52：每格子独立锁定——shadow 外层 editMode 为本格子是否解锁
@@ -3019,6 +3570,11 @@ export function GridOverlay(): React.JSX.Element {
               }
               if (target?.closest('button,input,[contenteditable="true"]')) {
                 return;
+              }
+              // V86：空白处按下 = 清除选中（对齐原生桌面「点空白取消选择」）
+              if (event.button === 0 && selectedPathsRef.current.size > 0) {
+                selectedPathsRef.current = new Set();
+                setSelectedPaths(selectedPathsRef.current);
               }
               startMove(event, box);
             }}
@@ -3224,13 +3780,29 @@ export function GridOverlay(): React.JSX.Element {
                 <div
                   key={item.id}
                   data-grid-item="1"
-                  title={`${item.displayName}\n${item.filePath}\n双击打开 · 拖到其他格子 · 拖出格子移入左侧「未归类」竖条 · Ctrl+右键更多操作`}
+                  title={`${item.displayName}\n${item.filePath}\n双击打开 · 拖到其他格子 · 拖出格子移入左侧「未归类」竖条 · Ctrl/Shift 多选 · F2 或单击两次改名 · Ctrl+右键更多操作`}
                   onMouseDown={(event) => {
                     // 不许冒泡：否则会同时触发「拖动整个格子」（V56 起格子任意空白处可拖）
                     event.stopPropagation();
                     // V59：改成指针拖拽 —— 这里只记起点，越过阈值才算拖拽，
                     // 单击 / 双击照旧。见 `DRAG_THRESHOLD` 上方的根因说明。
                     beginItemDrag(item, event);
+                  }}
+                  onClick={() => {
+                    // V87：Explorer 的「**单击两次**改名」—— 两次单击落在同一个条目上，
+                    // 间隔要比双击慢（Windows 双击阈值 500ms）又不至于算两次独立点击。
+                    const now = Date.now();
+                    const last = lastClickRef.current;
+                    if (
+                      last.path === item.filePath &&
+                      now - last.at > 350 &&
+                      now - last.at < 1500
+                    ) {
+                      lastClickRef.current = { path: '', at: 0 };
+                      beginItemRename(item.filePath, item.displayName);
+                      return;
+                    }
+                    lastClickRef.current = { path: item.filePath, at: now };
                   }}
                   onDoubleClick={() => openItem(item)}
                   onContextMenu={(event) => {
@@ -3252,19 +3824,46 @@ export function GridOverlay(): React.JSX.Element {
                     }
                     setMenuItem({ item, x: event.clientX, y: event.clientY });
                   }}
-                  className={isListView
+                  className={((isListView
                     ? "group relative flex cursor-pointer items-center gap-2.5 rounded-xl px-2 py-1.5 transition-all duration-200 hover:bg-white/10 hover:shadow-[0_0_0_1px_rgba(255,255,255,0.08)]"
-                    : "group relative flex cursor-pointer flex-col items-center justify-center gap-1 overflow-hidden rounded-xl p-1.5 transition-all duration-300 hover:bg-white/10 hover:shadow-[0_6px_18px_rgba(91,140,255,0.2),0_0_0_1px_rgba(255,255,255,0.1),inset_0_1px_0_rgba(255,255,255,0.08)] hover:scale-[1.02]"
-                  }
+                    : "group relative flex cursor-pointer flex-col items-center justify-center gap-1 overflow-hidden rounded-xl p-1.5 transition-all duration-300 hover:bg-white/10 hover:shadow-[0_6px_18px_rgba(91,140,255,0.2),0_0_0_1px_rgba(255,255,255,0.1),inset_0_1px_0_rgba(255,255,255,0.08)] hover:scale-[1.02]")
+                    + (selectedPaths.has(item.filePath)
+                      // V86：多选高亮 —— 与系统选中语义对齐（蓝色内描边 + 淡蓝底）
+                      ? " bg-sky-500/20 !shadow-none ring-2 ring-inset ring-sky-400/80"
+                      : ""))}
                   style={isListView ? undefined : { aspectRatio: '1 / 1', minHeight: iconSize + 32 }}
                 >
                   <FileIcon path={item.filePath} size={isListView ? Math.round(iconSize * 0.5) : iconSize} />
-                  <span className={isListView
-                    ? "min-w-0 flex-1 truncate text-left text-[12px] font-medium text-white [text-shadow:0_1px_3px_rgba(0,0,0,0.95)]"
-                    : "w-full truncate text-center text-[10px] font-medium leading-tight text-neutral-200 [text-shadow:0_1px_2px_rgba(0,0,0,0.9)]"
-                  }>
-                    {item.displayName.replace(/\.lnk$/i, '')}
-                  </span>
+                  {renamingItemPath === item.filePath ? (
+                    <input
+                      autoFocus
+                      value={itemRenameDraft}
+                      onChange={(event) => setItemRenameDraft(event.target.value)}
+                      onBlur={commitItemRename}
+                      onClick={(event) => event.stopPropagation()}
+                      onMouseDown={(event) => event.stopPropagation()}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') {
+                          commitItemRename();
+                        } else if (event.key === 'Escape') {
+                          setRenamingItemPath(null);
+                          setItemRenameDraft('');
+                        }
+                      }}
+                      className={
+                        isListView
+                          ? 'min-w-0 flex-1 rounded bg-neutral-900/95 px-1 text-left text-[12px] text-white outline-none ring-1 ring-sky-400/70'
+                          : 'w-full rounded bg-neutral-900/95 px-1 text-center text-[10px] leading-tight text-white outline-none ring-1 ring-sky-400/70'
+                      }
+                    />
+                  ) : (
+                    <span className={isListView
+                      ? "min-w-0 flex-1 truncate text-left text-[12px] font-medium text-white [text-shadow:0_1px_3px_rgba(0,0,0,0.95)]"
+                      : "w-full truncate text-center text-[10px] font-medium leading-tight text-neutral-200 [text-shadow:0_1px_2px_rgba(0,0,0,0.9)]"
+                    }>
+                      {item.displayName.replace(/\.lnk$/i, '')}
+                    </span>
+                  )}
                 </div>
                 );
               })}
@@ -3335,27 +3934,24 @@ export function GridOverlay(): React.JSX.Element {
              这条现在由指针拖拽主循环在 mouseup 里处理（落点在所有格子之外即移出），
              不需要竖条自己再接一层。落点高亮仍然靠 `dropTargetId`。 */
 
-          /* ⚠️ `overflow-y-auto` 不是装饰，是**必须**的（V59 追加）。
+          /* ⚠️ `overflow-y-auto` 不是装饰，是**必须**的（V59 追加；V86 起是兜底）。
            *
            * Rust `loose_strip_rect` 的行数是这么定的：先按「一列放得下几行」(`rows_per_col`)
-           * 反推需要几列，再把列数**夹在 `LOOSE_MAX_COLUMNS = 4`**（再多就把桌面左半边吃掉了，
-           * 分类格会没地方站）。列数一旦被夹住，`rows = ceil(n / 4)` 就会大于 `rows_per_col`
-           * —— 此时 Rust 把高度 `h` 夹到 `avail_h` 封顶（不允许越出工作区下边界），
-           * 而**前端渲染的行数仍然是 `ceil(n / columns)`**，于是内容天然比区域高。
-           *
-           * 没有这个 `overflow-y-auto`，多出来的那几行就会**从竖条里溢出去**，被上面根画布的
-           * 可滚动溢出区收走 —— 又会把整个桌面变成可滚的。小屏上 `avail_h` 更小、
-           * `rows_per_col` 更少，更容易撞到这条，这就是用户说的「另一个电脑有问题」。
-           *
-           * 口径与收纳格一致：**装不下就在容器内部滚**（用户 09-21 第 ③ 条要的就是这个行为），
-           * 而不是把抽屉撑破。 */
+           * 反推需要几列，再把列数夹在「**竖条最多占工作区一半宽**」内（V86 起不再拍死 4 列
+           * —— 那会把多出的条目全藏进内部滚动区，用户 09-30 抱怨的「下面空了」正是它）。
+           * 正常条目数下 `rows = ceil(n / columns) ≤ rows_per_col`，**没有滚动**、每列满高；
+           * 列数撞到宽度上限时（极端条目数），`rect.h` 封顶到 `avail_h`，前端渲染的行数
+           * 仍然按 `ceil(n / columns)` —— 内容天然比区域高，由这个 `overflow-y-auto`
+           * 在竖条内部滚（与收纳格「装不下就内部出滚动条」同一口径），**不许**溢出到
+           * 桌面根画布（V59 的回归就是这么来的）。 */
           className="absolute grid content-start gap-1.5 overflow-y-auto grid-scroll"
         >
           {loose.items.map((entry) => (
             <div
               key={entry.path}
               data-grid-item="1"
-              title={`${entry.name}\n${entry.path}\n双击打开 · 拖进格子收纳 · Ctrl+右键更多操作`}
+              data-path={entry.path}
+              title={`${entry.name}\n${entry.path}\n双击打开 · 拖进格子收纳 · Ctrl/Shift 多选 · Ctrl+右键更多操作`}
               onMouseDown={(event) => {
                 event.stopPropagation();
                 beginLooseDrag(entry, event);
@@ -3370,23 +3966,71 @@ export function GridOverlay(): React.JSX.Element {
                 setMenuBox(null);
                 setMenuItem(null);
                 // V58：Shift 让回系统的扩展菜单（CMF_EXTENDEDVERBS），Handy 自己的
-                // 菜单改用 Ctrl + 右键。系统图标（此电脑 / 回收站）没有文件路径，
-                // Shell 给不了菜单，只能走我们自己的。
-                if (!event.ctrlKey && !entry.isSystem) {
+                // 菜单改用 Ctrl + 右键。
+                //
+                // V82：**系统图标（此电脑 / 回收站）也交回原生**。
+                //
+                // 这里原来写着「系统图标没有文件路径，Shell 给不了菜单，只能走我们自己的」
+                // —— 那句话是**错的**。用户 09-27 贴图报「我的电脑都变成这样了」，正是
+                // 右键「此电脑」弹出的是我们复刻的菜单（只有 打开 / 打开文件位置）。
+                // 系统入口的 `path` 就是 shell CLSID（`::{20D04FE0-…}` 等），
+                // `SHCreateItemFromParsingName` 认得它：`cargo run --example menu_dump --`
+                // `"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}"` 实测拿到 **14 项**完整原生菜单
+                // （打开 / 管理 / 映射网络驱动器 / 创建快捷方式 / 删除 / 重命名 / 属性…）。
+                if (!event.ctrlKey) {
                   setMenuLoose(null);
                   void ipc
                     .shellContextMenu(entry.path, event.shiftKey)
-                    .catch((error: Error) => showHint(error.message));
+                    .catch(() => {
+                      // 极少数命名空间对象 Shell 确实给不出菜单 —— 这时才回落到
+                      // 我们自己的菜单（原来是无条件回落，现在降级成兜底）。
+                      setMenuLoose({ entry, x: event.clientX, y: event.clientY });
+                    });
                   return;
                 }
                 setMenuLoose({ entry, x: event.clientX, y: event.clientY });
               }}
-              className="group flex cursor-pointer flex-col items-center gap-1 rounded-xl p-1.5 transition-all duration-200 hover:bg-white/10 hover:shadow-[0_4px_16px_rgba(0,0,0,0.3),0_0_0_1px_rgba(255,255,255,0.08)]"
+              onClick={() => {
+                // V87：与格子条目同一套「单击两次改名」
+                const now = Date.now();
+                const last = lastClickRef.current;
+                if (last.path === entry.path && now - last.at > 350 && now - last.at < 1500) {
+                  lastClickRef.current = { path: '', at: 0 };
+                  beginItemRename(entry.path, entry.name);
+                  return;
+                }
+                lastClickRef.current = { path: entry.path, at: now };
+              }}
+              className={"group flex cursor-pointer flex-col items-center gap-1 rounded-xl p-1.5 transition-all duration-200 hover:bg-white/10 hover:shadow-[0_4px_16px_rgba(0,0,0,0.3),0_0_0_1px_rgba(255,255,255,0.08)]"
+                + (selectedPaths.has(entry.path)
+                  // V86：多选高亮（与格子条目同一套）
+                  ? " bg-sky-500/20 !shadow-none ring-2 ring-inset ring-sky-400/80"
+                  : "")}
             >
               <LooseIcon entry={entry} size={loose.iconSize} />
-              <span className="w-full truncate text-center text-[11px] font-medium leading-tight text-white [text-shadow:0_1px_3px_rgba(0,0,0,0.95)]">
-                {entry.name.replace(/\.lnk$/i, '')}
-              </span>
+              {renamingItemPath === entry.path ? (
+                <input
+                  autoFocus
+                  value={itemRenameDraft}
+                  onChange={(event) => setItemRenameDraft(event.target.value)}
+                  onBlur={commitItemRename}
+                  onClick={(event) => event.stopPropagation()}
+                  onMouseDown={(event) => event.stopPropagation()}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                      commitItemRename();
+                    } else if (event.key === 'Escape') {
+                      setRenamingItemPath(null);
+                      setItemRenameDraft('');
+                    }
+                  }}
+                  className="w-full rounded bg-neutral-900/95 px-1 text-center text-[11px] leading-tight text-white outline-none ring-1 ring-sky-400/70"
+                />
+              ) : (
+                <span className="w-full truncate text-center text-[11px] font-medium leading-tight text-white [text-shadow:0_1px_3px_rgba(0,0,0,0.95)]">
+                  {entry.name.replace(/\.lnk$/i, '')}
+                </span>
+              )}
             </div>
           ))}
         </div>
@@ -3461,6 +4105,22 @@ export function GridOverlay(): React.JSX.Element {
               >
                 重命名格子
               </button>
+              {/* V87：排序方式（对齐 Explorer「排序方式」）—— 只改这一格**怎么画**，
+                  不写回库里的 `sort`，用户的自定义顺序随时能切回来。 */}
+              {isFolder ? (
+                <button
+                  type="button"
+                  className={rowClass}
+                  title="点击切换：自定义顺序 → 按名称 → 按类型"
+                  onClick={() => {
+                    const target = box;
+                    setMenuBox(null);
+                    cycleBoxSortMode(target.id);
+                  }}
+                >
+                  排序方式：{BOX_SORT_LABELS[boxSortModes[box.id] ?? 'manual']}
+                </button>
+              ) : null}
               {isFolder ? (
                 <button
                   type="button"

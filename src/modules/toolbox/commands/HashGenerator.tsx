@@ -347,6 +347,7 @@ export function HashGenerator({ initialInput = '' }: CommandProps): React.JSX.El
   return (
     <CommandShell
       title="哈希计算"
+      onPaste={(t) => setText(t)}
       description="MD5 / SHA-1 / SHA-256 / SHA-384 / SHA-512，支持文本、文件与哈希校验"
       icon={<Hash className="h-4 w-4" />}
       onBack={shell.onBack}

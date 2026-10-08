@@ -267,6 +267,7 @@ export function CronDescriptor({ initialInput = '' }: CommandProps): React.JSX.E
   return (
     <CommandShell
       title="Cron 表达式解析"
+      onPaste={(t) => patch({ input: t })}
       description="标准 5 段（crontab / K8s）逐段编辑 · 中文描述 · 下次执行时间 · 反向生成"
       icon={<CalendarClock className="h-4 w-4" />}
       onBack={shell.onBack}

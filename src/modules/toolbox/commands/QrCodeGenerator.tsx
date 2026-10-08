@@ -373,6 +373,7 @@ export function QrCodeGenerator({ initialInput = '' }: CommandProps): React.JSX.
   return (
     <CommandShell
       title="二维码工具"
+      onPaste={(t) => setText(t)}
       description="文本 / URL / WiFi / 邮箱 / 电话生成二维码，支持图片解析"
       icon={<QrCode className="h-4 w-4" />}
       onBack={shell.onBack}

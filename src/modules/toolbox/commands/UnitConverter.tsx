@@ -147,6 +147,7 @@ export function UnitConverter({ initialInput = '' }: CommandProps): React.JSX.El
   return (
     <CommandShell
       title="单位换算"
+      onPaste={(t) => setValue(t)}
       description="长度 / 重量 / 数据存储 / 温度 换算"
       icon={<Scale className="h-4 w-4" />}
       onBack={shell.onBack}

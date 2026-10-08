@@ -10,7 +10,6 @@ import type {
   FileIconData,
   GridBox,
   GridBoxInput,
-  GridGeometry,
   GridItem,
   LooseArea,
   GridLayout,
@@ -24,6 +23,7 @@ import type {
   LegacyRootInfo,
   LogInfo,
   ReclaimReport,
+  CreatedItem,
 } from '@/types/grid';
 import type {
   VaultItem,
@@ -42,6 +42,17 @@ import type { Todo } from '@/core/data/todosService';
  * - 组件中**禁止**直接调用 `invoke`，一律经本模块；
  * - Rust 命令返回 `Result<T, String>`，此处统一归一为 `Error`，`message` 为中文可读信息。
  */
+/** 端口占用条目（与 `commands/misc.rs` 的 `PortEntry` 对应，camelCase） */
+export interface PortEntry {
+  protocol: string;
+  localAddress: string;
+  localPort: number;
+  remoteAddress: string;
+  state: string;
+  pid: number;
+  processName: string;
+}
+
 async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   // 浏览器预览模式：没有 Tauri 宿主，任何系统能力都不可用。
   // 统一抛出可读的降级文案，避免每个页面各自冒「Cannot read properties of undefined (reading 'invoke')」
@@ -268,12 +279,6 @@ export const ipc = {
   gridDesktopSync: (): Promise<DesktopSyncReport> => call<DesktopSyncReport>('grid_desktop_sync'),
   /** 某盒子的条目列表 */
   gridItemList: (boxId: number): Promise<GridItem[]> => call<GridItem[]>('grid_item_list', { boxId }),
-  /** 读取挂件窗几何（无记录返回 null） */
-  gridGeometryGet: (): Promise<GridGeometry | null> =>
-    call<GridGeometry | null>('grid_geometry_get'),
-  /** 持久化挂件窗几何（窗口 moved / resized 防抖后调用） */
-  gridGeometrySet: (geo: GridGeometry): Promise<void> =>
-    call<void>('grid_geometry_set', { x: geo.x, y: geo.y, width: geo.width, height: geo.height }),
   /** 交互期显式申请：true = 拖拽/缩放/重命名期间保持可交互；false = 交还光标命中轮询控制 */
   gridSetInteractive: (interactive: boolean): Promise<void> =>
     call<void>('grid_set_interactive', { interactive }),
@@ -306,6 +311,12 @@ export const ipc = {
    */
   gridTakePendingAction: (): Promise<string | null> =>
     call<string | null>('grid_take_pending_action'),
+  /** 把挂件窗（桌面工具箱面板）抬到当前屏幕最前（V72：工具箱快捷调出后应在最前） */
+  panelRaiseFront: (): Promise<void> => call<void>('panel_raise_front'),
+  /** 把挂件窗复位成「不抢焦点、锚定桌面」的常驻态（与 panelRaiseFront 配对，V72） */
+  panelSettleDesktop: (): Promise<void> => call<void>('panel_settle_desktop'),
+  /** 端口占用清单（协议 / 本地地址:端口 / 状态 / PID / 进程名），V72 工具箱「端口占用查询」 */
+  portOccupants: (): Promise<PortEntry[]> => call<PortEntry[]>('port_occupants'),
   /** 打开条目原文件（Rust 侧 shell 插件 open；本地路径不受前端 open 作用域限制） */
   gridOpenPath: (path: string): Promise<void> => call<void>('grid_open_path', { path }),
   /** 在资源管理器中定位该文件（V41 条目右键「打开文件位置」，explorer /select） */
@@ -323,6 +334,38 @@ export const ipc = {
    */
   shellContextMenu: (path: string, extended = false): Promise<void> =>
     call<void>('shell_context_menu', { path, extended }),
+
+  /**
+   * 弹出「桌面**背景**」的原生右键菜单，并把用户「新建」出来的项作为返回值带回（V87/V89）。
+   *
+   * 这是用户 10-08 那条质疑的正解：「我们只是把桌面上的图标整理移动到整齐的位置上，
+   * 你现在是直接把桌面完全改掉了呢？新建文件夹 / 新建文本文档等右键功能都不是原生的」。
+   *
+   * V81–V86 一直在**借出**桌面（把隐藏的原生图标视图显示回来让 Explorer 自己弹菜单），
+   * 那是补丁：要赌 `#32768` 的类名语义、要等「安静 1.5s」、要 120s 超时兜底、还会让桌面
+   * 瞬态翻白成原生样式。现在改成**我们自己弹那张菜单** —— 它是
+   * `IShellFolder::CreateViewObject` 给的**背景菜单**，实测含「新建」「下一个桌面背景」
+   * 「显示设置」「个性化」以及我们注入的「Handy 桌面整理」子菜单（详见 `shell_menu.rs`
+   * 与 `examples/bg_menu_dump.rs`）。菜单里的每一项都由 Shell 自己执行完，我们不插手。
+   *
+   * V89：返回值不再是 `void`，而是 `CreatedItem | null` —— 点了我们注入的「新建」项就带回
+   * 新建项的路径与显示名（命令层在菜单收起后才返回，绝不会在菜单弹出前就回来），前端据此
+   * 决定「增量认领 + 原地改名」还是「全量对账」。桌面永不翻白、新建不再整层刷新。
+   */
+  shellDesktopBackgroundMenu: (extended = false): Promise<CreatedItem | null> =>
+    call<CreatedItem | null>('shell_desktop_background_menu', { extended }),
+
+  /**
+   * 条目改名（V87）：对齐 Explorer 的「重命名 / F2 / 单击两次」。
+   *
+   * 只在本目录内改名，**绝不搬动文件**（后端会拒绝含路径分隔符的名字）。
+   *
+   * 按**路径**定位而不是 id，是因为「未归类」竖条里的桌面文件**没有** `grid_items`
+   * 登记行（拿不到 id），但它们同样要能改名 —— 用路径两种情况都能覆盖。
+   */
+  gridItemRename: (path: string, newName: string): Promise<void> =>
+    call<void>('grid_item_rename', { path, newName }),
+
   /** 左侧「未归类」竖条当前状态（V42）：几何 + 分几列 + 条目；width=0 表示没有条目 */
   gridLooseList: (): Promise<LooseArea> => call<LooseArea>('grid_loose_list'),
   /** 提取文件/文件夹的系统真实图标（RGBA base64）；失败或不支持返回 null */

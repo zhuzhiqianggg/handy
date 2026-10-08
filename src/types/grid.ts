@@ -139,14 +139,6 @@ export interface OverlayStatus {
   engaged: boolean;
 }
 
-/** 挂件窗几何（逻辑像素，持久化在 grid_meta） */
-export interface GridGeometry {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
-
 /**
  * 光标命中区域（挂件窗客户区内**物理像素**，前端按 scaleFactor 换算后上报）。
  * Rust 光标轮询线程据此决定挂件窗何时从点击穿透切回可交互。
@@ -156,6 +148,19 @@ export interface GridRegion {
   y: number;
   width: number;
   height: number;
+}
+
+/**
+ * 桌面背景右键菜单里我们注入的「新建」项被点中后，Rust 带回的新建结果（V89）。
+ *
+ * 取代 V88 的 `grid:item-created` 事件：命令直接把结果返回前端，前端据此决定
+ * 「增量认领 + 原地改名」还是「全量对账」，桌面永不翻白、新建不再整层刷新。
+ */
+export interface CreatedItem {
+  /** 新建项完整路径（桌面用户目录 + 显示名） */
+  path: string;
+  /** 显示名（含扩展名，如 `新建文件夹`、`新建文本文档.txt`） */
+  name: string;
 }
 
 // —— 一键整理 / 布局备份与还原（V19）——

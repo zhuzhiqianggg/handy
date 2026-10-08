@@ -58,6 +58,7 @@ export function SlugGenerator({ initialInput = '' }: CommandProps): React.JSX.El
   return (
     <CommandShell
       title="Slug 生成"
+      onPaste={(t) => setInput(t)}
       description="文本 → URL slug（支持拼音化与分隔符选项）"
       icon={<AtSign className="h-4 w-4" />}
       onBack={shell.onBack}

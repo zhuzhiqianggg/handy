@@ -1,75 +1,70 @@
 # Handy · 顺手 — 项目长期记忆
 
-> 续接必读：批次明细 → PROJECT_STATUS.md；详细约定/踩坑 → CONVENTIONS.md；逐日 → YYYY-MM-DD.md。
-> **曾超限被注入截断而失效**（截断点 ~13.4KB）⇒ 只留跨会话最小集，**上限 ~12.5KB**；加内容前先删等量旧内容。
+> 续接必读：批次明细 → PROJECT_STATUS.md；约定/踩坑 → CONVENTIONS.md；逐日 → YYYY-MM-DD.md。
+> **超限会被注入截断而失效** ⇒ 只留跨会话最小集，**上限 ~12.5KB**；加内容前先删等量旧内容。
 
 ## 1. 标识与路径
 - Handy · 顺手；identifier `com.handy.desktop`；`productName` 必须 `Handy`（禁中文/间隔号）。
 - 栈 Tauri 2 + React 18 + TS + Vite + Tailwind + shadcn/ui + cmdk + Zustand；SQLite + tauri-plugin-store。窗口 6：main/note/settings/organizer/grid-overlay/workstation-bar。
-- 根 `D:\_Projects\ops\handy`；参考 `D:\_Projects\ops\ops-tools`（只读）；权威文档 `docs/{01,02,03}-*`；桌面层定义 `docs/02-architecture/DESKTOP-LAYER.md`（六区 + `overlay_visible` 唯一真源）。
+- 根 `D:\_Projects\ops\handy`；参考 `D:\_Projects\ops\ops-tools`（只读）；权威文档 `docs/{01,02,03}-*`；桌面层定义 `docs/02-architecture/DESKTOP-LAYER.md`。
+- ★ Git：远端 `git@github.com:zhuzhiqianggg/handy.git`（**必须 SSH**，HTTPS 超时）；分支 main。推送前看 `size-pack`（正常 ~2MB，暴涨=`target/` 漏进）。
 - 真实库 `%APPDATA%\com.handy.desktop\handy.db`（接管态看 `grid_meta` 三键）；日志/程序 `%LOCALAPPDATA%\Handy\`。
-- 命令：Rust `source scripts/rust-env.sh && cd src-tauri`（⚠️ **没有** `src-tauri/scripts/`）；tsc `node node_modules/typescript/bin/tsc --noEmit`；打包 `bash scripts/build-release.sh --no-deploy`；回归 `scripts/regression/run.mjs`（21 套）；自检 `scripts/audit/`：`tool-audit`/`layout-audit`/`sample-smoke`/`guard-mutation-check.py`（**改守卫必跑**）+ 桌面图标三件套。
-- 端到端布局测试用 `layout_all_boxes_with(loose_count)` 注入，**不依赖跑测试机器的桌面**；迁移链 v1→v11 由 `cargo test --lib` 守。
+- 命令：Rust `source scripts/rust-env.sh && cd src-tauri`（⚠️ 无 src-tauri/scripts/）；tsc `node node_modules/typescript/bin/tsc --noEmit`；打包 `build-release.sh --no-deploy`；回归 `scripts/regression/run.mjs`；**改守卫必跑** `scripts/audit/guard-mutation-check.py`。布局测试用 `layout_all_boxes_with(loose_count)` 注入，**不依赖测试机桌面**；迁移链 v1→v11 由 `cargo test --lib` 守。
 
 ## 2. 硬不变量（改前必读）
 - **格子 = 呈现层**（V37）：归类/拖入**不移动文件**；整理后**接管桌面呈现**（隐藏 `SysListView32`）。V48 起 Rust 无 `fs::rename`。
-- **接管与归还**：`grid_overlay_hide` 只收内容 + 恢复原生图标（**不**隐藏挂件窗，否则无入口=死路）。启动 `restore_overlay_if_visible` 不弹主窗；退出恢复三处，**强杀不触发**。
-- **Z 序锚定法**（V47）：`anchor=GetWindow(host,GW_HWNDPREV)` 后 `SetWindowPos(overlay,anchor)`（`SetWindowPos(hwnd,X)` = 放到 X **下面**）。V46「单步 `HWND_BOTTOM`」作废。
-- **桌面层保险**：250ms 检测、判到就纠、退避上限 5s；`Off⇒原生图标可见`、`On⇒窗口可见`，纠正后复验。
-- **「常驻」与「盒子」互斥**（V60）：退出整理后还在 ⇒ 必须浮窗，引擎当**禁区**（`workstation_rect` 右侧整列，宽 **400**，相交者横向让开）。
-- **外部唤起 = 入队+唤醒，以队列为准**（V60）：冷启动 `setup` emit 必丢 ⇒ `PENDING_ACTION` 入队；前端挂载时 + 收到唤醒时各调一次 `grid_take_pending_action`，**不采信事件载荷**。
-- **装进系统（HKCU）的能力必须有版本标记**（V60）：`Version` + `MENU_VERSION` 比对（版本号最后写）；`install()` **整键重建**（只写不删 ⇒ 死按钮）。
-- **一个跨线程可变状态只许一个记账人**（V61）：曾两条写路 ⇒ 永久穿透 ⇒ 双击失效（指纹：**右键好使、左键不好使**）。
+- **接管与归还**：`grid_overlay_hide` 只收内容 + 恢复原生图标（**不**藏挂件窗，否则无入口=死路）。启动 `restore_overlay_if_visible` 不弹主窗；退出恢复三处，**强杀不触发**。
+- **Z 序锚定法**（V47）：`anchor=GetWindow(host,GW_HWNDPREV)` 后 `SetWindowPos(overlay,anchor)`（= 放到 X **下面**）。
+- **「常驻」与「盒子」互斥**（V60）：退出整理后还在 ⇒ 必须浮窗，引擎当**禁区**（右侧整列 400）。
+- **外部唤起 = 入队+唤醒**（V60）：冷启动 emit 必丢 ⇒ `PENDING_ACTION` 入队（挂载 + 收到唤醒各取一次，**不采信载荷**）。**HKCU 能力必须有版本标记**（V60）：`install()` **整键重建**（只写不删 ⇒ 死按钮）。**一个跨线程状态只许一个记账人**（V61 ⇒ 两条写路就双击失效：右键好使、左键不好使）。
+- ★★ **显隐唯一真源 `overlay_visible`：谁写谁广播**（V79）：三处写完必须 `emit_visibility`；托盘**不许**再自己发。前端 `contentHidden` 初值 **`true`**（fail-closed），**先注册监听、再查状态**。
 - **「撤掉强制可交互」≠「立刻穿透」**：`let want = interactive || cursor_hit(&win)`（**或**）。
-- **内部拖拽 = 指针拖拽**（V59）：wry 对无 `CF_HDROP` 载荷不写 `*pdwEffect` ⇒ 自算落点（`DRAG_THRESHOLD=5px`）。**不许为修它关 `drag_drop_enabled`**（互斥）。
-- **渲染几何 = 引擎几何**（V59/V70）：`height: box.height`、**不叠 `max-height`**；装不下交盒内滚动（`flex-1 min-h-0 overflow-y-auto`）。**两边常量差 1px 就会少一行/少一列**（见 §3）。
-- **根画布 `fixed inset-0` 永远 `overflow-hidden`**（V59.1）：子元素撑大滚动溢出区 ⇒ 整层可滚；菜单必须 `fixed`。
-- **拖动链路**（V57）：移动永远可用，锁只收编辑；三档 `unlockAllBoxes`/`lockAllBoxes`/`unlockBox(id)`（`setEditMode(true)` 是空操作）；`onUp` 判「真动过」才落库。
-- **原生右键菜单是我们复刻的**（V58，细节 CONVENTIONS §31）：`CMF_NORMAL|CMF_EXPLORE`（**不传 `CMF_CANRENAME`**）；`IContextMenu2/3` 消息**必须转发**；Shift+右键让回系统、我们挂 Ctrl+右键。诊断 `menu_dump`。第三方扩展可能只认 `explorer.exe` 宿主（360压缩实证）。
-- **层级阶梯**：盒子(auto) < 参考线 35 < 工作台 38 < 面板 40 < 菜单 50 < 拖拽预览 95；同 z 时 DOM 顺序说了算。
-- ⚠️ 改「XX 模式」开关前先 grep 调用点（V52）；**UI 状态要落盘**；改 `place_widget_columns` 别丢 `cursor_right` 更新（V49）。
-- **contentEditable 换行写进光标所在文本节点 + `\n` 后垫 ZWSP**（V67）：`insertNode(createTextNode('\n'))` 会让 Chrome 把「独立 `\n` 节点开头 / 以 `\n` 收尾的节点末尾」当**上一行行尾**（回车没用、两行粘一起）。
-- ★★ **合成 `KeyboardEvent` 测不出回车**（V67）：不受信任按键不触发默认编辑动作 ⇒ 会**误报**「回车无效」。必须 `agent-browser press Enter`；`screenshot <path>` 会挂死。
-- ⚠️ 「跳出/收尾」判据不许看「文本末尾是不是空行」（V67，库里读回的围栏以 `\n` 收尾）⇒ 看「上一步是不是我们插的那次换行」。
-- ★★ **高亮重建会吞掉行的 ZWSP 锚**（V68，`applyHighlight` 每 400ms 重写 `codeEl.innerHTML`）：① 重建前 `zwspOffsets(text)` 记锚位；② `reapplyZwsp` **必须在 `restoreCaretIn` 之前**（赋 `nodeValue` 会把选区重置到节点开头 ⇒ 文本倒着写）；③ `restoreCaretIn` 只数**可见字符**。
-- ★★ **压缩列高不许事后夹 `MIN_BOX_H`**（V68）：先缩放再夹最小高度会把总高再顶出可用区（真机差 14px ⇒ 越界 ⇒ 整层滚动条）⇒ **二分求最大可行缩放比**。
-- ⚠️ 已作废：①「便签列放不下往左再开一列」；②「Fill=不重叠不越界就保留」；③「流式行铺收纳区」（V65，V66 列式已取代）。
+- **内部拖拽 = 指针拖拽**（V59）：wry 对无 `CF_HDROP` 载荷不写 `*pdwEffect` ⇒ 自算落点（`DRAG_THRESHOLD=5px`）；**不许为修它关 `drag_drop_enabled`**。
+- ★★ **渲染几何 = 引擎几何**（V59/V70）：`height: box.height`、**不叠 `max-height`**；装不下交盒内滚动。**常量差 1px 就少一行/列**。根画布永远 `overflow-hidden`（V59.1），菜单必须 `fixed`。拖动链路（V57）：移动永远可用，锁只收编辑；`onUp` 判「真动过」才落库。
+- ★★ **菜单不许有两个同名项**（V89）：注入前先摘原生同名（`CNewMenu` 无 view 必 E_FAIL）；摘除**倒序**、判据只认**开头**。
+- ★★ **`run_on_main_thread` 只投递、不等结果**（V89）：弹菜单用它 ⇒ Promise 在菜单弹出前就 resolve ⇒ 前端「超时/竞速」判据必误判。要结果就配 `std::sync::mpsc` 等回传。
+- ★★ **转发菜单后必须取消 Explorer 的隐藏改名框**（V90/V91）：原生「新建」在**隐藏的** listview 上拉起改名框 —— 看不见 + **抢键盘** ⇒ 在「等菜单收起」循环里反复 `PostMessage(LVM_CANCELEDITLABEL)`+`WM_CANCELMODE`（`SendMessage` 会被忙线程卡住）。
+- ★★ **WinEvent 的 `hwnd` 语义不许赌**（V82）：`EVENT_SYSTEM_MENUPOPUPSTART` 实测给的是**菜单窗 `#32768` 自己** ⇒ 判据要**换 owner + 看菜单压谁**，并留轮询兜底。
+- **复刻菜单只剩回退 + 条目菜单**（V58/V90）：`CMF_NORMAL|CMF_EXPLORE`（**不传 `CMF_CANRENAME`**）；`IContextMenu2/3` 消息**必须转发**。**层级**：盒子(auto)<参考线 35<工作台 38<面板 40<菜单 50<预览 95。改模式开关前 grep 调用点（V52）。
+- ★★ **便签 contentEditable**（V67/V68）：`\n` 写进**光标所在文本节点** + 垫 ZWSP；「跳出」看「上一步是不是我们插的换行」（**不许**看末尾空行）；`applyHighlight` 每 400ms 重写 `innerHTML` ⇒ `reapplyZwsp` **必须在 `restoreCaretIn` 之前**；合成 `KeyboardEvent` 测不出回车。
+- ★★ **压缩列高不许事后夹 `MIN_BOX_H`**（V68）：先缩放再夹会顶出可用区 ⇒ **二分求最大可行缩放比**。
 
 ## 3. 布局（用户口径 = 5 列）
 **第1列 未归类竖条 → 第2/3列 归纳格子 → 第4列 便签 → 第5列 工作台**。挂件带/收纳区右界 = `workstation_rect().x - ARRANGE_GAP_X`。
-- **V69：按内容定尺寸 + LPT 最短列填充**（`content_plan_in` ← `placement_order` + `pack_columns`）：尺寸只看自己条目数 ⇒ 面积与内容正比；常量 `CELL_EXTRA_W=32`、`BOX_CELL_EXTRA_H=36`（勿混竖条 `CELL_EXTRA_H=30`）、`BOX_HEADER_H=37`、`BOX_BORDER_H=2`、`GRID_SCROLLBAR_W=4`、`BOX_FIT_SLACK=2`、`MIN_BOX_W=160`、`MIN_BOX_H=120`、`AUTO_MAX_W=520`、`AUTO_MAX_COLS=5`。
-  - ★ 摆放序 = `(面积, 内容量, 高, 宽)` 降序；**内容量分量不可省**（面积被分档吃掉差别 ⇒ 退化成登记顺序）。
-  - ★ 每个格子放进**当前最矮的那一列**（并列取最左）=「大格子先占位、小格子找空隙插入」。
-  - 列数 k（**V71 改**）：`k` 从大到小，**每个 k 内先试自然宽度、再试夹到 `zone_w/k`** ⇒ 能多铺一列就多铺一列、**尺寸去适配列宽**（旧写法把夹宽放在所有 k 失败之后 ⇒ 真机 3 格掉回 2 列、第 1 列空 501px = 用户说的「补丁」）。夹宽必须**同时按新宽重算高**；最后 `fit_column_heights` 二分压列高。
+- **V69 按内容定尺寸 + LPT 最短列填充**：尺寸只看条目数；常量 `CELL_EXTRA_W=32`、`BOX_CELL_EXTRA_H=36`（勿混竖条 30）、`BOX_HEADER_H=37`、`GRID_SCROLLBAR_W=4`、`BOX_FIT_SLACK=2`、`MIN_BOX_W=160/120`、`AUTO_MAX_W=520`、`AUTO_MAX_COLS=5`。
+  - ★ 摆放序 = `(面积, 内容量, 高, 宽)` 降序（**内容量分量不可省**，否则退化成登记顺序）；每个格子放进**当前最矮的列**（并列取最左）。
+  - 列数 k（V84）：全部候选（k=1..=capacity × 自然/夹到 `zone_w/k`，夹宽**同时按新宽重算高**）取 **min(横向,纵向填充率) 最大**；平局 k 小、自然宽优先。
+- ★★ **V85 落位右锚定 + 列内撑满**：列**从右往左**排（第一列贴便签/工作台侧）；窄格**撑到列宽**并按新宽重算高（只撑宽、**不夹窄**）。`content_plan_in` ④ 用**右沿递减**（摆完一列 `right = x - GAP`）——写成「x = 右沿−总宽」= 块**左**端 ⇒ 左溢。
 - ★ **幂等是算出来的，不许几何去兜**（V69）：摆放序是内容的纯函数 ⇒ 尺寸没变 ⇒ 落位一字不差。
-- ★ **V70：格子内部几何两边逐像素相等**。根因：引擎 `BOX_HEADER_H=36` vs 前端 `h-9`+`border-b`=**37** ⇒ 每格矮 1px ⇒ 提前出滚动条 ⇒ 经典滚动条吃 4px ⇒ **少一列** ⇒ 行数变多 ⇒ 更溢出（正反馈）。修法：`BOX_HEADER_H=37`、`GRID_SCROLLBAR_W=4`、`BOX_FIT_SLACK=2`，CSS `.grid-scroll{scrollbar-gutter:stable}`。
-- **V70**：高度上限跟 `zone_h`（删固定 `CONTENT_MAX_H=460`）⇒ 删完格子空出来盒子自动长高把图标全摆出来；**满了不许再建**：`probe_room_for_another_box` 在立刻回滚的 `SAVEPOINT` 里真插 + 真排看 `overflowed`，**出错一律当放行**，试探与真插入共用 `INSERT_BOX_SQL`。
-- `manual` 只是信息性指标；`nearest_free_slot` 已删。
-- **V50 不变量**：① 挂件一律由列规则安置；② 收纳格**不跨进挂件带**（`band_left` 取挂件列计划最小值）；③ 便签恒定一条列。
-- **工作台**（V60/V62，宽 400）：日历 + 快捷入口 + 按钮（便签/格子/**整理**/显示·收起格子）；`WORKSTATION_W == WST_BOX_W == 400` 由 `test-desktop-constants.mjs` 锁。
-- **动态整理**（V66）：前端 `relayoutSoon()`（120ms 防抖）→ `gridRelayout()`。
+- ★★ **V70**：内部几何两边逐像素相等（差 1px ⇒ 提前出滚动条 ⇒ 少一列 ⇒ 更溢出）；高度上限跟 zone_h；**满了不许再建**（`probe_room_for_another_box` 真插真排看 overflowed，出错当放行）。
+- **V50**：① 挂件由列规则安置；② 收纳格**不跨进挂件带**（`band_left` = 挂件列计划最小值）；③ 便签恒定一列。
+- **工作台**（V60/V62，宽 400）：日历 + 快捷入口 + 按钮（便签/格子/**整理**/显示·收起）；`WORKSTATION_W == WST_BOX_W == 400` 由 `test-desktop-constants.mjs` 锁。**动态整理**（V66）：`relayoutSoon()`（120ms 防抖）→ `gridRelayout()`。
 
-## 4. 批次索引（细节见 PROJECT_STATUS §1.x）
-- **V42–44** 未归类竖条·镜像流布·Dock/搜索。**V45–47** 三面板合并·桌面右键菜单·Z 序锚定法。**V48–50** 挂件分列 + Full/Fill·删「移动到整理目录」·挂件带硬左界·`manual`+迁移 v10。**V56** 前后端度量锁。**V57** 修「格子拖不动」。**V58** 复刻原生右键菜单。**V59** 指针拖拽/几何一致/根画布 overflow。**V60** 工作台浮窗·右侧禁区·`PENDING_ACTION`·迁移 v11。**V61** 修双击失效。**V62** 工作台 320→400。**V63** 主窗口退场（桌面右侧面板=唯一外壳）。**V64/V65** 已作废。**V66** 列式填满 + 动态整理接线。
-- **V67** 便签 markdown：换行写进光标节点 + ZWSP；收尾判据改「上一步是不是我们插的换行」；新增 `scripts/smoke-richmarkdown-enter.sh`。
-- **V68** ZWSP 锚被高亮重建吞掉；回收挂件带下方空间（无挂件时收纳区右沿 = `right_edge`）；`overflowed` 与 `squeezed` 分家。
-- **V69** 摆放序 `(面积,内容量,高,宽)` 降序 + LPT（CONVENTIONS §38）。
-- **V70** ① 1px 几何账 + 滚动条槽位；② 高度上限跟 `zone_h`；③ 满了拒绝新建（SAVEPOINT 试探）。新用例 5 条（含**真机那一组**：文档 18/其他 8/文件夹 8 + 2 便签 ⇒ 一个图标都不藏）；守卫 +2 段，变异 33→41。
-- **V71** 修「还是补补丁一样」：`pick_columns` 把「自然宽度放不下」误当「列数不可行」⇒ 真机 3 格只开 2 列。改成每个 k 内**先自然、后夹宽**（宽度是软约束，列数才是用户看得见的）。新用例 3 条；守卫 +⑭ 段，变异 41→43。还债：`DESKTOP-LAYER.md` 新增 §1.1、修掉过时的「镜像流布」。详见 CONVENTIONS §40。
-- ⚠️ agent 会话启动不了本 GUI（挂死启动早期）⇒ 打包 + `/S` 静默装即止，**不代启动**。便签 markdown 调试入口 `?demo=richmarkdown`。
+## 4. 批次索引（细节见 PROJECT_STATUS §1.x；约定/踩坑见 CONVENTIONS）
+- **V42–V71**：竖条·三面板·桌面右键·Z 序锚定·挂件分列·指针拖拽·工作台·列式填满；**V64/V65 已作废**。
+- **V75–V80** 桌面日历（自适应行数、三行 38px）；V80 选年+纪念日：`jumpTo` **夹 1900–2100 且带 selected**、写盘走 `patchSettings`（禁 `writeSettings`）。
+- **V81/V82** 「菜单期间把桌面还给系统」**V89 起整体停用**（`HANDOFF_DISABLED`，`is_active()` 恒 false）。
+- **V83–V85** 几何不持久化+**只算主屏**（`sync_overlay_bounds()`，变则广播 `grid:bounds-changed`；副屏全原生）；新建慢=收回竞速；落位**右锚定**+**列内撑满**（§3）。
+- **V87/V88** 空白右键自己弹**背景菜单**（`CreateViewObject`；坑：`FOLDERID_Desktop`+`BindToObject` 必 `E_INVALIDARG`）；原生「新建」E_FAIL = `CNewMenu` 需 `IShellView` ⇒ 自注入「新建」；改名后 UI 不刷新 ⇒ 本地先改 `items`/`loose` 再 `refresh`。
+- **V89** 桌面空白右键归 Handy：接管态整窗命中区 + `pointerEvents:'auto'` ⇒ 不再穿透；先摘原生「新建」再插我们的；命令 mpsc 等到菜单收起。**「借出桌面」整体停用**（= 永不翻白）。
+- **V90** 两张对比图质问「你到底能不能实现原始功能」（原生有 **查看/排序/刷新 + 新建 14 项**，复刻只 2 项 —— `bg_menu_dump` 实证 `CreateViewObject` 菜单 16 项里确实没有）⇒ **不复刻，转发**：`SendMessageW(SysListView32, WM_CONTEXTMENU, wParam=list, lParam=屏幕坐标)` → 转给父窗 `SHELLDLL_DefView` → 完整原生菜单，listview **始终隐藏**。弹前 `SetForegroundWindow(可见挂件窗)`；前端**增量对账**，只有 `removed` 才 `refresh()`。那两块（`SVGIO_VIEWMENU` / `CNewMenu`+`ShellNew`）**都不经过 `IContextMenu`**。
+- ★★ **V91 修 V90 判据**（用户：「右键要出两个菜单，而且一个菜单好像还一直存在」）：① **`SendMessage` 耗时 ≠ 菜单弹没弹** —— Win11 菜单由 XAML 宿主在**别的线程**弹（实测 37–48ms 返回）⇒ 误判「没弹」⇒ 又回退弹一个 ⇒ **两个菜单同屏**；正确判据 = `WindowFromPoint(光标)` 顶层窗口变成**非本进程**。② 转发后**必须等菜单收起**再回命令，否则前端在菜单还开着时对账 ⇒ **永远认领不到新建项**。③ 等待**不许占 UI 线程**（纯 sleep 无消息泵 ⇒ 前端冻）⇒ 拆 `forward_desktop_view_menu`（UI 线程发）/ `await_desktop_view_menu`（后台线程等），回退再回主线程。
+- ⚠️ agent 会话启动不了本 GUI ⇒ 打包 + 装机即止，**不代启动**。
 
 ## 5. 协作与操作约定
-- 偏好：先规划后执行；表格化；绝对路径；改文件前先读取；目录扁平。
-- 红线：禁对真实用户目录（Desktop/Documents/Downloads）写（测试限 TEMP 沙箱）。
-- **批次收尾**：功能完成 → 打包 → 停旧版 → **归还桌面图标** → NSIS `/S` 静默装 → `cmp -l` 取证（只应差 3 字节 `_VAR_UNK`→`_NSS`）→ 停手不启动。
-- ★ **接管期间装机必须先归还桌面**（V45）：查 DB → 停进程 → **立刻** `desktop-icon-restore.py` → `desktop-icon-probe.py` 复核 `vis=True` → `desktop_icons_hidden='0'` → 装机。**不能先恢复再杀**（自愈会重新藏）；别用 PowerShell `Add-Type`（被拦），用 Python `ctypes`。
-- ★ `taskkill` 在 Git Bash 要带 `MSYS_NO_PATHCONV=1`（写 `//IM` 会报无效参数而**进程照样活着**）。
-- ★ **跑打包脚本前必须 `export PATH="/usr/bin:/bin:/mingw64/bin:$PATH"`**：否则跑去调 `wsl.exe` ⇒ 被安全策略硬拦（前兆 `dirname: command not found`）。别绕黑名单，改 PATH 才是正解。
+- 偏好：先规划后执行；表格化；绝对路径；改文件前先读取。红线：禁对真实用户目录写（测试限 TEMP 沙箱）。
+- **批次收尾**：打包 → 停旧版 → **归还桌面图标** → 装机 → `cmp -l` 取证 → 停手不启动。`cmp -l` **装机之后**做：**0/3 字节**=生效；大量差异=旧构建。
+- ★ **接管期间装机必须先归还桌面**（V45）：查 DB → 停进程 → **立刻** `desktop-icon-restore.py` → `desktop-icon-probe.py` 复核 → `desktop_icons_hidden='0'` → 装机。**不能先恢复再杀**。
+  ★★ **只置 `desktop_icons_hidden`，别动另两键**（V79）：前者是**事实**，后两者是**偏好/上次显隐意图** —— 一律清零 = 悄悄替用户关掉接管 ⇒ 下次启动「格子 + 原生图标」两份内容。
+- ★ `taskkill` 用**单斜杠** `/IM handy.exe /F` + `MSYS_NO_PATHCONV=1`（`//IM` 报无效参数而**进程照样活着**）。
+- ★ 跑打包脚本前必须 `export PATH="/usr/bin:/bin:/mingw64/bin:$PATH"`：否则跑去调 `wsl.exe` ⇒ 被安全策略硬拦（前兆 `dirname: command not found`）。
+- ★★ **NSIS `/S` 起不来时**（V90/V91）：挂别的命令 / 先跑 `uninstall.exe /S` 会整体 SIGTERM；**V91 连单独跑两次也不生效** ⇒ 兜底：项目无 `bundle.resources`（dist 已嵌 exe）⇒ `cp -f 构建exe 已装exe` **等价**，`cmp -l` **0 字节** = 生效。
 - ★★ 被 `2>/dev/null` 包住的探针，不许用「空输出」当结论 ⇒ 一律 `tasklist | grep -qi handy`。
-- 高频坑（完整版 CONVENTIONS）：同文件多处 Edit 串行；`npm.cmd` 被拦 → `node node_modules/<cli>/<entry>.js`；输出落盘再 Read；**打包开始后不许再改源码**；`vite build` 前先 `rmtree('dist')`；`Get-Process -Name handy` 假阴性，只用 `tasklist`。
+- 高频坑（详见 CONVENTIONS）：同文件多处 Edit **串行**；`npm.cmd` 被拦 → `node node_modules/<cli>/<entry>.js`；**打包中改源码 ⇒ 产物半新半旧，必须重打**。
 
 ## 6. 验证纪律
 - agent 自报 “exit 0” 不可信 → 独立复跑、输出与 exit code 分文件落盘再 Read。
 - 回归里算错的期望值比产品代码更危险 —— 逐条反问「失败场景下它会不会也成立」。
-- 已知预存问题（非回归）：`layout-audit` 0/84；`sample-smoke` 29/29（V70 修掉两条**过期/自错**探针，见 CONVENTIONS §39.7）。
-- GUI 问题先用已知 good 旧产物对照（分离「代码回归」与「环境坏了」）；浮层不见 → 应用日志 + `window-probe.py zlist`。
+- 断言别打全文（会命中**注释** ⇒ 假通过）：打**调用点**或**行锚定**；「顺序」类断言用 `indexOf` 比位置。
+- 已知预存问题（非回归）：`layout-audit` 0/84；`sample-smoke` 29/29。
+- GUI 问题先用已知 good 旧产物对照；浮层不见 → 日志 + `window-probe.py`。
