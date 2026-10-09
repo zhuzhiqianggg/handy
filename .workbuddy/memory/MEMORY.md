@@ -23,7 +23,7 @@
 - ★★ **渲染几何 = 引擎几何**（V59/V70）：`height: box.height`、**不叠 `max-height`**；装不下交盒内滚动。**常量差 1px 就少一行/列**。根画布永远 `overflow-hidden`（V59.1），菜单必须 `fixed`。拖动链路（V57）：移动永远可用，锁只收编辑；`onUp` 判「真动过」才落库。
 - ★★ **菜单不许有两个同名项**（V89）：注入前先摘原生同名（`CNewMenu` 无 view 必 E_FAIL）；摘除**倒序**、判据只认**开头**。
 - ★★ **`run_on_main_thread` 只投递、不等结果**（V89）：弹菜单用它 ⇒ Promise 在菜单弹出前就 resolve ⇒ 前端「超时/竞速」判据必误判。要结果就配 `std::sync::mpsc` 等回传。
-- ★★ **转发菜单后必须取消 Explorer 的隐藏改名框**（V90/V91）：原生「新建」在**隐藏的** listview 上拉起改名框 —— 看不见 + **抢键盘** ⇒ 在「等菜单收起」循环里反复 `PostMessage(LVM_CANCELEDITLABEL)`+`WM_CANCELMODE`（`SendMessage` 会被忙线程卡住）。
+- ★★ **必须取消 Explorer 的隐藏改名框**（V92）：原生「新建」在**隐藏的** listview 上拉起改名框 —— 看不见 + **抢键盘** ⇒ 轮询复用 `desktop_handoff::label_editing()`（已改 pub）检测到就 `PostMessage(LVM_CANCELEDITLABEL)`。**这道门不能省**，否则每拍往 explorer 发消息。
 - ★★ **WinEvent 的 `hwnd` 语义不许赌**（V82）：`EVENT_SYSTEM_MENUPOPUPSTART` 实测给的是**菜单窗 `#32768` 自己** ⇒ 判据要**换 owner + 看菜单压谁**，并留轮询兜底。
 - **复刻菜单只剩回退 + 条目菜单**（V58/V90）：`CMF_NORMAL|CMF_EXPLORE`（**不传 `CMF_CANRENAME`**）；`IContextMenu2/3` 消息**必须转发**。**层级**：盒子(auto)<参考线 35<工作台 38<面板 40<菜单 50<预览 95。改模式开关前 grep 调用点（V52）。
 - ★★ **便签 contentEditable**（V67/V68）：`\n` 写进**光标所在文本节点** + 垫 ZWSP；「跳出」看「上一步是不是我们插的换行」（**不许**看末尾空行）；`applyHighlight` 每 400ms 重写 `innerHTML` ⇒ `reapplyZwsp` **必须在 `restoreCaretIn` 之前**；合成 `KeyboardEvent` 测不出回车。
@@ -46,9 +46,8 @@
 - **V81/V82** 「菜单期间把桌面还给系统」**V89 起整体停用**（`HANDOFF_DISABLED`，`is_active()` 恒 false）。
 - **V83–V85** 几何不持久化+**只算主屏**（`sync_overlay_bounds()`，变则广播 `grid:bounds-changed`；副屏全原生）；新建慢=收回竞速；落位**右锚定**+**列内撑满**（§3）。
 - **V87/V88** 空白右键自己弹**背景菜单**（`CreateViewObject`；坑：`FOLDERID_Desktop`+`BindToObject` 必 `E_INVALIDARG`）；原生「新建」E_FAIL = `CNewMenu` 需 `IShellView` ⇒ 自注入「新建」；改名后 UI 不刷新 ⇒ 本地先改 `items`/`loose` 再 `refresh`。
-- **V89** 桌面空白右键归 Handy：接管态整窗命中区 + `pointerEvents:'auto'` ⇒ 不再穿透；先摘原生「新建」再插我们的；命令 mpsc 等到菜单收起。**「借出桌面」整体停用**（= 永不翻白）。
-- **V90** 两张对比图质问「你到底能不能实现原始功能」（原生有 **查看/排序/刷新 + 新建 14 项**，复刻只 2 项 —— `bg_menu_dump` 实证 `CreateViewObject` 菜单 16 项里确实没有）⇒ **不复刻，转发**：`SendMessageW(SysListView32, WM_CONTEXTMENU, wParam=list, lParam=屏幕坐标)` → 转给父窗 `SHELLDLL_DefView` → 完整原生菜单，listview **始终隐藏**。弹前 `SetForegroundWindow(可见挂件窗)`；前端**增量对账**，只有 `removed` 才 `refresh()`。那两块（`SVGIO_VIEWMENU` / `CNewMenu`+`ShellNew`）**都不经过 `IContextMenu`**。
-- ★★ **V91 修 V90 判据**（用户：「右键要出两个菜单，而且一个菜单好像还一直存在」）：① **`SendMessage` 耗时 ≠ 菜单弹没弹** —— Win11 菜单由 XAML 宿主在**别的线程**弹（实测 37–48ms 返回）⇒ 误判「没弹」⇒ 又回退弹一个 ⇒ **两个菜单同屏**；正确判据 = `WindowFromPoint(光标)` 顶层窗口变成**非本进程**。② 转发后**必须等菜单收起**再回命令，否则前端在菜单还开着时对账 ⇒ **永远认领不到新建项**。③ 等待**不许占 UI 线程**（纯 sleep 无消息泵 ⇒ 前端冻）⇒ 拆 `forward_desktop_view_menu`（UI 线程发）/ `await_desktop_view_menu`（后台线程等），回退再回主线程。
+- **V89–V92 桌面右键：五次迭代，最终结论「不代理」**。V89 抢空白右键⇒菜单残缺；V90 转发 `WM_CONTEXTMENU`+耗时判据⇒双菜单；V91 换「观测屏幕」判据⇒仍因转发前 `SetForegroundWindow(我们的窗)` 让 `CNewMenu` 找不到 view⇒**新建彻底建不出**（10-10 取证：十几次右键 0 文件）。V92：**空白右键穿透给 Explorer**（根画布 `pointerEvents` 仅拖拽时 `'auto'`），它那张菜单天然带查看/排序/刷新+ShellNew 新建（都不经过 `IContextMenu`，复刻不出来）；handoff 停用⇒不翻白；删转发 206 行。补偿：目录签名广播 `grid:desktop-changed` 让新文件进竖条。
+- ★★ **B 方案（用户 10-10 拍板）：重构为「不接管原生桌面」**，挂件（便签/日历/工作台）保留为桌面浮窗。开源调研（LucidDesk/DeskBox/openFences/DesktopIconMover）**无一接管桌面**：不自绘，或用 `LVM_SETITEMPOSITION` 遥控原生图标位置（lParam 直接装坐标，**跨进程无需注入**）。后续：① 不隐藏 `SysListView32`，关「自动排列/对齐网格」后 SETITEMPOSITION 摆位；② 格子改装饰底板+标题栏、内容区穿透 ⇒ `GridOverlay.tsx`(4586行) 大瘦身。
 - ⚠️ agent 会话启动不了本 GUI ⇒ 打包 + 装机即止，**不代启动**。
 
 ## 5. 协作与操作约定
