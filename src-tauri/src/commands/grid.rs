@@ -1669,6 +1669,42 @@ pub(crate) fn desktop_icon_view() -> Option<HWND> {
     }
 }
 
+/// V92：上一次看到的桌面目录签名（条目数, 最新 mtime 秒）。见 [`desktop_dir_signature`]。
+static DESKTOP_DIR_SIG: std::sync::Mutex<(usize, u64)> = std::sync::Mutex::new((0, 0));
+
+/// V92：桌面目录的**廉价签名** —— `(条目数, 最新修改时间)`。
+///
+/// # 为什么需要它
+///
+/// 桌面空白右键已经**穿透**给 Explorer（V92），用户在原生菜单里点「新建文件夹」建出来的
+/// 文件，**我们收不到任何通知** —— 没有 shell hook、没有窗口消息、没有 IPC。少了这一条，
+/// 用户看到的就是「点了新建，什么都没发生」：文件确实躺在磁盘上，但我们的竖条里没有它，
+/// 而原生图标又被我们藏了 —— 等于凭空消失。
+///
+/// 判据只读目录项**元数据**，不读内容、不递归；桌面百来项时开销可忽略。
+#[cfg(target_os = "windows")]
+fn desktop_dir_signature() -> (usize, u64) {
+    let Some(dir) = dirs::desktop_dir() else {
+        return (0, 0);
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return (0, 0);
+    };
+    let mut count = 0usize;
+    let mut newest = 0u64;
+    for entry in entries.flatten() {
+        count += 1;
+        if let Ok(meta) = entry.metadata() {
+            if let Ok(modified) = meta.modified() {
+                if let Ok(dur) = modified.duration_since(std::time::UNIX_EPOCH) {
+                    newest = newest.max(dur.as_secs());
+                }
+            }
+        }
+    }
+    (count, newest)
+}
+
 /// 隐藏 / 恢复桌面系统图标（仅切换 `SysListView32` 的可见性，**不动任何文件**）。
 ///
 /// 语义：这是「桌面整理」的关键一步 —— 格子接管呈现后，原来的图标不该再重复显示。
@@ -2747,6 +2783,61 @@ fn ensure_poller(app: AppHandle) {
                         ICONS_WERE_VISIBLE.store(false, Ordering::Relaxed);
                     }
                 }
+                // —— V92：取消 Explorer 在**被我们隐藏的** listview 上拉起的原位改名框 ——
+                //
+                // 桌面空白右键现在**穿透**给 Explorer（V92），那张菜单的「新建」是真原生的：
+                // 文件会真的建出来，随后 `CNewMenu` 会让我们 `SW_HIDE` 掉的那个
+                // `SysListView32` 进入原位改名。那个框有两个坏处：
+                //   ① **看不见**（宿主被我们藏了）⇒ 用户以为「新建没反应」；
+                //   ② 会 `SetFocus` **抢键盘** ⇒ 我们自己 overlay 的改名框打不进字。
+                //
+                // 所以检测到就取消它，改交给前端对账后弹**我们自己的**改名框。
+                // 只在**真的有 `Edit` 子窗**时才发消息（平时零开销、不会打扰任何东西）。
+                // 用 `PostMessage`：投递完就走，不会因为 Explorer 忙而卡住轮询线程。
+                if icon_watch_ticks % 2 == 0
+                    && ICONS_TAKEN.load(Ordering::Relaxed)
+                    && crate::platform::desktop_handoff::label_editing()
+                {
+                    const LVM_CANCELEDITLABEL: u32 = 0x1000 + 0x77;
+                    use windows::Win32::Foundation::{LPARAM, WPARAM};
+                    use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
+                    if let Some(list) = desktop_icon_view() {
+                        unsafe {
+                            let _ = PostMessageW(list, LVM_CANCELEDITLABEL, WPARAM(0), LPARAM(0));
+                        }
+                        crate::logging::write_line(
+                            "grid",
+                            "取消了 Explorer 在隐藏桌面视图上的原位改名框（改名交回我们自己的输入框）",
+                        );
+                    }
+                }
+                // —— V92：桌面目录内容变了 ⇒ 广播，让前端把新文件收进未归类竖条 ——
+                //
+                // 动机见 [`desktop_dir_signature`]：穿透之后原生「新建」落地的文件我们收不到
+                // 任何通知，只能靠这个签名发现。`% 8` ≈ 每 2s 一次，跟得上人手的操作节奏。
+                if icon_watch_ticks % 8 == 0 {
+                    let sig = desktop_dir_signature();
+                    let changed = match DESKTOP_DIR_SIG.lock() {
+                        Ok(mut last) => {
+                            if *last == (0, 0) {
+                                // 第一次只记基线，不广播（免得启动瞬间来一次无谓重扫）
+                                *last = sig;
+                                false
+                            } else if sig != *last {
+                                *last = sig;
+                                true
+                            } else {
+                                false
+                            }
+                        }
+                        Err(_) => false,
+                    };
+                    if changed {
+                        use tauri::Emitter;
+                        crate::logging::write_line("grid", "桌面目录内容有变化，已通知前端重扫");
+                        let _ = app.emit("grid:desktop-changed", ());
+                    }
+                }
                 // 周期性校验层级（层级不对才重排）：Explorer 重启 / 别的窗口插队后自愈。
                 // 按**时间**触发，与轮询周期解耦（见 REASSERT_INTERVAL_MS 的说明）。
                 if last_reassert.elapsed() >= std::time::Duration::from_millis(REASSERT_INTERVAL_MS) {
@@ -3669,7 +3760,6 @@ pub async fn shell_desktop_background_menu(
         let (tx, rx) =
             std::sync::mpsc::channel::<Option<crate::platform::shell_menu::CreatedItem>>();
         app.run_on_main_thread(move || {
-            use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
             let win = handle
                 .get_webview_window(GRID_LABEL)
                 .or_else(|| handle.get_webview_window("main"));
@@ -3677,57 +3767,14 @@ pub async fn shell_desktop_background_menu(
                 .and_then(|w| w.hwnd().ok())
                 .map(|h| HWND(h.0 as *mut std::ffi::c_void))
                 .unwrap_or_default();
-            let hwnd_raw = hwnd.0 as isize;
-
-            // V90：原生菜单的宿主是**隐藏的** `SHELLDLL_DefView`。先把前台给一个**可见**窗口
-            // （就是我们自己这层挂件窗），否则 Explorer 弹出的菜单会「点外面不消失」（Win32 经典坑）。
-            unsafe {
-                let _ = SetForegroundWindow(hwnd);
-            }
-
-            // —— 首选：转发给 Explorer 的桌面视图，让它弹**它自己的完整原生菜单**（V90）——
-            // 那条链上有「查看 / 排序方式 / 刷新」和完整的 ShellNew「新建」14 项 —— 这两块
-            // 都不经过 IContextMenu，复刻拿不到（用户 10-08 23:01 的对比图就是在说这个）。
-            //
-            // V91：转发**立刻返回**（XAML 宿主在别的线程弹出），所以「等菜单出现 / 等收起」
-            // 必须挪到后台线程 —— 在这条 UI 线程上 sleep 会把整个前端冻住。
-            let state = match crate::platform::shell_menu::forward_desktop_view_menu() {
-                Ok(state) => state,
-                Err(err) => {
-                    grid_log(&format!("桌面右键转发失败：{err}"));
-                    let _ = tx.send(None);
-                    return;
-                }
-            };
-
-            let fallback_handle = handle.clone();
-            std::thread::spawn(move || {
-                if crate::platform::shell_menu::await_desktop_view_menu(&state) {
-                    // 原生完整菜单走完了。用户点了什么我们不知道（新建 / 粘贴 / 删除 / 排序…）
-                    // ⇒ 交给前端做增量对账：新增进竖条并进改名、有删除才重排。
-                    let _ = tx.send(None);
-                    return;
-                }
-                // —— 回退：V89 的复刻菜单（这台机器不吃转发时的保底）——
-                // `TrackPopupMenuEx` 要求宿主窗口所在线程有消息泵 ⇒ 必须回 UI 线程弹。
-                let tx2 = tx.clone();
-                let posted = fallback_handle.run_on_main_thread(move || {
-                    let h = HWND(hwnd_raw as *mut std::ffi::c_void);
-                    let result = crate::platform::shell_menu::show_background_context_menu(
-                        h,
-                        want_extended,
-                    );
-                    // 菜单已收起（含「新建」落地 / 取消），把结果发回；失败按「没新建」处理。
-                    let _ = tx2.send(result.unwrap_or(None));
-                });
-                if posted.is_err() {
-                    let _ = tx.send(None);
-                }
-            });
+            let result =
+                crate::platform::shell_menu::show_background_context_menu(hwnd, want_extended);
+            // 菜单已收起（含「新建」落地 / 取消），把结果发回；失败按「没新建」处理。
+            let _ = tx.send(result.unwrap_or(None));
         })
         .map_err(|err| format!("投递桌面背景菜单失败：{err}"))?;
-        // 阻塞等结果。注意：UI 线程只做了「转发」就撒手了（不睡眠），真正在等菜单的是上面
-        // 那个后台线程 —— 所以前端不会冻。Tauri 主线程自身跑着消息循环，也不会死锁。
+        // 阻塞等主线程把菜单弹完并发回结果。`run_on_main_thread` 只投递就返回，
+        // 所以「等」必须是这个 `recv()` —— 少了它就是 V88 那个「菜单还没弹就 resolve」的 bug。
         rx.recv()
             .map_err(|err| format!("读取新建结果失败：{err}"))
     }

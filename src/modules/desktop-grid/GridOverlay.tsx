@@ -1824,22 +1824,14 @@ export function GridOverlay(): React.JSX.Element {
         height: rect.height * scaleFactor,
       });
     }
-    // V89：接管桌面后，桌面空白区右键必须归 Handy 的菜单（不再穿透给 Explorer 触发借出 / 翻白）。
-    // 上报「整窗」命中区，让 Rust 的命中轮询认为光标始终命中 → 窗口始终可交互 → 右键落到根画布
-    // 的 onContextMenu，由我们弹原生背景菜单。仅在接管且内容可见时开启；其它情况保持穿透。
-    if (takeover?.enabled === true && !contentHidden) {
-      regions.push({
-        x: 0,
-        y: 0,
-        width: window.innerWidth * scaleFactor,
-        height: window.innerHeight * scaleFactor,
-      });
-    }
     void ipc.gridOverlayUpdateRegions(regions).catch(() => undefined);
-    // regionsKey 已覆盖 boxes / 菜单几何变化；contentHidden / takeover 翻转时要重算命中区
-    // （contentHidden=false + 接管态 → 整窗命中区开启，桌面空白右键归 Handy 菜单）
+    // regionsKey 已覆盖 boxes / 菜单几何变化；contentHidden 翻转时要重算命中区（只留工具栏）
+    //
+    // V92：**不再上报「整窗」命中区**。那一块是 V89 为了「桌面空白右键归 Handy」加的，
+    // 代价是把空白右键从 Explorer 手里抢走 —— 而 Explorer 那张菜单才带「查看 / 排序方式 /
+    // 刷新」和完整 ShellNew「新建」，我们复刻不出来。现在空白一律穿透给 Explorer。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [regionsKey, scaleFactor, contentHidden, takeover]);
+  }, [regionsKey, scaleFactor, contentHidden]);
 
   /**
    * 右键菜单开着期间**强制整窗可交互**（V47）。
@@ -3393,29 +3385,29 @@ export function GridOverlay(): React.JSX.Element {
        * 它一旦能滚，用户就永远对不齐自己的桌面。 */
       className="fixed inset-0 select-none overflow-hidden"
       style={{
-        // V89：接管桌面后，桌面空白区的右键必须归 Handy 的菜单（不再穿透给 Explorer
-        // 触发借出 / 桌面翻白）。接管且内容可见时让整窗可交互；拖拽期间本来就要可交互；
-        // 其它情况（没接管 / 内容收起）保持穿透，原生图标与桌面照常可交互。
-        pointerEvents:
-          itemDragging || (takeover?.enabled === true && !contentHidden)
-            ? 'auto'
-            : 'none',
+        // V92：桌面空白区的右键**必须穿透给 Explorer** —— 只有它那张菜单带「查看 / 排序方式 /
+        // 刷新」和完整的 ShellNew「新建」（14 项）；我们复刻不出这两块（不经过 IContextMenu），
+        // 强行自己弹就是用户 10-08 拿对比图质问的那张残缺菜单。
+        //
+        // 穿透会不会「翻白」？不会 —— V89 已把 `desktop_handoff` 整体停用（HANDOFF_DISABLED），
+        // 不再有「菜单期间把原生视图显示回来」这回事，桌面全程保持整理态。
+        //
+        // 只有拖拽期间才需要整窗可交互；其余时候空白一律穿透。
+        pointerEvents: itemDragging ? 'auto' : 'none',
       }}
       onContextMenu={(event) => {
-        // V87：**桌面 / 格子空白处右键 = 我们自己弹出原生背景菜单**。
+        // V92：**桌面空白处右键已经穿透给 Explorer 了**（见上方 `pointerEvents` 的说明），
+        // 所以这里只会在**我们自己渲染出来的元素上**被触发 —— 格子 / 竖条 / 面板是
+        // `pointerEvents:'auto'`，它们的右键会冒泡到根画布。
         //
-        // 之前（V81–V86）这里只是兜底：接管态下右键会**穿透**到被隐藏的原生图标视图，
-        // 由 Explorer 自己弹菜单，我们旁听并在菜单期间「把桌面借出去」。那套补丁要赌
-        // `#32768` 的类名语义（你这台 Win11 25H2 的新式菜单根本不叫这个名字）、要等
-        // 「安静 1.5s」、要 120s 超时兜底 —— 用户看到的仍然是「卡一下 / 要刷新 /
-        // 只有第一次成功」。
+        // 这一支保留我们自己的复刻菜单（V87/V88）：`CreateViewObject` 的背景菜单 +
+        // 我们自注入的「新建文件夹 / 新建文本文档」。那两项**确实能建出真实文件**
+        // （V88 日志可证：`桌面新建成功："新建文件夹 (3)"`），只是没有「查看 / 排序 /
+        // 刷新」和 ShellNew 那 14 项 —— 那两块不经过 `IContextMenu`，复刻不出来。
+        // 好在桌面空白右键已经走原生，用户要完整菜单就在空白处右键。
         //
-        // 现在换成 `IShellFolder::CreateViewObject` 给的**背景菜单**：新建 / 粘贴 /
-        // 下一个桌面背景 / 显示设置 / 个性化 + 我们注入的 Handy 子菜单 + 全部第三方
-        // 扩展，由我们弹、由 Shell 执行。见 `openDesktopBackgroundMenu`。
-        //
-        // **格子空白处同样走这里** —— 条目与标题栏各自 `stopPropagation`，格子其余
-        // 位置的右键会冒泡上来。这正是腾讯的行为：**在格子里右键空白也能新建**。
+        // V90/V91 曾试图把**桌面空白右键也转发**给 Explorer（WM_CONTEXTMENU +
+        // 「观测屏幕」判据），结果每次都弹出两个菜单、且新建彻底失效 —— 已全部删除。
         event.preventDefault();
         if (event.ctrlKey) {
           // Ctrl + 右键 = Handy 自己的菜单（对齐条目那条约定：Ctrl+右键在 Explorer

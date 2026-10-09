@@ -452,7 +452,11 @@ fn menu_open() -> bool {
 ///
 /// 必须在收回前判这个：原生「新建」是**菜单关闭之后**才进改名的，
 /// 收到 `MENUPOPUPEND` 就收回，会把刚弹出的编辑框一起藏掉。
-fn label_editing() -> bool {
+///
+/// V92 起也供 `grid` 的轮询线程复用：桌面空白右键**穿透**给 Explorer 之后，
+/// 原生「新建」会在**被我们隐藏的** `SysListView32` 上拉起这个框 ——
+/// 看不见、还会抢键盘，检测到就必须取消（改成交给我们自己的改名框）。
+pub fn label_editing() -> bool {
     let Some(list) = desktop_icon_view() else {
         return false;
     };

@@ -730,44 +730,61 @@ MUTATIONS: dict[str, _M] = {
             "不读返回值 ⇒ 复刻菜单回退路径拿不到 CreatedItem，新建项只能靠 diff 认领、"
             "且拿不到 name 无法精准进改名",
         ),
-        # —— V90/V91：不再复刻，转发给 Explorer 的桌面视图弹它的完整原生菜单 ——
-        # 用户 10-08 23:01 两张对比图：原生菜单有「查看/排序/刷新 + 新建 14 项」，
-        # 我们复刻的只有「新建文件夹/文本文档」两项。那两块不经过 IContextMenu，
-        # 复刻永远追不平 ⇒ 转发。下面几条守住「转发 / 判据 / 不整层 refresh」不被改回。
+        # —— V92：不代理、不转发 —— 桌面空白右键**穿透**给 Explorer ——
         #
-        # V91 补的是判据：Win11 的菜单由 Explorer 的 XAML 宿主在**别的线程**弹出，
-        # `SendMessage` 立刻返回 ⇒ 拿耗时当判据必然误判「没弹出」⇒ 又回退弹一个复刻菜单
-        # ⇒ 两个菜单同屏（用户 10-08 23:30：「右键要出两个菜单，而且一个菜单好像还一直存在」）。
+        # 「转发」这条路走死了：V90 拿 SendMessage 耗时当判据 ⇒ 每次误判「没弹出」⇒
+        # 同屏两个菜单；V91 换「观测屏幕」判据 ⇒ 又因为转发前 SetForegroundWindow(我们
+        # 的窗口)，Shell 的 CNewMenu 找不到目标 IShellView ⇒ 新建彻底建不出东西
+        # （用户 10-10 00:12 原话，取证确认那一轮十几次右键一个文件都没建出来）。
+        # 现在空白一律穿透，下面几条守住「穿透」与它的补偿措施不被改回。
         (
-            "V91 判据失灵（去掉「不是我们自己」⇒ 自己弹的菜单也算原生弹出）",
-            "src-tauri/src/platform/shell_menu.rs",
-            "        if now != 0 && now != state.before && window_pid(now) != me {",
-            "        if now != 0 && now != state.before && true {",
-            "判据少一条 ⇒ 任何窗口变化（包括我们自己弹的复刻菜单）都算「原生弹出」，"
-            "于是「原生菜单 + 回退菜单」两个同时挂在屏幕上 —— 正是 10-08 23:30 用户报的现象",
-        ),
-        (
-            "V91 不等菜单收起（前端在菜单还开着时对账 ⇒ 永远认领不到新建项）",
-            "src-tauri/src/platform/shell_menu.rs",
-            "    while close.elapsed().as_millis() < MENU_CLOSE_TIMEOUT_MS {",
-            "    while close.elapsed().as_millis() < 0 {",
-            "不等菜单收起 ⇒ 命令在菜单还开着时就返回 ⇒ 前端 diff 不出任何东西 ⇒ "
-            "用户点「新建」建出来的文件永远进不了竖条、也不进改名（V90 就是这么坏的）",
-        ),
-        (
-            "V90 新建也整层重排（「卡 + 整体刷新」回潮）",
+            "V92 根画布又变整窗可交互（重新抢走 Explorer 的空白右键 ⇒ 菜单回到残缺版）",
             "src/modules/desktop-grid/GridOverlay.tsx",
-            "        if (removed.length > 0) {",
-            "        if (added.length > 0) {",
-            "改成有新增就 refresh ⇒ 每次新建都全量重排，用户抱怨的「卡 + 整体刷新」复现",
+            "        pointerEvents: itemDragging ? 'auto' : 'none',",
+            "        pointerEvents: 'auto',",
+            "空白区不再穿透 ⇒ 右键又落到我们的复刻菜单上 —— 那张菜单没有「查看 / 排序方式 / "
+            "刷新」和完整 ShellNew「新建」（都不经过 IContextMenu），正是用户拿两张对比图质问的那件事",
         ),
         (
-            "V90 不取消 Explorer 的隐藏改名框（看不见 + 抢键盘）",
-            "src-tauri/src/platform/shell_menu.rs",
-            "            let _ = PostMessageW(list, LVM_CANCELEDITLABEL, WPARAM(0), LPARAM(0));",
-            "            let _ = PostMessageW(list, LVM_FIRST, WPARAM(0), LPARAM(0));",
-            "不取消 ⇒ Explorer 在隐藏 listview 上的原位改名框会抢走键盘，"
-            "用户自己 overlay 的改名输入框打不进字，而且他根本看不见那个框（「新建完没反应」）",
+            "V92 又把「接管态整窗可交互」加回来（V89 的老毛病）",
+            "src/modules/desktop-grid/GridOverlay.tsx",
+            "        pointerEvents: itemDragging ? 'auto' : 'none',",
+            "        pointerEvents: takeover?.enabled === true ? 'auto' : 'none',",
+            "接管时整窗吃事件 ⇒ 桌面空白右键进不了 Explorer ⇒ 回到「菜单残缺 / 双菜单 / "
+            "新建失效」那一串，V87–V91 五次迭代的坑重来一遍",
+        ),
+        (
+            "V92 命令不等菜单收起（去掉 mpsc 的 recv）",
+            "src-tauri/src/commands/grid.rs",
+            "        rx.recv()",
+            "        rx.try_recv()",
+            "`run_on_main_thread` 只投递就返回，真正的「等」全靠这个 recv —— "
+            "去掉它 ⇒ 命令在菜单还没弹出时就 resolve ⇒ 前端对账 diff 不出东西 ⇒ "
+            "新建的文件进不了竖条（V88 那个 bug 的原样复现）",
+        ),
+        (
+            "V92 桌面目录变了不广播（穿透之后新建的文件凭空消失）",
+            "src-tauri/src/commands/grid.rs",
+            '                        let _ = app.emit("grid:desktop-changed", ());',
+            '                        let _ = app.emit("grid:desktop-changed-v1", ());',
+            "穿透之后原生「新建」落地的文件我们收不到任何通知，只能靠这条广播让前端重扫 —— "
+            "没了它，用户点「新建文件夹」看到的就是「什么都没发生」",
+        ),
+        (
+            "V92 不取消 Explorer 在隐藏视图上的原位改名框（看不见 + 抢键盘）",
+            "src-tauri/src/commands/grid.rs",
+            "                            let _ = PostMessageW(list, LVM_CANCELEDITLABEL, WPARAM(0), LPARAM(0));",
+            "                            let _ = PostMessageW(list, WM_NULL, WPARAM(0), LPARAM(0));",
+            "那个框用户看不见（宿主被我们 SW_HIDE 了），还会 SetFocus 抢走键盘 —— "
+            "我们自己 overlay 的改名输入框就再也打不进字",
+        ),
+        (
+            "V92 取消改名框不再看 label_editing（每拍无条件 spam 消息）",
+            "src-tauri/src/commands/grid.rs",
+            "                    && crate::platform::desktop_handoff::label_editing()",
+            "                    && true",
+            "去掉这个门 ⇒ 轮询线程每 2 拍就往 explorer.exe 的 listview 发一条消息，"
+            "既刷日志又无谓打扰系统进程；平时没有改名框时本该零开销",
         ),
     ],
 }

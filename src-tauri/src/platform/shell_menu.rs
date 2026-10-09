@@ -73,11 +73,10 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CallWindowProcW, CreatePopupMenu, DefWindowProcW, DeleteMenu, DestroyMenu,
-    GetAncestor, GetCursorPos, GetMenuItemCount, GetMenuStringW, GetWindowThreadProcessId,
-    InsertMenuW, WindowFromPoint, GWLP_WNDPROC, GA_ROOT, HMENU, MF_BYPOSITION, MF_POPUP, MF_STRING,
-    PostMessageW, SendMessageW, SetForegroundWindow, SetWindowLongPtrW, TPM_LEFTALIGN,
-    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx, WM_CANCELMODE, WM_CONTEXTMENU, WM_DRAWITEM,
-    WM_INITMENUPOPUP, WM_MEASUREITEM, WM_MENUCHAR, WM_NULL, WNDPROC,
+    GetCursorPos, GetMenuItemCount, GetMenuStringW, InsertMenuW, GWLP_WNDPROC, HMENU, MF_BYPOSITION,
+    MF_POPUP, MF_STRING, PostMessageW, SetForegroundWindow, SetWindowLongPtrW, TPM_LEFTALIGN,
+    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx, WM_DRAWITEM, WM_INITMENUPOPUP,
+    WM_MEASUREITEM, WM_MENUCHAR, WM_NULL, WNDPROC,
 };
 
 /// 我们注入到「桌面背景」菜单里的「新建」子菜单命令 id。
@@ -87,13 +86,6 @@ use windows::Win32::UI::WindowsAndMessaging::{
 /// 「这是我们的新建项，不用走 `InvokeCommand`」。
 const CMD_NEW_FOLDER: u32 = 0x9001;
 const CMD_NEW_TEXT: u32 = 0x9002;
-
-/// `LVM_FIRST + 0x77`（comctl32 v6）。取消 ListView 的原位改名框。
-///
-/// V90：走「转发给 Explorer 桌面视图」这条路时，用户点原生「新建」后 Explorer 会在
-/// **隐藏的** `SysListView32` 上拉起改名框 —— 看不见、还抢键盘。菜单收起后立刻用它取消，
-/// 把「认领 + 改名」交回我们自己的前端（见 [`show_desktop_view_context_menu`]）。
-const LVM_CANCELEDITLABEL: u32 = 0x1000 + 0x77;
 
 /// 我们「新建」项被点中后产出的结果，回传前端让它增量认领 + 原地改名。
 ///
@@ -297,212 +289,13 @@ pub fn show_background_context_menu(
     }
 }
 
-/// V90：把右键**转发给 Explorer 自己的桌面视图**，让它弹出它自己的完整原生菜单。
-///
-/// # 为什么必须转发（用户 10-08 23:01 的两张对比图）
-///
-/// 用户给了两张截图，质问「这是你搞得右键菜单，你到底能不能实现原始功能」：
-///
-///   · **退出接管后**右键 → Explorer 原生菜单：查看 / 排序方式 / 刷新 / 下一个桌面背景 /
-///     撤销 删除 / **新建（14 项：文件夹、快捷方式、BMP 图像、DOC、DOCX、WPS PDF、
-///     PPT、PPTX、WPS AI 生成 PPT、RTF、文本文档、XLS、XLSX、360压缩 ZIP）** /
-///     显示设置 / 个性化 / 在终端预览中打开 / 显示更多选项；
-///   · **接管态**右键 → 我们复刻的菜单：只有「新建文件夹 / 新建文本文档」两项，
-///     连「查看 / 排序方式 / 刷新」都没有。
-///
-/// 这不是「没做」，是**接口边界**：那两块钱**根本不经过 `IContextMenu`**。
-///   - 查看 / 排序方式 / 刷新 → `IShellView::GetItemObject(SVGIO_VIEWMENU)`（DefView 的视图菜单）；
-///   - 完整的新建列表 → Shell 的 `CNewMenu`，按注册表 `ShellNew` 枚举 + 需要真实 `IShellView`
-///     才能定位目标目录并拉起改名框。
-/// 我们手上只有 `IShellFolder::CreateViewObject(IID_IContextMenu)` 给的那张**残缺**菜单，
-/// 复刻永远追不平（第三方注册的自定义 ShellNew 处理器更没法枚举）。**所以不复刻了，转发。**
-///
-/// # 原理：DefView 一直活着，我们只是把它藏起来了
-///
-/// `SHELLDLL_DefView` / `SysListView32` 并没有消失 —— 接管只是 `SW_HIDE`。
-/// 给它底下的 `SysListView32` 发一条 `WM_CONTEXTMENU`（约定：`wParam` = 发起窗口、
-/// `lParam` = **屏幕坐标**），它会按 shell 约定转给父窗口 `SHELLDLL_DefView`，
-/// DefView 再取 `SVGIO_BACKGROUND` 的 `IContextMenu` 弹菜单 —— **那条链上就有上面那两块**。
-/// 而 `SysListView32` **始终隐藏**，桌面**不翻白**。
-///
-/// # 怎么知道菜单真弹出来了（V91：**禁止**用 `SendMessage` 耗时当判据）
-///
-/// V90 第一版拿「`SendMessage` 耗时 ≥ 150ms」当判据 —— **实测是错的**：
-/// Win11 的桌面右键菜单由 Explorer 的 XAML 宿主在**另一个线程**弹出，
-/// `SendMessage` 打完招呼就回来了（这台机器实测 37–48ms）。于是每次右键都被判成
-/// 「没弹出 ⇒ 回退复刻菜单」，结果是**两个菜单同时挂在屏幕上**；而 Explorer 那个
-/// 又因为我们的 `TrackPopupMenuEx` 抢了模态前台**收不回去** ——
-/// 用户 10-08 23:30 的原话：「右键要出两个菜单，而且一个菜单好像还一直存在」。
-///
-/// 现在改成**直接观测屏幕**：菜单一定弹在鼠标点，于是「鼠标点下的顶层窗口」会从
-/// 「桌面 / 我们自己这层挂件窗」变成「菜单窗口」。轮询等它变：
-///   · 变了 ⇒ 真弹了，**不回退**（屏幕上只有一个菜单）；
-///   · 超时仍没变 ⇒ 这台机器不吃这条转发，**才**回退复刻菜单（保底有菜单）。
-///
-/// # 为什么拆成两半（V91）
-///
-/// 「等菜单」要 sleep 几十秒（用户可能慢慢挑），**绝不能放在 Tauri 的 UI 线程上** ——
-/// 纯 sleep 循环没有消息泵，整个前端会冻住。所以：
-///   1. [`forward_desktop_view_menu`]：**UI 线程**里跑，只发消息，立刻返回现场；
-///   2. [`await_desktop_view_menu`]：**后台线程**里跑，轮询等菜单出现 → 等收起。
-pub fn forward_desktop_view_menu() -> Result<DesktopViewMenuState, String> {
-    let list = crate::commands::grid::desktop_icon_view()
-        .ok_or_else(|| "找不到桌面图标视图（SysListView32）".to_string())?;
-
-    // 坐标口径与 `run_menu` 完全一致：不从前端传，直接用 `GetCursorPos`（屏幕物理像素，
-    // 正是 `WM_CONTEXTMENU` 要的那种）——前端的 client 坐标要过窗口偏移 / DPI，反而容易错。
-    let mut point = POINT::default();
-    unsafe {
-        if GetCursorPos(&mut point).is_err() {
-            point = POINT { x: 0, y: 0 };
-        }
-    }
-    // MAKELPARAM：低 16 位 = x，高 16 位 = y。
-    let lp = (((point.y as u32 & 0xFFFF) << 16) | (point.x as u32 & 0xFFFF)) as isize;
-
-    // 转发前：鼠标点下压着谁（桌面 / 我们自己这层挂件窗）。
-    let before = root_window_at(point);
-
-    let started = std::time::Instant::now();
-    unsafe {
-        let _ = SendMessageW(list, WM_CONTEXTMENU, WPARAM(list.0 as usize), LPARAM(lp));
-    }
-    let send_ms = started.elapsed().as_millis();
-    crate::logging::write_line(
-        "grid",
-        &format!("桌面右键转发 Explorer 桌面视图：SendMessage(WM_CONTEXTMENU) 返回 {send_ms}ms（不阻塞）"),
-    );
-
-    Ok(DesktopViewMenuState {
-        list: list.0 as isize,
-        point,
-        before,
-    })
-}
-
-/// 转发时的现场，交给后台线程继续等（见 [`forward_desktop_view_menu`] 的说明）。
-#[derive(Clone, Copy)]
-pub struct DesktopViewMenuState {
-    /// `SysListView32` 的句柄（存成 `isize` 才能跨线程）。
-    list: isize,
-    /// 右键时的屏幕坐标（菜单就弹在这儿）。
-    point: POINT,
-    /// 转发前压在鼠标点上的顶层窗口（用来判「菜单出现了 / 收起了」）。
-    before: isize,
-}
-
-/// 后台线程：等菜单出现 → 等菜单收起。返回「原生菜单到底弹没弹」。
-///
-/// `false` = 这台机器不吃这条转发，调用方应当回退到复刻菜单。
-pub fn await_desktop_view_menu(state: &DesktopViewMenuState) -> bool {
-    let point = state.point;
-    let list = HWND(state.list as *mut std::ffi::c_void);
-    let me = std::process::id();
-
-    // —— 等菜单出现 ——
-    let mut popped = false;
-    let mut after = 0isize;
-    let wait = std::time::Instant::now();
-    while wait.elapsed().as_millis() < MENU_APPEAR_TIMEOUT_MS {
-        std::thread::sleep(std::time::Duration::from_millis(40));
-        let now = root_window_at(point);
-        // 「换了个人压在鼠标点上，而且不是我们自己」= 菜单弹出来了。
-        if now != 0 && now != state.before && window_pid(now) != me {
-            popped = true;
-            after = now;
-            break;
-        }
-    }
-    if !popped {
-        crate::logging::write_line(
-            "grid",
-            &format!(
-                "桌面右键转发：等 {}ms 没等到菜单，回退复刻菜单",
-                wait.elapsed().as_millis()
-            ),
-        );
-        return false;
-    }
-
-    // —— 等菜单收起（用户点中某项 / 按 Esc / 点菜单外面）——
-    //
-    // 前端要等这个结果回到命令后才做对账（靠「菜单前后」的文件 diff 认领新增项）。
-    // V90 错在**没等**：`SendMessage` 立刻返回 ⇒ 命令立刻 resolve ⇒ 前端在
-    // **菜单还开着**时对账 ⇒ 必然 diff 不出东西 ⇒ 用户点「新建」建出来的文件
-    // 永远进不了竖条、也不进改名。所以必须等到菜单从鼠标点消失（或超时）。
-    //
-    // 期间顺手**反复取消** Explorer 在隐藏 listview 上拉起的原位改名框：
-    // 原生「新建」会建好真实文件、再让 `IShellView` 在 `SysListView32` 上拉一个
-    // **原位改名框** —— 用户看不见它（listview 被我们 `SW_HIDE` 了），它还会
-    // `SetFocus` **抢键盘**，我们 overlay 自己的改名输入框就再也打不进字。
-    // 那个框是**菜单收起那一刻**才拉起的（之前不存在），所以只能在这里持续打点。
-    // 用 `PostMessage`（不是 `SendMessage`）：投递完就走，不会因为 Explorer 忙而卡死。
-    let close = std::time::Instant::now();
-    while close.elapsed().as_millis() < MENU_CLOSE_TIMEOUT_MS {
-        unsafe {
-            let _ = PostMessageW(list, LVM_CANCELEDITLABEL, WPARAM(0), LPARAM(0));
-        }
-        std::thread::sleep(std::time::Duration::from_millis(250));
-        let now = root_window_at(point);
-        // 鼠标点上不再是那个菜单窗口 ⇒ 菜单收起了（或换了别的窗口压着）。
-        if now == 0 || now == state.before || window_pid(now) == me || now != after {
-            break;
-        }
-    }
-    let closed_ms = close.elapsed().as_millis();
-    // 菜单刚收起，Explorer 还在落地（建文件 + 拉改名框）—— 给它一点时间再补一枪。
-    std::thread::sleep(std::time::Duration::from_millis(250));
-    unsafe {
-        let _ = PostMessageW(list, LVM_CANCELEDITLABEL, WPARAM(0), LPARAM(0));
-        let _ = PostMessageW(list, WM_CANCELMODE, WPARAM(0), LPARAM(0));
-    }
-
-    crate::logging::write_line(
-        "grid",
-        &format!(
-            "桌面右键转发 Explorer 桌面视图：原生完整菜单已弹出（menu={after:#x}，含查看/排序/刷新 \
-             + ShellNew 新建 14 项），{closed_ms}ms 后收起"
-        ),
-    );
-    true
-}
-
-/// 等菜单**出现**的上限（毫秒）。XAML 宿主换线程弹出，实测几十毫秒内出现；
-/// 给到 1000ms 是为了兼容机器忙 / 首次加载 XAML 的情况。超时即认定「这台机器不吃这条转发」。
-const MENU_APPEAR_TIMEOUT_MS: u128 = 1000;
-
-/// 等菜单**收起**的上限（毫秒）。用户在菜单里停留多久都算正常（可能去接杯水），
-/// 但命令挂在 tokio 线程上，不能无限等 —— 60s 后放弃等待，按「菜单已收起」继续
-/// （前端照常对账，只是可能晚一点认领到新建项）。
-const MENU_CLOSE_TIMEOUT_MS: u128 = 60_000;
-
-/// 取「屏幕坐标点下压着的**顶层**窗口」（0 = 什么都没压着）。
-///
-/// `WindowFromPoint` 可能返回子窗口（菜单的子级），`GetAncestor(GA_ROOT)` 归一化到顶层，
-/// 免得「菜单弹出前后子窗口句柄抖动」把判据搅乱。
-fn root_window_at(point: POINT) -> isize {
-    unsafe {
-        let hit = WindowFromPoint(point);
-        if hit.0.is_null() {
-            return 0;
-        }
-        let root = GetAncestor(hit, GA_ROOT);
-        if root.0.is_null() {
-            hit.0 as isize
-        } else {
-            root.0 as isize
-        }
-    }
-}
-
-/// 窗口所属进程 id（0 = 取不到）。
-fn window_pid(hwnd: isize) -> u32 {
-    let mut pid = 0u32;
-    unsafe {
-        let _ = GetWindowThreadProcessId(HWND(hwnd as *mut std::ffi::c_void), Some(&mut pid));
-    }
-    pid
-}
+// ——— V92：V90/V91 的「转发右键给 Explorer 桌面视图」整块已删除 ———
+//
+// 那套做法（WM_CONTEXTMENU + 「观测屏幕」判据）实测每次都弹出两个菜单，且因为转发前
+// 调了 SetForegroundWindow(我们的窗口)，Shell 的 CNewMenu 找不到目标 IShellView ⇒
+// 「新建」彻底建不出东西（用户 10-10 00:12 的反馈）。现在桌面空白右键改为**直接穿透**
+// 给 Explorer（见 GridOverlay 根画布 pointerEvents），那张菜单天然带「查看/排序/刷新」
+// 和完整 ShellNew「新建」，我们一行代理代码都不需要写。
 
 /// V89：把 Shell 原生那个「新建」从菜单里**摘掉**，只留我们自己注入的那个。
 ///

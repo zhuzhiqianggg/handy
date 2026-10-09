@@ -331,17 +331,21 @@ ok('V89：菜单收起时留痕命令 id（下次再报「新建失效」能一�
 ok('V89：新建成功也写日志（成功不静默，才能区分「没点到」与「建失败」）',
   /桌面新建成功/.test(shellMenuSrc));
 
-// Ⓐ 桌面空白右键归 Handy + 不再借出
-ok('V89：接管态下根画布整窗可交互（桌面空白右键不再穿透给 Explorer）',
-  /pointerEvents:[\s\S]{0,400}?takeover\?\.enabled === true && !contentHidden[\s\S]{0,120}?'auto'/.test(
-    overlaySrc,
-  ));
-ok('V89：接管态下上报「整窗」命中区（让 Rust 命中轮询认为光标始终命中）',
-  /if \(takeover\?\.enabled === true && !contentHidden\) \{[\s\S]{0,200}?width: window\.innerWidth \* scaleFactor/.test(
-    overlaySrc,
-  ));
-ok('V89：整窗命中区随 takeover 变化重算（写进了依赖数组）',
-  /\}, \[regionsKey, scaleFactor, contentHidden, takeover\]\);/.test(overlaySrc));
+// Ⓐ V92：桌面空白右键**还给 Explorer** + 不再借出
+//
+// 这是 V92 的核心反转。V89 把空白右键从 Explorer 手里抢过来自己弹，代价是那张菜单
+// 天生残缺（没有「查看 / 排序方式 / 刷新」和完整 ShellNew「新建」—— 那两块都不经过
+// `IContextMenu`）。V90/V91 又试图「转发」，结果双菜单 + 新建彻底失效。
+// 现在一律穿透：空白右键归 Explorer，原生功能 100% 完整，我们一行代理都不写。
+ok('V92：根画布只在拖拽时可交互（桌面空白右键一律穿透给 Explorer）',
+  /pointerEvents: itemDragging \? 'auto' : 'none',/.test(overlaySrc));
+ok('V92：**不再**有「接管态整窗可交互」分支（那会把 Explorer 的空白右键抢走）',
+  !/takeover\?\.enabled === true && !contentHidden[\s\S]{0,120}?'auto'/.test(overlaySrc));
+ok('V92：**不再**上报「整窗」命中区（否则 Rust 命中轮询会让整窗吃掉点击）',
+  !/width: window\.innerWidth \* scaleFactor/.test(overlaySrc));
+ok('V92：命中区依赖数组不再带 takeover（整窗区已删，留着会误触发重算）',
+  !/\}, \[regionsKey, scaleFactor, contentHidden, takeover\]\);/.test(overlaySrc) &&
+    /\}, \[regionsKey, scaleFactor, contentHidden\]\);/.test(overlaySrc));
 ok('V89：handoff 整体停用（HANDOFF_DISABLED）',
   /const HANDOFF_DISABLED: bool = true;/.test(handoffSrc));
 ok('V89：begin_handoff 看到停用标志就让路',
@@ -371,83 +375,75 @@ ok('V89：types/grid.ts 导出 CreatedItem',
   /export interface CreatedItem \{/.test(read('src/types/grid.ts')));
 
 /* ================================================================== *
- * ⑧ V90/V91：不复刻了 —— 把右键**转发**给 Explorer 的桌面视图，弹它自己的完整原生菜单
+ * ⑧ V92：不代理、不转发 —— 桌面空白右键**穿透**给 Explorer
  *
- * 用户 10-08 23:01 给两张对比图质问「这是你搞得右键菜单，你到底能不能实现原始功能」：
- *   · 退出接管后 → 原生菜单：查看 / 排序方式 / 刷新 / 撤销 / 新建（14 项）/ 显示更多选项；
- *   · 接管态 → 我们复刻的菜单：只有「新建文件夹 / 新建文本文档」，连视图菜单都没有。
- * 那两块钱**不经过 `IContextMenu`**（查看/排序/刷新 = `IShellView` 的视图菜单；
- * 完整新建 = `CNewMenu` + 注册表 `ShellNew`），复刻永远追不平 ⇒ 改成转发。
- * （`examples/bg_menu_dump` 实测：`CreateViewObject` 的桌面背景菜单只有 16 项，
- *   里面**没有**查看 / 排序方式 / 刷新 —— 那三项只有 Explorer 自己弹时才有。）
+ * 这条路是怎么走死的（每一次都是在补上一次的洞）：
+ *   V87 自己弹 `CreateViewObject` 背景菜单 → 残缺（无「查看/排序/刷新」，新建只有 2 项）；
+ *   V88 自注入「新建」子菜单 → 能用，但与原生那个同名并存，一半概率点到必 E_FAIL 的；
+ *   V89 抢下桌面空白右键 → 把 Explorer 的完整菜单挤掉；
+ *   V90 转发 `WM_CONTEXTMENU`，拿「SendMessage 耗时 ≥150ms」判弹出 → 实测 37–48ms，
+ *       每次都误判成「没弹出」⇒ 又弹一个复刻菜单 ⇒ **屏幕上有两个菜单**；
+ *   V91 判据换成「观测屏幕」→ 但转发前调了 `SetForegroundWindow(我们的窗口)`，
+ *       Shell 的 `CNewMenu` 因此找不到目标 `IShellView` ⇒ **新建彻底建不出东西**
+ *       （用户 10-10 00:12：「点击新建没有任何反应，也没有创建成功」—— 取证确认
+ *       那一轮十几次右键一个文件都没建出来）。
  *
- * V91 修的是 V90 的**判据错误**：Win11 的桌面右键菜单由 Explorer 的 XAML 宿主在
- * **另一个线程**弹出，`SendMessage` 立刻返回（这台机器实测 37–48ms）。V90 拿
- * 「耗时 ≥ 150ms」当「弹出来了」的判据 ⇒ 每次都被判成「没弹出」⇒ 又回退弹一个复刻
- * 菜单 ⇒ **两个菜单同时挂在屏幕上**，而 Explorer 那个还因为我们的 `TrackPopupMenuEx`
- * 抢了模态前台**收不回去**（用户 10-08 23:30：「右键要出两个菜单，而且一个菜单好像
- * 还一直存在」）。修法：① 判据换成**直接观测屏幕**；② 「等菜单」挪到后台线程。
+ * V92 的结论：**别代理了**。根画布空白区一律 `pointer-events: none` 穿透给 Explorer，
+ * 它那张菜单天然带「查看 / 排序方式 / 刷新」和完整 ShellNew「新建」；`desktop_handoff`
+ * 已停用 ⇒ 桌面**不会翻白**。我们只在「格子内空白右键」保留自己的复刻菜单
+ * （V88 自注入的「新建文件夹 / 文本文档」确实能建出真实文件，日志可证）。
+ *
+ * ⚠️ 穿透的代价见 ⑨：原生新建落地的文件我们收不到任何通知，必须自己发现。
  * ================================================================== */
 
-ok('V90：转发拆成「发消息」+「等菜单」两半（等菜单不许占 UI 线程）',
-  /pub fn forward_desktop_view_menu\(\) -> Result<DesktopViewMenuState, String>/.test(shellMenuSrc) &&
-    /pub fn await_desktop_view_menu\(state: &DesktopViewMenuState\) -> bool/.test(shellMenuSrc));
-ok('V90：用 SendMessageW + WM_CONTEXTMENU 转发（wParam=发起窗口、lParam=屏幕坐标）',
-  /SendMessageW\(list, WM_CONTEXTMENU, WPARAM\(list\.0 as usize\), LPARAM\(lp\)\)/.test(shellMenuSrc));
-ok('V90：坐标取自 GetCursorPos（屏幕物理像素，不是前端 client 坐标）',
-  /let mut point = POINT::default\(\);[\s\S]{0,200}?GetCursorPos\(&mut point\)/.test(shellMenuSrc));
-ok('V90：MAKELPARAM 低 16 位 x、高 16 位 y',
-  /\(\(\(point\.y as u32 & 0xFFFF\) << 16\) \| \(point\.x as u32 & 0xFFFF\)\)/.test(shellMenuSrc));
-ok('V90：目标是我们隐藏掉的那个“真”桌面视图（SysListView32），不是自建窗口',
-  /crate::commands::grid::desktop_icon_view\(\)/.test(shellMenuSrc));
+ok('V92：转发整块已删除（forward / await / 状态结构体都不许复活）',
+  !/forward_desktop_view_menu|await_desktop_view_menu|DesktopViewMenuState/.test(shellMenuSrc));
+// 只打**调用点**（`SendMessageW(list, WM_CONTEXTMENU`）：删转发时留了说明注释，
+// 打裸词会命中注释 ⇒ 假失败。
+ok('V92：**不再**发 WM_CONTEXTMENU（「转发」不可能同时满足「不双菜单」与「新建能用」）',
+  !/SendMessageW\(list, WM_CONTEXTMENU/.test(shellMenuSrc) &&
+    !/PostMessageW\(list, WM_CONTEXTMENU/.test(shellMenuSrc) &&
+    !/WM_CONTEXTMENU,/.test(shellMenuSrc));
+ok('V92：**不再**有「观测屏幕」判据（菜单圆角 / 透明区会让 WindowFromPoint 误判）',
+  !/WindowFromPoint|GetAncestor|GA_ROOT/.test(shellMenuSrc));
+ok('V92：命令层只弹复刻菜单并返回 CreatedItem（不再有转发分支）',
+  !/forward_desktop_view_menu/.test(rustCmdSrc) &&
+    /show_background_context_menu\(hwnd, want_extended\)/.test(rustCmdSrc));
+ok('V92：**不再** SetForegroundWindow（它让 CNewMenu 找不到目标视图 ⇒ 新建静默失败）',
+  !/SetForegroundWindow/.test(rustCmdSrc));
+ok('V92：命令仍用 mpsc 真正等到菜单收起（run_on_main_thread 只投递，少了 recv 就是 V88 的 bug）',
+  /rx\.recv\(\)/.test(rustCmdSrc));
 
-// —— V91：判据必须是「观测屏幕」，不许再拿 SendMessage 耗时当数（双菜单真凶）——
-ok('V91：**不再**用 SendMessage 耗时当「菜单弹没弹」的判据',
-  !/let popped = ms >= 150;/.test(shellMenuSrc));
-ok('V91：改用 WindowFromPoint 观测鼠标点下的顶层窗口（菜单就弹在鼠标点）',
-  /WindowFromPoint\(point\)/.test(shellMenuSrc) &&
-    /GetAncestor\(hit, GA_ROOT\)/.test(shellMenuSrc) &&
-    /GetWindowThreadProcessId/.test(shellMenuSrc));
-ok('V91：判据 =「鼠标点下换了人 + 不是我们自己」⇒ 菜单弹出来了',
-  /now != 0 && now != state\.before && window_pid\(now\) != me/.test(shellMenuSrc));
-// 行锚定（不许再 && 别的）：多一个条件就可能永远判不出「弹出来了」，于是每次右键都多弹一个。
-ok('V91：判据就那三条，后面紧跟 `{ popped = true;`（不许再 && 条件）',
-  /if now != 0 && now != state\.before && window_pid\(now\) != me \{\s*popped = true;/.test(
-    shellMenuSrc,
-  ));
-ok('V91：等菜单**出现**之后还要等它**收起**（否则前端在菜单还开着时对账 ⇒ 永远认领不到新建项）',
-  /while close\.elapsed\(\)\.as_millis\(\) < MENU_CLOSE_TIMEOUT_MS/.test(shellMenuSrc));
-ok('V91：取消隐藏改名框改走 PostMessage（投递即走，Explorer 忙也不会卡死后台线程）',
-  /PostMessageW\(list, LVM_CANCELEDITLABEL, WPARAM\(0\), LPARAM\(0\)\)/.test(shellMenuSrc));
-ok('V91：取消改名框在**等菜单收起**的循环里持续打点（改名框是菜单收起那一刻才拉起的）',
-  /while close\.elapsed\(\)[\s\S]{0,400}?PostMessageW\(list, LVM_CANCELEDITLABEL/.test(shellMenuSrc));
+/* ================================================================== *
+ * ⑨ V92：桌面目录变更检测 —— 穿透之后，原生「新建」落地的文件不能凭空消失
+ *
+ * 空白右键穿透给 Explorer 后，用户在原生菜单里点「新建文件夹」：文件会真的建在桌面
+ * 目录里，但我们**收不到任何通知**（没有 shell hook、没有窗口消息、没有 IPC），
+ * 而原生图标又被我们 `SW_HIDE` 了 —— 用户看到的就是「点了新建，什么都没发生」。
+ * 这条必须和 ⑧ 一起做，否则穿透做得再对也只是半成品。
+ * ================================================================== */
 
-ok('V90：命令层**优先**走转发（原生完整菜单）',
-  /crate::platform::shell_menu::forward_desktop_view_menu\(\)/.test(rustCmdSrc));
-ok('V91：等待放**后台线程**（UI 线程只发消息，否则 sleep 循环会冻住整个前端）',
-  /std::thread::spawn\(move \|\| \{[\s\S]{0,200}?await_desktop_view_menu\(&state\)/.test(rustCmdSrc));
-ok('V90：转发不生效时回退到 V89 复刻菜单（最坏情况不比以前差）',
-  /await_desktop_view_menu\(&state\)[\s\S]{0,700}?show_background_context_menu\(/.test(rustCmdSrc));
-ok('V91：回退必须回 UI 线程弹（TrackPopupMenuEx 要求宿主线程有消息泵）',
-  /fallback_handle\.run_on_main_thread\(move \|\| \{/.test(rustCmdSrc));
-ok('V90：弹原生菜单前先把前台给可见窗口（隐藏宿主 ⇒ 不占前台菜单会“点外面不消失”）',
-  /unsafe \{\s*let _ = SetForegroundWindow\(hwnd\);\s*\}/.test(rustCmdSrc));
-
-ok('V90：前端原生路径做**增量对账**（diff 出新增项送进竖条）',
-  /const added = after\.filter\(\(p\) => !before\.has\(p\)\);/.test(overlaySrc) &&
-    /const removed = \[\.\.\.before\]\.filter\(\(p\) => !after\.includes\(p\)\);/.test(overlaySrc));
-ok('V90：只有出现删除 / 改名才重排格子（单纯新建不整层 refresh）',
-  /if \(removed\.length > 0\) \{\s*await refresh\(\)/.test(overlaySrc));
-ok('V90：单个新增项进原地改名（对齐 Explorer 新建体验）',
-  /const only = added\.length === 1 \? added\[0\] : undefined;[\s\S]{0,200}?beginItemRename\(only,/.test(
-    overlaySrc,
-  ));
-// 原生「新建」会让 Explorer 在**隐藏的** listview 上拉起改名框：用户看不见 + 它会抢键盘
-// （我们自己的改名输入框就打不进字了）。必须取消它 —— 这条不锁就会回归。
-ok('V90：定义了 LVM_CANCELEDITLABEL（取消 ListView 原生改名框）',
-  /const LVM_CANCELEDITLABEL: u32 = 0x1000 \+ 0x77;/.test(shellMenuSrc));
-ok('V90：同时发 WM_CANCELMODE（收尾兜底，避免残留模态态）',
-  /PostMessageW\(list, WM_CANCELMODE, WPARAM\(0\), LPARAM\(0\)\)/.test(shellMenuSrc));
+ok('V92：有桌面目录签名函数（条目数 + 最新 mtime）',
+  /fn desktop_dir_signature\(\) -> \(usize, u64\)/.test(rustCmdSrc));
+ok('V92：签名基线存 static，第一次只记基线不广播（免得启动瞬间无谓重扫）',
+  /static DESKTOP_DIR_SIG: std::sync::Mutex<\(usize, u64\)>/.test(rustCmdSrc));
+ok('V92：签名变了就广播 grid:desktop-changed',
+  /app\.emit\("grid:desktop-changed", \(\)\)/.test(rustCmdSrc));
+ok('V92：前端监听 grid:desktop-changed 并重扫桌面',
+  /listen\('grid:desktop-changed'/.test(overlaySrc));
+ok('V92：签名只读目录项元数据（read_dir，不读内容、不递归）',
+  /std::fs::read_dir\(&dir\)/.test(rustCmdSrc));
+// 原生「新建」会在**被我们隐藏的** listview 上拉起原位改名框：用户看不见，它还会
+// SetFocus 抢键盘（我们自己的改名输入框就打不进字了）。检测到必须取消。
+ok('V92：检测到隐藏改名框就用 LVM_CANCELEDITLABEL 取消',
+  /const LVM_CANCELEDITLABEL: u32 = 0x1000 \+ 0x77;/.test(rustCmdSrc) &&
+    /PostMessageW\(list, LVM_CANCELEDITLABEL, WPARAM\(0\), LPARAM\(0\)\)/.test(rustCmdSrc));
+ok('V92：只在**真有**改名框时才发消息（复用 label_editing，平时零开销）',
+  /crate::platform::desktop_handoff::label_editing\(\)/.test(rustCmdSrc));
+ok('V92：label_editing 已对外可见（grid 轮询要复用它）',
+  /pub fn label_editing\(\) -> bool/.test(handoffSrc));
+ok('V92：取消用 PostMessage（投递即走，Explorer 忙也不会卡住轮询线程）',
+  /use windows::Win32::UI::WindowsAndMessaging::PostMessageW;/.test(rustCmdSrc));
 
 /* ================================================================== *
  * 结果
