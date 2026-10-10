@@ -567,7 +567,10 @@ fn now_ms_placeholder() -> u64 {
 /// 命令层把 `Option<CreatedItem>` 直接带回前端，前端据此决定「增量认领 + 原地改名」还是
 /// 「全量对账」，彻底消掉 V88 那套「事件 + 30ms 竞速」在菜单还没弹时就误判「没新建」、
 /// 触发整层刷新的残留 bug。
-fn create_new_item(kind: &str) -> Option<CreatedItem> {
+///
+/// V97：`pub` —— 自绘桌面菜单的「新建」子项不再绕菜单（`run_menu`），命令
+/// `desktop_create_new` 直接调这里，落盘路径与命名规则**与菜单路径一字不差**。
+pub fn create_new_item(kind: &str) -> Option<CreatedItem> {
     let root = match desktop_user_root() {
         Some(dir) => dir,
         None => {

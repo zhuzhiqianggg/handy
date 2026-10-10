@@ -3775,6 +3775,99 @@ pub async fn shell_desktop_background_menu(
     }
 }
 
+/// 直接在桌面目录新建一个条目，**不经过任何菜单**（V97）。
+///
+/// V97 起桌面空白右键改弹**前端自绘的 Win11 同款菜单**，菜单里的「新建」子项直接调
+/// 这里。落盘路径复用 [`crate::platform::shell_menu::create_new_item`] —— 与经典菜单里
+/// 我们注入的「新建」是**同一个函数**：递增命名（`新建文件夹` → `新建文件夹 (2)`）、
+/// 落地真实目录 / 文件、返回 [`CreatedItem`] 供前端「增量认领 + 原地改名」。
+///
+/// 这里没有 `TrackPopupMenuEx`，不需要主线程投递，也不需要 mpsc 通道 —— 纯文件系统
+/// 操作，命令线程直接做即可。
+#[tauri::command]
+pub async fn desktop_create_new(
+    kind: String,
+) -> Result<Option<crate::platform::shell_menu::CreatedItem>, String> {
+    #[cfg(target_os = "windows")]
+    {
+        if kind != "folder" && kind != "text" {
+            return Err(format!("不支持的新建类型：{kind}"));
+        }
+        Ok(crate::platform::shell_menu::create_new_item(&kind))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = kind;
+        Err("当前平台暂未适配桌面新建".to_string())
+    }
+}
+
+/// 打开一个系统级目标（V97，自绘桌面菜单专用）。
+///
+/// - `display` / `personalization`：Windows 设置对应页。用 `explorer.exe <URI>` 打开
+///   `ms-settings:` 链接 —— explorer 自己就是设置应用的宿主，不会闪控制台窗口
+///   （`cmd /C start` 会先弹一瞬间的 cmd 框）。
+/// - `terminal`：在桌面目录打开终端。优先 Windows Terminal（`wt -d <桌面目录>`），
+///   拿不到（未安装 / 别名未启用）就退回 PowerShell `-NoExit`。
+#[tauri::command]
+pub async fn shell_open_system(target: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        match target.as_str() {
+            "display" => open_uri("ms-settings:display"),
+            "personalization" => open_uri("ms-settings:personalization"),
+            "terminal" => open_terminal_at_desktop(),
+            _ => Err(format!("未知的系统目标：{target}")),
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = target;
+        Err("当前平台暂未适配系统入口".to_string())
+    }
+}
+
+/// 用 `explorer.exe` 打开一个 URI（`ms-settings:` / `shell:` 都认）。
+///
+/// 为什么不走 `cmd /C start`：`start` 要借 cmd.exe 落地，会闪一个黑色控制台框；
+/// `explorer.exe` 是图形进程，静默。失败（几乎不会）时返回错误给前端 showHint。
+#[cfg(target_os = "windows")]
+fn open_uri(uri: &str) -> Result<(), String> {
+    std::process::Command::new("explorer")
+        .arg(uri)
+        .spawn()
+        .map(|_| ())
+        .map_err(|err| format!("打开「{uri}」失败：{err}"))
+}
+
+/// 在桌面用户目录打开一个终端窗口（V97）。
+///
+/// 优先 `wt -d <目录>`（Windows Terminal 的 `-d` 就是「从这个目录起」）；spawn 失败
+/// （没装 / 执行别名被组策略关了）就退回 Windows 自带的 PowerShell，`-NoExit` 保持
+/// 窗口不关，`Set-Location -LiteralPath` 对含空格 / 特殊字符的路径最稳。
+#[cfg(target_os = "windows")]
+fn open_terminal_at_desktop() -> Result<(), String> {
+    let dir = dirs::desktop_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    if std::process::Command::new("wt")
+        .arg("-d")
+        .arg(&dir)
+        .spawn()
+        .is_ok()
+    {
+        return Ok(());
+    }
+    crate::logging::write_line(
+        "grid",
+        "打开 Windows Terminal 失败，退回 PowerShell（在桌面目录）",
+    );
+    let script = format!("Set-Location -LiteralPath '{}'", dir.display());
+    std::process::Command::new("powershell")
+        .args(["-NoExit", "-Command", script.as_str()])
+        .spawn()
+        .map(|_| ())
+        .map_err(|err| format!("打开终端失败：{err}"))
+}
+
 /// 从**桌面层**（格子挂件窗 / 快捷条）唤出主窗口并跳到指定视图（V42）。
 ///
 /// 用户原话：「我们这个工具本来就是为了方便顺手使用，其他都可以直接在桌面上实现功能，

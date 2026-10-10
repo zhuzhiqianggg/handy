@@ -1,18 +1,26 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Check,
+  ChevronRight,
   Eye,
   EyeOff,
   File,
+  FileText,
   FolderClosed,
+  FolderPlus,
   LayoutGrid,
   Link2,
   List,
   Lock,
   LockOpen,
   Monitor,
+  MoreHorizontal,
   Palette,
   Plus,
+  RefreshCw,
+  Sparkles,
   StickyNote,
+  Terminal,
   Trash2,
   Wrench,
 } from 'lucide-react';
@@ -719,6 +727,45 @@ function LooseIcon({ entry, size }: { entry: LooseEntry; size: number }): React.
   return <FileIcon path={entry.path} size={size} />;
 }
 
+/**
+ * V97：「Win11 同款」桌面菜单的一行。
+ *
+ * 观感对齐 Win11 新式菜单：深色底、13px 文本、左图标右附件（子菜单箭头 / 勾选态），
+ * 行高 36px、圆角 5px、悬停 `white/7%`。整行是一个 `button` —— 点击行为由调用方
+ * 通过 `onClick` 给；`onEnter` 给「悬停展开子菜单」用。
+ */
+function BgMenuRow({
+  icon,
+  label,
+  arrow = false,
+  right = null,
+  onClick,
+  onEnter,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  /** 有子菜单时行尾画展开箭头 */
+  arrow?: boolean;
+  /** 行尾附件（勾选态等），优先于箭头显示 */
+  right?: React.ReactNode;
+  onClick?: () => void;
+  onEnter?: () => void;
+}): React.JSX.Element {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      onMouseEnter={onEnter}
+      className="flex h-9 w-full items-center gap-3 rounded-[5px] px-3 text-left text-[13px] font-normal text-neutral-100 transition-colors hover:bg-white/[0.07]"
+    >
+      <span className="flex w-4 shrink-0 justify-center text-neutral-300">{icon}</span>
+      <span className="flex-1 truncate">{label}</span>
+      {right}
+      {arrow && right === null && <ChevronRight className="h-3.5 w-3.5 text-neutral-400" />}
+    </button>
+  );
+}
+
 export function GridOverlay(): React.JSX.Element {
   // —— 数据态 ——
   const [boxes, setBoxes] = useState<GridBox[]>([]);
@@ -974,6 +1021,11 @@ export function GridOverlay(): React.JSX.Element {
   // 用户 09-19：「便签不要折叠展开操作，默认根据里面的内容自动撑开即可」。
   // V53：桌面右键菜单状态
   const [menuDesktop, setMenuDesktop] = useState<{ x: number; y: number } | null>(null);
+  // V97：桌面空白右键的「Win11 同款」自绘菜单。`bgMenu` 是弹出位置（右键落点），
+  // `bgMenuSub` 是当前展开的子菜单（查看 / 新建）；`bgMenuRef` 给「点外面关闭」判界。
+  const [bgMenu, setBgMenu] = useState<{ x: number; y: number } | null>(null);
+  const [bgMenuSub, setBgMenuSub] = useState<'view' | 'new' | null>(null);
+  const bgMenuRef = useRef<HTMLDivElement | null>(null);
   /** 是否正处于「条目被拖着走」的状态（拖出格子 = 移出，落在根画布上要接住 drop） */
   const [itemDragging, setItemDragging] = useState(false);
 
@@ -1471,7 +1523,7 @@ export function GridOverlay(): React.JSX.Element {
   ]);
 
   /**
-   * **桌面 / 格子空白处右键 = 我们自己把原生背景菜单弹出来**（V87）。
+   * **经典 Shell 背景菜单**（V87 引入；V97 起降级为两个入口的后端）。
    *
    * # 为什么不再「借出桌面」
    *
@@ -1480,10 +1532,15 @@ export function GridOverlay(): React.JSX.Element {
    * 25H2 的新式菜单根本不叫这个名字）、要等「安静 1.5s」、要 120s 超时兜底，而用户
    * 看到的仍然是「卡一下 / 要刷新 / 只有第一次成功」。
    *
-   * 现在把自己当 Explorer：`IShellFolder::CreateViewObject` 拿桌面的**背景菜单**并自己
-   * 弹。实测它 16 项，含「新建」「下一个桌面背景」「显示设置」「个性化」、我们注入的
-   * 「Handy 桌面整理」子菜单，以及全部第三方扩展（见 `examples/bg_menu_dump.rs`）。
-   * 菜单里每一项都由 Shell 自己执行完，我们不插手。
+   * # V97 起它只服务两个入口
+   *
+   * 桌面空白**普通右键**已改弹**前端自绘的 Win11 同款菜单**（Win11 的新式菜单只能由
+   * Explorer 自己渲染，第三方用 IContextMenu 弹出来的永远是经典样式 —— 用户 10-10
+   * 截图对比后拍板自绘）。这张经典菜单保留给：
+   *
+   * 1. **Shift + 右键**（`extended = true`）—— 对齐原生语义「扩展菜单」，直接弹经典；
+   * 2. 自绘菜单最底部的**「显示更多选项」** —— 原生新式菜单的这一项弹的也正是经典
+   *    菜单（含全部第三方扩展），行为 1:1 对齐。
    *
    * # 为什么菜单收起后要「认领新文件」
    *
@@ -1537,6 +1594,37 @@ export function GridOverlay(): React.JSX.Element {
         const only = added.length === 1 ? added[0] : undefined;
         if (only !== undefined) {
           beginItemRename(only, only.split(/[\\/]/).pop() ?? only);
+        }
+      })();
+    },
+    [beginItemRename, fetchLoose, holdQuiet, showHint],
+  );
+
+  /**
+   * **V97：自绘菜单的「新建」——直接落盘，不经过任何 Shell 菜单。**
+   *
+   * 自绘菜单的「新建文件夹 / 新建文本文档」点中后调这里：后端
+   * `desktop_create_new` 复用 `shell_menu::create_new_item`（与经典菜单注入项同一个
+   * 函数，递增命名、落地真实目录 / 文件），返回 `CreatedItem` 后走与菜单路径相同的
+   * 「安静期 + 增量认领 + 原地改名」三步。没有 `TrackPopupMenuEx`，就没有「菜单收起
+   * 才 resolve」的时序，也不需要前后快照 diff。
+   */
+  const createNewItemDirect = useCallback(
+    (kind: 'folder' | 'text'): void => {
+      setBgMenu(null);
+      setBgMenuSub(null);
+      void (async () => {
+        // 与 openDesktopBackgroundMenu 同一条安静期纪律：fetchLoose 会让竖条变宽、
+        // 排一次 relayoutSoon()，不能让它把紧跟着打开的改名框冲掉（V93 的教训）。
+        holdQuiet(3000);
+        try {
+          const created = await ipc.shellDesktopCreateNew(kind);
+          await fetchLoose(false).catch(() => undefined);
+          if (created !== null) {
+            beginItemRename(created.path, created.name);
+          }
+        } catch (error) {
+          showHint((error as Error).message);
         }
       })();
     },
@@ -1931,7 +2019,12 @@ export function GridOverlay(): React.JSX.Element {
    * 是穿透的，点不动）；② 菜单开着期间强制整窗可交互。
    */
   const anyMenuOpen =
-    menuBox !== null || menuItem !== null || menuLoose !== null || menuDock !== null || menuDesktop !== null;
+    menuBox !== null ||
+    menuItem !== null ||
+    menuLoose !== null ||
+    menuDock !== null ||
+    menuDesktop !== null ||
+    bgMenu !== null;
 
   useEffect(() => {
     if (!isTauri()) {
@@ -3500,7 +3593,13 @@ export function GridOverlay(): React.JSX.Element {
    * 所以用 ref 判一下点击是不是落在菜单内部。
    */
   useEffect(() => {
-    if (menuBox === null && menuItem === null && menuLoose === null && menuDock === null) {
+    if (
+      menuBox === null &&
+      menuItem === null &&
+      menuLoose === null &&
+      menuDock === null &&
+      bgMenu === null
+    ) {
       return undefined;
     }
     const closeAll = (): void => {
@@ -3509,10 +3608,12 @@ export function GridOverlay(): React.JSX.Element {
       setMenuLoose(null);
       setMenuDock(null);
       setMenuDesktop(null);
+      setBgMenu(null);
+      setBgMenuSub(null);
     };
     const onDown = (event: MouseEvent): void => {
       const target = event.target as Node;
-      for (const ref of [menuRef, itemMenuRef, looseMenuRef, dockMenuRef]) {
+      for (const ref of [menuRef, itemMenuRef, looseMenuRef, dockMenuRef, bgMenuRef]) {
         if (ref.current?.contains(target) === true) {
           return;
         }
@@ -3530,7 +3631,7 @@ export function GridOverlay(): React.JSX.Element {
       window.removeEventListener('mousedown', onDown);
       window.removeEventListener('keydown', onKey);
     };
-  }, [menuBox, menuItem, menuLoose, menuDock]);
+  }, [menuBox, menuItem, menuLoose, menuDock, bgMenu]);
 
   // 右侧统一面板的 Esc 由 `DesktopSidePanel` 自己处理（先退回列表，再关面板），
   // 这里不再重复挂监听（V45 之前是搜索浮层专属的一段）。
@@ -3569,10 +3670,10 @@ export function GridOverlay(): React.JSX.Element {
         pointerEvents: contentHidden ? 'none' : 'auto',
       }}
       onContextMenu={(event) => {
-        // V96：**桌面空白右键也在这里处理** —— 根画布整窗可交互（见上方 `pointerEvents`），
-        // 所以空白处的右键会落到这里，进 `openDesktopBackgroundMenu`（我们自己的背景菜单：
-        // 完整 Shell 背景菜单 + 我们注入的、一定建得出来的「新建」）。
-        //
+        // V97：**桌面空白右键在这里分发** —— 根画布整窗可交互（见上方 `pointerEvents`），
+        // 空白处的右键全部落到这里：
+        //   · Shift + 右键 → 经典 Shell 扩展菜单（对齐原生「Shift 右键 = 扩展菜单」）；
+        //   · 普通右键 → 前端自绘的 Win11 同款菜单（`bgMenu`）。
         // V92–V95 曾把空白右键**穿透给 Explorer**，指望靠它那张菜单拿到完整 ShellNew「新建」；
         // 但那条路要隔空操作被我们隐藏的视图，七轮都没收敛 —— 已回退（见上）。
         event.preventDefault();
@@ -3582,7 +3683,13 @@ export function GridOverlay(): React.JSX.Element {
           setMenuDesktop({ x: event.clientX, y: event.clientY });
           return;
         }
-        openDesktopBackgroundMenu(event.shiftKey);
+        if (event.shiftKey) {
+          openDesktopBackgroundMenu(true);
+          return;
+        }
+        // V97：普通空白右键 = 自绘 Win11 同款菜单（观感对齐原生，行为见 bgMenu JSX 注释）
+        setBgMenuSub(null);
+        setBgMenu({ x: event.clientX, y: event.clientY });
       }}
     >
       {/* 拖拽预览（V59）：整个内部拖拽已改成指针拖拽，系统的拖拽预览（那个跟着光标跑的
@@ -4725,6 +4832,158 @@ export function GridOverlay(): React.JSX.Element {
           </p>
         </div>
       )}
+
+      {/* V97：桌面空白右键的「Win11 同款」自绘菜单。
+          为什么自绘（用户 10-10 截图对比后拍板）：Win11 的新式菜单**只能由 Explorer 自己
+          渲染**（系统不给第三方渲染接口），用 IContextMenu + TrackPopupMenu 弹出来的永远
+          是经典样式；而新式菜单第一级是固定集合、第三方扩展全收在「显示更多选项」里 ——
+          所以自绘外壳、逐项接真行为：
+            · 查看 › 自动整理格子   → gridRelayout（引擎幂等重排）
+            · 查看 › 显示桌面图标   → toggleOverlay（勾选态 = 原生图标可见 = contentHidden）
+            · 刷新                  → refresh + refreshLoose（与磁盘对账）
+            · 新建 › 文件夹/文本文档 → desktop_create_new（create_new_item 直接落盘）
+            · 显示设置 / 个性化 / 在终端中打开 → shell_open_system
+            · 显示更多选项          → 经典 Shell 背景菜单（含全部第三方扩展，与原生同款）
+          原生有而我们刻意不做的：排序方式（竖条条目还没有大小/日期元数据，不做成摆设）、
+          下一个桌面背景、撤消 —— 宁缺毋滥，不留「点了没反应」的项。 */}
+      {bgMenu ? (
+        <div
+          ref={bgMenuRef}
+          className="fixed z-50 min-w-[280px] select-none rounded-lg border border-white/10 bg-[#2c2c2c]/95 p-1 text-[13px] text-neutral-100 shadow-[0_12px_40px_rgba(0,0,0,0.55)] backdrop-blur-xl"
+          style={{
+            left: Math.max(4, Math.min(bgMenu.x, window.innerWidth - 292)),
+            top: Math.max(4, Math.min(bgMenu.y, window.innerHeight - 300)),
+          }}
+          onMouseDown={(e) => e.stopPropagation()}
+          onContextMenu={(e) => e.stopPropagation()}
+        >
+          {/* 查看 ›（子菜单贴行展开、无缝隙，鼠标斜移不会掉） */}
+          <div className="relative" onMouseLeave={() => setBgMenuSub(null)}>
+            <BgMenuRow
+              icon={<LayoutGrid className="h-4 w-4" />}
+              label="查看"
+              arrow
+              onClick={() => setBgMenuSub(bgMenuSub === 'view' ? null : 'view')}
+              onEnter={() => setBgMenuSub('view')}
+            />
+            {bgMenuSub === 'view' && (
+              <div
+                className={`absolute top-[-5px] min-w-[200px] rounded-lg border border-white/10 bg-[#2c2c2c]/95 p-1 shadow-[0_12px_40px_rgba(0,0,0,0.55)] backdrop-blur-xl ${
+                  bgMenu.x > window.innerWidth - 620 ? 'right-full' : 'left-full'
+                }`}
+              >
+                <BgMenuRow
+                  icon={<Sparkles className="h-4 w-4" />}
+                  label="自动整理格子"
+                  onClick={() => {
+                    setBgMenu(null);
+                    setBgMenuSub(null);
+                    void ipc.gridRelayout().catch((error: Error) => showHint(error.message));
+                  }}
+                />
+                <BgMenuRow
+                  icon={contentHidden ? <Eye className="h-4 w-4" /> : <EyeOff className="h-4 w-4" />}
+                  label="显示桌面图标"
+                  right={contentHidden ? <Check className="h-4 w-4 text-neutral-300" /> : null}
+                  onClick={() => {
+                    setBgMenu(null);
+                    setBgMenuSub(null);
+                    toggleOverlay();
+                  }}
+                />
+              </div>
+            )}
+          </div>
+
+          <BgMenuRow
+            icon={<RefreshCw className="h-4 w-4" />}
+            label="刷新"
+            onClick={() => {
+              setBgMenu(null);
+              setBgMenuSub(null);
+              void refresh().catch((error: Error) => showHint(error.message));
+              refreshLoose();
+            }}
+          />
+
+          <div className="my-1 h-px bg-white/[0.08]" />
+
+          {/* 新建 ›（直接落盘：create_new_item，递增命名 + 原地改名） */}
+          <div className="relative" onMouseLeave={() => setBgMenuSub(null)}>
+            <BgMenuRow
+              icon={<Plus className="h-4 w-4" />}
+              label="新建"
+              arrow
+              onClick={() => setBgMenuSub(bgMenuSub === 'new' ? null : 'new')}
+              onEnter={() => setBgMenuSub('new')}
+            />
+            {bgMenuSub === 'new' && (
+              <div
+                className={`absolute top-[-5px] min-w-[200px] rounded-lg border border-white/10 bg-[#2c2c2c]/95 p-1 shadow-[0_12px_40px_rgba(0,0,0,0.55)] backdrop-blur-xl ${
+                  bgMenu.x > window.innerWidth - 620 ? 'right-full' : 'left-full'
+                }`}
+              >
+                <BgMenuRow
+                  icon={<FolderPlus className="h-4 w-4" />}
+                  label="新建文件夹"
+                  onClick={() => createNewItemDirect('folder')}
+                />
+                <BgMenuRow
+                  icon={<FileText className="h-4 w-4" />}
+                  label="新建文本文档"
+                  onClick={() => createNewItemDirect('text')}
+                />
+              </div>
+            )}
+          </div>
+
+          <div className="my-1 h-px bg-white/[0.08]" />
+
+          <BgMenuRow
+            icon={<Monitor className="h-4 w-4" />}
+            label="显示设置"
+            onClick={() => {
+              setBgMenu(null);
+              setBgMenuSub(null);
+              void ipc.shellOpenSystem('display').catch((error: Error) => showHint(error.message));
+            }}
+          />
+          <BgMenuRow
+            icon={<Palette className="h-4 w-4" />}
+            label="个性化"
+            onClick={() => {
+              setBgMenu(null);
+              setBgMenuSub(null);
+              void ipc
+                .shellOpenSystem('personalization')
+                .catch((error: Error) => showHint(error.message));
+            }}
+          />
+          <BgMenuRow
+            icon={<Terminal className="h-4 w-4" />}
+            label="在终端中打开"
+            onClick={() => {
+              setBgMenu(null);
+              setBgMenuSub(null);
+              void ipc
+                .shellOpenSystem('terminal')
+                .catch((error: Error) => showHint(error.message));
+            }}
+          />
+
+          <div className="my-1 h-px bg-white/[0.08]" />
+
+          <BgMenuRow
+            icon={<MoreHorizontal className="h-4 w-4" />}
+            label="显示更多选项"
+            onClick={() => {
+              setBgMenu(null);
+              setBgMenuSub(null);
+              openDesktopBackgroundMenu(false);
+            }}
+          />
+        </div>
+      ) : null}
 
       {/* V53：右键菜单——仅在桌面整理隐藏时显示，只一个开关按钮。
           用户 09-19：「右键菜单只有开启桌面整理，如果我开启了那么右键就应该

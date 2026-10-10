@@ -207,8 +207,31 @@ ok('该命令已注册到 invoke_handler',
 ok('ipc.ts 暴露 shellDesktopBackgroundMenu',
   /shellDesktopBackgroundMenu: \(extended = false\)/.test(ipcSrc));
 
-ok('桌面/格子空白右键改成弹背景菜单（不再是只弹 Handy 菜单）',
-  /openDesktopBackgroundMenu\(event\.shiftKey\)/.test(overlaySrc));
+// V97：空白右键分发改成「Shift → 经典扩展菜单（直达，不再吃 event.shiftKey 变量）；
+// 普通右键 → 前端自绘 bgMenu」。经典菜单仍是 openDesktopBackgroundMenu 的后端。
+ok('桌面/格子空白右键 Shift 分支直达经典扩展菜单',
+  /if \(event\.shiftKey\) \{\s*openDesktopBackgroundMenu\(true\);/.test(overlaySrc));
+ok('桌面/格子空白普通右键改弹自绘 bgMenu（V97）',
+  /setBgMenu\(\{ x: event\.clientX, y: event\.clientY \}\)/.test(overlaySrc) &&
+    !/openDesktopBackgroundMenu\(event\./.test(overlaySrc));
+
+// —— V97：自绘菜单的「新建」直接落盘（不再绕菜单），系统入口走 shell_open_system ——
+ok('ipc.ts 暴露 shellDesktopCreateNew',
+  /shellDesktopCreateNew: \(kind: 'folder' \| 'text'\)/.test(ipcSrc));
+ok('Rust 命令 desktop_create_new 存在', /pub async fn desktop_create_new\(/.test(rustCmdSrc));
+ok('desktop_create_new 已注册', /commands::grid::desktop_create_new,/.test(libSrc));
+// 落盘路径必须与经典菜单注入项**同一个函数**——两套命名规则是重点盯防对象
+ok('desktop_create_new 复用 shell_menu::create_new_item（同一落盘路径）',
+  /shell_menu::create_new_item\(&kind\)/.test(rustCmdSrc));
+ok('create_new_item 已升为 pub（V97 供命令层复用）',
+  /pub fn create_new_item\(kind: &str\)/.test(shellMenuSrc));
+ok('Rust 命令 shell_open_system 存在', /pub async fn shell_open_system\(/.test(rustCmdSrc));
+ok('shell_open_system 已注册', /commands::grid::shell_open_system,/.test(libSrc));
+ok('ipc.ts 暴露 shellOpenSystem',
+  /shellOpenSystem: \(target: 'display' \| 'personalization' \| 'terminal'\)/.test(ipcSrc));
+// 设置页用 explorer.exe 静默打开（cmd start 会闪控制台框）
+ok('ms-settings 用 explorer.exe 打开（不闪控制台）',
+  /Command::new\("explorer"\)\s*\.arg\(uri\)/.test(rustCmdSrc));
 // 允许中间夹注释（`{` 与 `setMenuDesktop` 之间有两行解释），但窗口不能太大，
 // 否则这条断言会退化成「文件里同时出现这两串」的假通过。
 ok('Ctrl + 右键才弹 Handy 自己的菜单（Shift 归系统扩展动词）',

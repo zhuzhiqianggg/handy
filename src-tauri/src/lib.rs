@@ -220,6 +220,9 @@ pub fn run() {
             commands::grid::desktop_open_view,
             commands::grid::shell_context_menu,
             commands::grid::shell_desktop_background_menu,
+            // V97：自绘桌面菜单的「新建」直接落盘 + 系统入口（显示设置/个性化/终端）
+            commands::grid::desktop_create_new,
+            commands::grid::shell_open_system,
             commands::grid::grid_reveal_path,
             commands::grid::grid_loose_list,
             // —— 接口测试（api-tester，V28）：Rust 直发 HTTP，绕开 webview CORS ——

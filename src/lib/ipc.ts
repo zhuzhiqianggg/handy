@@ -356,6 +356,31 @@ export const ipc = {
     call<CreatedItem | null>('shell_desktop_background_menu', { extended }),
 
   /**
+   * 直接在桌面目录新建一个条目（V97），不经过任何菜单。
+   *
+   * V97 起桌面空白右键改弹**前端自绘的 Win11 同款菜单**，菜单里的「新建」子项直接调
+   * 这里 —— 后端复用 `shell_menu::create_new_item`（与 V88 以来「新建文件夹 / 新建
+   * 文本文档」完全同一条落盘路径：`新建文件夹` → `新建文件夹 (2)` 递增命名）。
+   *
+   * 返回 `CreatedItem`：前端据此「增量认领 + 原地改名」，和菜单路径的返回值语义一致。
+   */
+  shellDesktopCreateNew: (kind: 'folder' | 'text'): Promise<CreatedItem | null> =>
+    call<CreatedItem | null>('desktop_create_new', { kind }),
+
+  /**
+   * 打开一个系统级目标（V97，自绘菜单专用）：
+   *
+   * - `display`：Windows 设置 → 系统 → 显示（`ms-settings:display`，对齐原生菜单的
+   *   「显示设置」）；
+   * - `personalization`：Windows 设置 → 个性化（`ms-settings:personalization`，对齐
+   *   原生菜单的「个性化」）；
+   * - `terminal`：在桌面目录打开终端（优先 Windows Terminal `wt -d`，拿不到就退回
+   *   PowerShell `-NoExit`，对齐原生菜单的「在终端中打开」）。
+   */
+  shellOpenSystem: (target: 'display' | 'personalization' | 'terminal'): Promise<void> =>
+    call<void>('shell_open_system', { target }),
+
+  /**
    * 条目改名（V87）：对齐 Explorer 的「重命名 / F2 / 单击两次」。
    *
    * 只在本目录内改名，**绝不搬动文件**（后端会拒绝含路径分隔符的名字）。

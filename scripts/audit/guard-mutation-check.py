@@ -662,12 +662,12 @@ MUTATIONS: dict[str, _M] = {
     # 另一套守卫，结果是「改了源码守卫仍然全绿」的假通过（自检会直接点名它没判别力）。
     "scripts/regression/test-shell-menu.mjs": [
         (
-            "V87 空白右键退回「只弹 Handy 自己的菜单」",
+            "V97 空白右键退回经典菜单直弹（自绘 bgMenu 被拆掉）",
             "src/modules/desktop-grid/GridOverlay.tsx",
-            "        openDesktopBackgroundMenu(event.shiftKey);",
-            "        setMenuDesktop({ x: event.clientX, y: event.clientY });",
-            "用户 10-08：「新建文件夹 / 新建文本文档等右键功能都不是原生的，问题很多」。"
-            "空白右键必须弹**桌面背景菜单**（实测含「新建」），退回成我们自己的菜单等于没改",
+            "        setBgMenu({ x: event.clientX, y: event.clientY });",
+            "        openDesktopBackgroundMenu(false);",
+            "用户 10-10：「右键菜单跟原始的不一样」。普通空白右键必须弹**前端自绘的 "
+            "Win11 同款菜单**（setBgMenu），退回直接弹经典菜单 = 自绘外壳白做",
         ),
         (
             "V87 背景菜单改用 BindToObject 取（拿不到「新建」/ 实测 E_INVALIDARG）",
