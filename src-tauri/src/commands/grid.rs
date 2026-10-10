@@ -5509,8 +5509,10 @@ fn content_plan_in(order: &[usize], items: &[usize], band: SlotRect, icon: i64) 
 ///      `band_a` 没把宽度用满时两条带之间**不留空档**，用满了就正好接在它右边。
 ///      ⚠️ 千万别把带下那条摆回 `min_x`（「便签下方再从左排起」）—— 那样它的第一列会插进
 ///      `band_a` 第一列中间，幂等当场失效。
-///   ② **持平不回退**：只有严格更低才换用带下空间。所以「便签旁边本来就排得下」的情形
-///      一个像素都不会动（`m = items.len()` 就是今天的行为）。
+///   ② **持平不回退**：带下拆分只在「底沿不更高」时采用；且**平局时 band_a 装得更多的拆法
+///      胜**（升序遍历 + `<=` 的最后一次替换，见循环前注释 —— V100 真机事故的教训：
+///      平局要是让 m=0「全塞便签底下」赢走，上带会整片留空）。所以「便签旁边本来就排得下」
+///      的情形一个像素都不会动（`m = items.len()` 就是今天的行为）。
 ///   ③ **压缩不算越界**：带下那条比上面那条矮是常态，它被压到 `MIN_BOX_H` 是**设计内**的
 ///      （格子内部滚），只有排完仍越过下沿才叫 `overflowed`。
 fn content_plan_with_lower_band(
@@ -5534,8 +5536,15 @@ fn content_plan_with_lower_band(
     // 右沿永远钉在这儿。
     let hard_right = band_b.x + band_b.w;
     // 打底 = 「全部塞进 band_a」（= 没有带下空间时的行为）。循环里的判据是
-    // `cost <= best.0`（不更高就换）—— 并列时 m 从 n-1 往下先到先得，
-    // 永远选「band_a 装得更多」的那个（带下那条起点更低，多用它一格都不划算）。
+    // `cost <= best.0`（不更高就换）。
+    //
+    // ⚠️ 遍历必须是**升序**（m = 0 → n-1）、靠「最后一次并列替换」实现平局裁决 ——
+    // V100 之前写成降序 + `<=`，平局时**最后一个**被检查的 m = 0（全部塞便签底下）
+    // 赢走所有平局，与这里的注释意图正好相反。真机事故（用户 10-10）：便签从 5 个删到
+    // 2 个后，上带被 49 项的「文件夹」压扁进循环，所有拆法代价并列 784，m=0 最后到场
+    // ⇒ 六个格子全体从便签下沿 y=364 起排成 4 条窄列，上带整片留空。
+    // 升序 + `<=` 之后：**代价更低者胜；并列时 band_a 装得更多的拆法胜**
+    // （m 越大 band_a 留得越多；m=0 = 全塞带下，只有在**严格**更低时才可能赢）。
     let mut best = (whole.bottom(), whole);
     // V94：**上带装得下（且没被压）就不再往带下分流**。
     //
@@ -5548,7 +5557,7 @@ fn content_plan_with_lower_band(
     if !best.1.overflowed && !best.1.squeezed {
         return scatter_back(&order, best.1, items.len());
     }
-    for m in (0..order.len()).rev() {
+    for m in 0..order.len() {
         let pa = content_plan_in(&order[..m], items, band_a, icon);
         // 左沿：`band_a` 用到的右沿 + 一道缝（`band_a` 空着时就从收纳区左沿起）
         let used_right = pa.slots.iter().map(|s| s.x + s.w).max();
@@ -5574,7 +5583,8 @@ fn content_plan_with_lower_band(
         }
         // 走到循环里就说明 whole 溢出 / 被压扁（上面有门槛）—— 拆分只要底沿**不更高**
         // 就是改善（压扁场景里上带被 fit 压到贴着可用高，底沿恒等于上限，
-        // 用严格 < 的话拆分永远落空）。
+        // 用严格 < 的话拆分永远落空）。平局裁决靠升序遍历 + `<=` 的「最后一次替换」：
+        // 并列时 m 更大（band_a 装得更多）的拆法留在 best 里 —— 见上面循环前的注释。
         let cost = pa.bottom().max(pb.bottom());
         if cost <= best.0 {
             // ⚠️ 拼接顺序必须与 `order` 对齐（`pa` 覆盖 `order[..m]`、`pb` 覆盖 `order[m..]`）——
@@ -9519,6 +9529,71 @@ mod flow_placer_tests {
             solo.slots.iter().all(|s| s.x + s.w <= band_a.x + band_a.w),
             "单带排布不许越出上带右沿"
         );
+    }
+
+    /// **压扁平局不许把整批格子甩进带下**（V101，真机事故回归）。
+    ///
+    /// 用户 10-10：便签从 5 个删到 2 个后，六个格子全体从便签下沿 y=364 起排成
+    /// 4 条窄列，便签左侧上方整片留空。根因：拆分循环降序遍历 + `<=`，
+    /// 平局时最后被检查的 `m = 0`（= 全部塞便签底下）赢走所有平局。
+    /// 修复后平局由「band_a 装得更多」的拆法胜出（升序遍历的最后一次替换）。
+    ///
+    /// 参数就是真机当场的数字：上带 466×752（便签列左沿 820 − 竖条占宽后的收纳区）、
+    /// 带下 260×420@(820,364)，六个格子 9/25/49/1/1/2 项 —— 上带被 49 项的
+    /// 「文件夹」压扁（squeezed）进循环，所有拆法底沿并列 784。
+    #[test]
+    fn a_squeezed_tie_keeps_boxes_in_the_upper_band_instead_of_dumping_all_below_the_notes() {
+        // 登记顺序（sort, id）：其他 9、文档 25、文件夹 49、安装包 1、图片 1、压缩包 2
+        let items = vec![9usize, 25, 49, 1, 1, 2];
+        let band_a = SlotRect {
+            x: 330,
+            y: ARRANGE_MARGIN,
+            w: 466,
+            h: 752,
+        };
+        let band_b = SlotRect {
+            x: 820,
+            y: 364,
+            w: 260,
+            h: 420,
+        };
+        let plan = content_plan_with_lower_band(&items, band_a, Some(band_b), 32);
+        assert_eq!(plan.slots.len(), items.len(), "一个格子一个坑");
+        assert!(!plan.overflowed, "两条带合起来必须装得下：{:?}", plan.slots);
+
+        // ① 事故症状本身不许再出现：**所有**格子都坐在便签下沿之下 = 上带整片留空
+        let all_below = plan
+            .slots
+            .iter()
+            .all(|s| s.y >= band_b.y && s.x >= band_b.x - ARRANGE_GAP_X);
+        assert!(!all_below, "格子全体被甩到便签底下、上带留空：{:?}", plan.slots);
+
+        // ② 上带必须真的被用起来：至少一个格子从上带顶端开始排
+        assert!(
+            plan.slots.iter().any(|s| s.y == band_a.y),
+            "上带顶端（y={}）没有一个格子起排：{:?}",
+            band_a.y,
+            plan.slots
+        );
+
+        // ③ 平局裁决 = band_a 装得更多：六个格子里最多只有 1 个（最小的那个）落带下
+        let in_lower = plan
+            .slots
+            .iter()
+            .filter(|s| s.x + s.w > band_a.x + band_a.w && s.y >= band_b.y)
+            .count();
+        assert_eq!(
+            in_lower, 1,
+            "压扁平局下 band_a 应保留 5 个格子、带下只收 1 个：{:?}",
+            plan.slots
+        );
+
+        // ④ 幂等：同一个输入排两次逐像素一致
+        let again = content_plan_with_lower_band(&items, band_a, Some(band_b), 32);
+        let snap = |p: &ContentPlan| -> Vec<(i64, i64, i64, i64)> {
+            p.slots.iter().map(|s| (s.x, s.y, s.w, s.h)).collect()
+        };
+        assert_eq!(snap(&plan), snap(&again), "同一个输入排两次结果不同");
     }
 
     /// 单列/多列的归属表（V50）：日历与便签恒定单列，只有 `Other` 允许多列。
