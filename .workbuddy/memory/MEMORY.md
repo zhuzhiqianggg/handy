@@ -23,7 +23,7 @@
 - ★★ **渲染几何 = 引擎几何**（V59/V70）：`height: box.height`、**不叠 `max-height`**；装不下交盒内滚动。**常量差 1px 就少一行/列**。根画布永远 `overflow-hidden`（V59.1），菜单必须 `fixed`。拖动链路（V57）：移动永远可用，锁只收编辑；`onUp` 判「真动过」才落库。
 - ★★ **菜单不许有两个同名项**（V89）：注入前先摘原生同名（`CNewMenu` 无 view 必 E_FAIL）；摘除**倒序**、判据只认**开头**。
 - ★★ **`run_on_main_thread` 只投递、不等结果**（V89）：弹菜单用它 ⇒ Promise 在菜单弹出前就 resolve ⇒ 前端「超时/竞速」判据必误判。要结果就配 `std::sync::mpsc` 等回传。
-- ★★ **隐藏改名框：判据必须是 `LVM_GETEDITCONTROL`**（V93；V92 那条是错的）：`SysListView32` 的 `Edit` 子窗**常驻** ⇒ `FindWindowEx("Edit")` 恒真 ⇒ 接到 25ms 轮询上就**每 50ms** 给 Explorer 投一条 `LVM_CANCELEDITLABEL`（实测 138 条）⇒ 打断 ShellNew（「第一次成第二次败」）+ 桌面自己重绘。取消要**一次性 + 有限升级（400/800ms）+ 只在接管态**。
+- ★★ **隐藏改名框：判据 `LVM_GETEDITCONTROL`，动作必须是「回车确认」不是「取消」**（V94）：判据错（`FindWindowEx("Edit")` 恒真）曾致 138 条刷屏；V92/V93 的「取消」更致命 —— **原生新建语义 = 取消改名就删刚建的文件** ⇒「只能建一个、第二个建不出」+ 桌面重绘。V94：仅接管态、检测到就投 `VK_RETURN`（默认名保留），600/1200ms 有限重试，改名交我们自己的框。
 - ★★ **WinEvent 的 `hwnd` 语义不许赌**（V82）：`EVENT_SYSTEM_MENUPOPUPSTART` 实测给的是**菜单窗 `#32768` 自己** ⇒ 判据要**换 owner + 看菜单压谁**，并留轮询兜底。
 - **复刻菜单只剩回退 + 条目菜单**（V58/V90）：`CMF_NORMAL|CMF_EXPLORE`（**不传 `CMF_CANRENAME`**）；`IContextMenu2/3` 消息**必须转发**。**层级**：盒子(auto)<参考线 35<工作台 38<面板 40<菜单 50<预览 95。改模式开关前 grep 调用点（V52）。
 - ★★ **便签 contentEditable**（V67/V68）：`\n` 写进**光标所在文本节点** + 垫 ZWSP；「跳出」看「上一步是不是我们插的换行」（**不许**看末尾空行）；`applyHighlight` 每 400ms 重写 `innerHTML` ⇒ `reapplyZwsp` **必须在 `restoreCaretIn` 之前**；合成 `KeyboardEvent` 测不出回车。
@@ -33,7 +33,8 @@
 **第1列 未归类竖条 → 第2/3列 归纳格子 → 第4列 便签 → 第5列 工作台**。挂件带/收纳区右界 = `workstation_rect().x - ARRANGE_GAP_X`。
 - **V69 按内容定尺寸 + LPT 最短列填充**：尺寸只看条目数；常量 `CELL_EXTRA_W=32`、`BOX_CELL_EXTRA_H=36`（勿混竖条 30）、`BOX_HEADER_H=37`、`GRID_SCROLLBAR_W=4`、`BOX_FIT_SLACK=2`、`MIN_BOX_W=160/120`、`AUTO_MAX_W=520`、`AUTO_MAX_COLS=5`。
   - ★ 摆放序 = `(面积, 内容量, 高, 宽)` 降序（**内容量分量不可省**，否则退化成登记顺序）；每个格子放进**当前最矮的列**（并列取最左）。
-  - 列数 k（V84）：全部候选（k=1..=capacity × 自然/夹到 `zone_w/k`，夹宽**同时按新宽重算高**）取 **min(横向,纵向填充率) 最大**；平局 k 小、自然宽优先。
+  - 列数 k（**V94 纵向优先、横向裁决**）：全部候选（k=1..=capacity × 自然/夹到 `zone_w/k`，夹宽**同时按新宽重算高**）取字典序 **`(tallest, used_w)` 最大** = 装得下前提下列数最少；并列比总宽（防 09-23 补丁洞）。V84 的 `min(横,纵)` 在 k 大时被横向填充率抬高 ⇒ 复发 5 列窄格（用户 10-10 骂「一点也不智能」）。
+  - ★★ **带下分流门槛（V94）**：`content_plan_with_lower_band` 只在 whole `overflowed||squeezed` 时才往挂件下方带分流 —— 纵向优先的解排得高，没门槛就 frequent 分流留洞。
 - ★★ **V85 落位右锚定 + 列内撑满**：列**从右往左**排（第一列贴便签/工作台侧）；窄格**撑到列宽**并按新宽重算高（只撑宽、**不夹窄**）。`content_plan_in` ④ 用**右沿递减**（摆完一列 `right = x - GAP`）——写成「x = 右沿−总宽」= 块**左**端 ⇒ 左溢。
 - ★ **幂等是算出来的，不许几何去兜**（V69）：摆放序是内容的纯函数 ⇒ 尺寸没变 ⇒ 落位一字不差。
 - ★★ **V70**：内部几何两边逐像素相等（差 1px ⇒ 提前出滚动条 ⇒ 少一列 ⇒ 更溢出）；高度上限跟 zone_h；**满了不许再建**（`probe_room_for_another_box` 真插真排看 overflowed，出错当放行）。
@@ -47,7 +48,7 @@
 - **V83–V85** 几何不持久化+**只算主屏**（`sync_overlay_bounds()`，变则广播 `grid:bounds-changed`；副屏全原生）；新建慢=收回竞速；落位**右锚定**+**列内撑满**（§3）。
 - **V87/V88** 空白右键自己弹**背景菜单**（`CreateViewObject`；坑：`FOLDERID_Desktop`+`BindToObject` 必 `E_INVALIDARG`）；原生「新建」E_FAIL = `CNewMenu` 需 `IShellView` ⇒ 自注入「新建」；改名后 UI 不刷新 ⇒ 本地先改 `items`/`loose` 再 `refresh`。
 - **V89–V92 桌面右键：五次迭代，最终结论「不代理」**。V89 抢空白右键⇒菜单残缺；V90 转发 `WM_CONTEXTMENU`+耗时判据⇒双菜单；V91 换「观测屏幕」判据⇒仍因转发前 `SetForegroundWindow(我们的窗)` 让 `CNewMenu` 找不到 view⇒**新建彻底建不出**（10-10 取证：十几次右键 0 文件）。V92：**空白右键穿透给 Explorer**（根画布 `pointerEvents` 仅拖拽时 `'auto'`），它那张菜单天然带查看/排序/刷新+ShellNew 新建（都不经过 `IContextMenu`，复刻不出来）；handoff 停用⇒不翻白；删转发 206 行。补偿：目录签名广播 `grid:desktop-changed` 让新文件进竖条。
-- **V93 新建链路三条修复**（用户 10-10）：① `label_editing` 改 `LVM_GETEDITCONTROL`；② 取消一次性 + 有限升级 + 只限接管态；③ 前端加「**改名/新建安静期**」（`relayoutSoon`/`syncDesktop` 挂起；重排与刷新**分开记、重排优先补跑**），`grid:desktop-changed` 改走增量 `onDesktopChanged`（唯一新增项 → `setFocus()` + `beginItemRename`）。守卫 shell-menu 115。
+- **V93/V94 新建链路**（用户 10-10 四次报障收敛）：① 判据 `LVM_GETEDITCONTROL`；② 动作改**回车确认**（V94，见 §2）；③ 前端「**改名/新建安静期**」（`relayoutSoon`/`syncDesktop` 挂起；重排与刷新分开记、重排优先补跑），`grid:desktop-changed` 走增量 `onDesktopChanged`（唯一新增项 → `setFocus()` + `beginItemRename`）。守卫 shell-menu 116、变异 18+65。
 - ★★ **B 方案（用户 10-10 拍板）：重构为「不接管原生桌面」**，挂件保留为桌面浮窗。开源调研（LucidDesk/DeskBox/openFences/DesktopIconMover）**无一接管桌面**：不自绘，或用 `LVM_SETITEMPOSITION` 遥控原生图标（lParam 装坐标，**跨进程无需注入**）。后续：① 不隐藏 `SysListView32`，关「自动排列/对齐网格」后 SETITEMPOSITION 摆位；② 格子改装饰底板+标题栏、内容区穿透 ⇒ `GridOverlay.tsx` 大瘦身。
 - ⚠️ agent 会话启动不了本 GUI ⇒ 打包 + 装机即止，**不代启动**。
 
