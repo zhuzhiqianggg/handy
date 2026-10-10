@@ -22,7 +22,7 @@
 - **内部拖拽 = 指针拖拽**（V59）：wry 对无 `CF_HDROP` 载荷不写 `*pdwEffect` ⇒ 自算落点（阈值 5px）；**不许为修它关 `drag_drop_enabled`**。
 - ★★ **渲染几何 = 引擎几何**（V59/V70）：`height: box.height`、**不叠 `max-height`**（装不下交盒内滚动）；**常量差 1px 就少一行/列**；根画布永远 `overflow-hidden`、菜单必须 `fixed`。拖动链路（V57）：移动永远可用，锁只收编辑。
 - ★★ **菜单不许有两个同名项**（V89）：注入前先摘原生同名（`CNewMenu` 无 view 必 E_FAIL）；摘除**倒序**、判据只认**开头**。
-- ★★ **`run_on_main_thread` 只投递、不等结果**（V89）：弹菜单用它 ⇒ Promise 在菜单弹出前就 resolve ⇒ 前端「超时/竞速」判据必误判。要结果就配 `std::sync::mpsc` 等回传。
+- ★★ **`run_on_main_thread` 只投递、不等结果**（V89）：弹菜单用它 ⇒ Promise 在菜单弹出前就 resolve ⇒ 竞速判据必误判；要结果就配 `mpsc` 等回传。
 - ★★ **「隐藏改名框」链路已删（V96）**：V92 取消→V93 判据→V94 确认→V95 还前台，七轮不收敛（ShellNew **要求隐藏视图在前台**，而能打字的改名框必然抢前台 ⇒ 互斥）。**别再往回加**：`LVM_CANCELEDITLABEL`/`VK_RETURN`/`EDIT_SEEN_TICK`/`EDIT_CANCEL_STAGE`/`grid_focus_desktop`（守卫已加反向断言）。
 - ★★ **条目改名框必须全选默认名**（V96）：`autoFocus` 只聚焦不选中 ⇒ 打字变**追加**（实测「新建文件夹 (20)123」）。两个 input 都要 `onFocus={e => e.currentTarget.select()}`。
 - **WinEvent `hwnd` 语义不许赌**（V82）：`EVENT_SYSTEM_MENUPOPUPSTART` 给的是**菜单窗 `#32768` 自己**（判据要换 owner + 看菜单压谁，留轮询兜底）。
@@ -41,14 +41,14 @@
 - ★ **幂等是算出来的，不许几何去兜**（V69）：摆放序是内容的纯函数 ⇒ 尺寸没变 ⇒ 落位一字不差。
 - ★★ **V70**：内部几何两边逐像素相等（差 1px ⇒ 提前出滚动条 ⇒ 少一列）；高度上限跟 zone_h；**满了不许再建**（`probe_room_for_another_box` 真插真排看 overflowed，出错放行）。
 - **V50**：① 挂件由列规则安置；② 收纳格**不跨进挂件带**（`band_left` = 挂件列计划最小值）；③ 便签恒定一列。
-- **工作台**（V60/V62，宽 400）：日历 + 快捷入口 + 按钮（便签/格子/**整理**/显示·收起）；`WORKSTATION_W == WST_BOX_W == 400` 由 `test-desktop-constants.mjs` 锁。**动态整理**（V66）：`relayoutSoon()`（120ms 防抖）→ `gridRelayout()`。
+- **工作台**（V60/V62，宽 400）：日历 + 快捷入口 + 按钮（便签/格子/**整理**/显示·收起）；`WORKSTATION_W==WST_BOX_W==400` 由 `test-desktop-constants.mjs` 锁。**动态整理**（V66）：`relayoutSoon()`（120ms 防抖）→ `gridRelayout()`。
 
 ## 4. 批次索引（细节见 PROJECT_STATUS §1.x；约定/踩坑见 CONVENTIONS）
 - **V42–V71**：竖条·三面板·Z 序锚定·挂件分列·指针拖拽·工作台·列式填满（**V64/V65 作废**）。
 - **V75–V80** 桌面日历；V80：`jumpTo` **夹 1900–2100 且带 selected**、写盘走 `patchSettings`（禁 `writeSettings`）。
 - **V81/V82** 「菜单期间把桌面还给系统」**V89 起整体停用**（`HANDOFF_DISABLED`，`is_active()` 恒 false）。
 - **V83–V85** 几何不持久化+**只算主屏**（`sync_overlay_bounds()`，变则广播 `grid:bounds-changed`；副屏全原生）；落位**右锚定**+**列内撑满**（§3）。
-- **V87/V88** 空白右键自己弹**背景菜单**（`CreateViewObject`；坑：`FOLDERID_Desktop`+`BindToObject` 必 `E_INVALIDARG`）；原生「新建」E_FAIL = `CNewMenu` 需 `IShellView` ⇒ 自注入「新建」；改名后 UI 不刷新 ⇒ 本地先改 `items`/`loose` 再 `refresh`。
+- **V87/V88** 空白右键自己弹**背景菜单**（`CreateViewObject`；坑：`FOLDERID_Desktop`+`BindToObject` 必 `E_INVALIDARG`）；原生「新建」E_FAIL = 需 `IShellView` ⇒ 自注入；改名后 UI 不刷新 ⇒ 本地先改 `items`/`loose` 再 `refresh`。
 - **V89–V96 桌面右键：七轮迭代，V96 定稿「自有菜单」**。V89 抢空白右键⇒菜单残缺；V90/V91 试转发⇒双菜单 + `SetForegroundWindow` 让 `CNewMenu` 找不到 view⇒新建建不出；V92 改**穿透**（handoff 停用⇒不翻白，补偿：目录签名广播）；V93–V95 围着「隐藏改名框」打转；**V96：空白右键收回自有菜单**（穿透在隐藏视图下本就空转，见 §2/§3）。
 - **V93–V96 新建链路**（V96 收敛）：**前端「改名/新建安静期」保留**（`relayoutSoon`/`syncDesktop` 挂起；重排与刷新分开记、重排优先补跑），`grid:desktop-changed` 走增量 `onDesktopChanged`（唯一新增项 → `setFocus()` + `beginItemRename`）；**判据/确认/还前台三块已删**（见 §2）。守卫 shell-menu 113、变异 13。
 - ★★ **B 方案（用户 10-10 拍板，未做）：重构为「不接管原生桌面」**，挂件保留为桌面浮窗。调研（LucidDesk/DeskBox/openFences/DesktopIconMover）**无一接管桌面**：不自绘，或用 `LVM_SETITEMPOSITION` 遥控原生图标（lParam 装坐标，**跨进程无需注入**）。① 不隐藏 `SysListView32`，关「自动排列/对齐网格」后 SETITEMPOSITION 摆位；② 格子改装饰底板+标题栏、内容区穿透 ⇒ `GridOverlay.tsx` 大瘦身。
