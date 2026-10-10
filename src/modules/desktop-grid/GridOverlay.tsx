@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowDownAZ,
   ArrowDownWideNarrow,
@@ -1040,6 +1040,49 @@ export function GridOverlay(): React.JSX.Element {
   const [bgMenu, setBgMenu] = useState<{ x: number; y: number } | null>(null);
   const [bgMenuSub, setBgMenuSub] = useState<'view' | 'new' | 'sort' | null>(null);
   const bgMenuRef = useRef<HTMLDivElement | null>(null);
+  // V100：贴边纠偏。用户 10-10：「右键操作菜单隐藏到看不到的地方了，弹框要始终能
+  // 全部显示出来」。初值是估算夹取（旧法按 300px 估高，实际 ~460px，贴底必裁），
+  // 现在改为**渲染后实测**：useLayoutEffect 量出越界量，用 translate 拉回来 ——
+  // 主菜单、子菜单各自一套（子菜单同一时刻只开一个，共用一个 ref 就够）。
+  const [bgMenuAdj, setBgMenuAdj] = useState<{ dx: number; dy: number }>({ dx: 0, dy: 0 });
+  const [bgSubAdj, setBgSubAdj] = useState<{ dx: number; dy: number }>({ dx: 0, dy: 0 });
+  const bgSubRef = useRef<HTMLDivElement | null>(null);
+  /** 越界纠偏量：把矩形拉回视口内（留 8px 边距），返回 null 表示本就不用动。 */
+  const clampDelta = (r: DOMRect): { dx: number; dy: number } | null => {
+    const margin = 8;
+    let dx = 0;
+    let dy = 0;
+    if (r.bottom > window.innerHeight - margin) {
+      dy = window.innerHeight - margin - r.bottom;
+    }
+    if (r.top + dy < margin) {
+      dy = margin - r.top;
+    }
+    if (r.right > window.innerWidth - margin) {
+      dx = window.innerWidth - margin - r.right;
+    }
+    if (r.left + dx < margin) {
+      dx = margin - r.left;
+    }
+    return dx === 0 && dy === 0 ? null : { dx, dy };
+  };
+  // 主菜单：渲染后（paint 前）实测位置，越界就在 paint 前拉回 —— 用户看不到闪动。
+  useLayoutEffect(() => {
+    if (bgMenu === null) {
+      setBgMenuAdj({ dx: 0, dy: 0 });
+      return;
+    }
+    const el = bgMenuRef.current;
+    if (el === null) {
+      return;
+    }
+    const delta = clampDelta(el.getBoundingClientRect());
+    if (delta !== null) {
+      setBgMenuAdj(delta);
+    }
+    // 只在打开时量一次：打开后菜单位置不随内容变（子菜单是浮在旁边的绝对定位）。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bgMenu]);
   // V98：「新建」子菜单的 ShellNew 模板（Excel/DOCX/ZIP…）。懒加载：第一次展开
   // 「新建」才拉注册表（毫秒级），拉完缓存；失败就只剩「新建文件夹」，不弹提示。
   const [newTemplates, setNewTemplates] = useState<ShellNewTemplate[]>([]);
@@ -1063,6 +1106,22 @@ export function GridOverlay(): React.JSX.Element {
       .then(setLooseSort)
       .catch(() => undefined);
   }, []);
+  // 子菜单：展开项或模板列表（懒加载完成）变化时重新量，贴边拉回视口内（V100）。
+  useLayoutEffect(() => {
+    if (bgMenuSub === null) {
+      setBgSubAdj({ dx: 0, dy: 0 });
+      return;
+    }
+    const el = bgSubRef.current;
+    if (el === null) {
+      return;
+    }
+    const delta = clampDelta(el.getBoundingClientRect());
+    if (delta !== null) {
+      setBgSubAdj(delta);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bgMenuSub, newTemplates]);
   /** 是否正处于「条目被拖着走」的状态（拖出格子 = 移出，落在根画布上要接住 drop） */
   const [itemDragging, setItemDragging] = useState(false);
 
@@ -3531,6 +3590,53 @@ export function GridOverlay(): React.JSX.Element {
     };
   }, [onDesktopChanged]);
 
+  // V100：经典菜单（「显示更多选项」）里我们注入的视图类项 —— 原生「查看 / 排序方式 /
+  // 刷新」属于 DefView 视图层，`CreateViewObject` 的菜单里没有，后端注入了自己的同名项，
+  // 点中后经 `grid:menu-action` 事件把动作发回来，在这里执行（与自绘菜单同语义）。
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    const run = (action: string): void => {
+      if (action === 'refresh') {
+        void refresh().catch((error: Error) => showHint(error.message));
+        refreshLoose();
+        return;
+      }
+      if (action === 'relayout') {
+        void ipc.gridRelayout().catch((error: Error) => showHint(error.message));
+        return;
+      }
+      if (action === 'toggle-icons') {
+        toggleOverlay();
+        return;
+      }
+      if (action.startsWith('sort:')) {
+        const key = action.slice(5);
+        setLooseSort((prev) => {
+          const active = prev === key || prev === `${key}-desc`;
+          const next = active ? `${key}-desc` : key;
+          void ipc
+            .looseSortSet(next)
+            .then(() => refreshLoose())
+            .catch((error: Error) => showHint(error.message));
+          return next;
+        });
+      }
+    };
+    void (async () => {
+      try {
+        const { getCurrentWindow } = await import('@tauri-apps/api/window');
+        unlisten = await getCurrentWindow().listen<string>('grid:menu-action', (event) => {
+          run(event.payload);
+        });
+      } catch {
+        /* 监听失败只影响经典菜单的注入项，自绘菜单不受影响 */
+      }
+    })();
+    return () => {
+      unlisten?.();
+    };
+  }, [refresh, refreshLoose, showHint, toggleOverlay]);
+
   /** 手动对账一次（清掉文件已不存在的失效登记，顺带刷新未归类竖条） */
   const syncNow = useCallback((): void => {
     void ipc
@@ -4891,8 +4997,10 @@ export function GridOverlay(): React.JSX.Element {
           ref={bgMenuRef}
           className="fixed z-50 min-w-[280px] select-none rounded-lg border border-white/10 bg-[#2c2c2c]/95 p-1 text-[13px] text-neutral-100 shadow-[0_12px_40px_rgba(0,0,0,0.55)] backdrop-blur-xl"
           style={{
-            left: Math.max(4, Math.min(bgMenu.x, window.innerWidth - 292)),
-            top: Math.max(4, Math.min(bgMenu.y, window.innerHeight - 300)),
+            left: Math.max(4, bgMenu.x),
+            top: Math.max(4, bgMenu.y),
+            // V100：实测纠偏（见 bgMenuAdj），贴边时把整张菜单拉回视口内
+            transform: `translate(${bgMenuAdj.dx}px, ${bgMenuAdj.dy}px)`,
           }}
           onMouseDown={(e) => e.stopPropagation()}
           onContextMenu={(e) => e.stopPropagation()}
@@ -4908,9 +5016,11 @@ export function GridOverlay(): React.JSX.Element {
             />
             {bgMenuSub === 'view' && (
               <div
+                ref={bgSubRef}
                 className={`absolute top-[-5px] min-w-[200px] rounded-lg border border-white/10 bg-[#2c2c2c]/95 p-1 shadow-[0_12px_40px_rgba(0,0,0,0.55)] backdrop-blur-xl ${
                   bgMenu.x > window.innerWidth - 620 ? 'right-full' : 'left-full'
                 }`}
+                style={{ transform: `translate(${bgSubAdj.dx}px, ${bgSubAdj.dy}px)` }}
               >
                 <BgMenuRow
                   icon={<Sparkles className="h-4 w-4" />}
@@ -4948,9 +5058,11 @@ export function GridOverlay(): React.JSX.Element {
             />
             {bgMenuSub === 'sort' && (
               <div
+                ref={bgSubRef}
                 className={`${BG_NEW_SUB_CLASS} ${
                   bgMenu.x > window.innerWidth - 620 ? 'right-full' : 'left-full'
                 }`}
+                style={{ transform: `translate(${bgSubAdj.dx}px, ${bgSubAdj.dy}px)` }}
               >
                 {(
                   [
@@ -5016,9 +5128,11 @@ export function GridOverlay(): React.JSX.Element {
             />
             {bgMenuSub === 'new' && (
               <div
+                ref={bgSubRef}
                 className={`${BG_NEW_SUB_CLASS} ${
                   bgMenu.x > window.innerWidth - 620 ? 'right-full' : 'left-full'
                 }`}
+                style={{ transform: `translate(${bgSubAdj.dx}px, ${bgSubAdj.dy}px)` }}
               >
                 <BgMenuRow
                   icon={<FolderPlus className="h-4 w-4" />}

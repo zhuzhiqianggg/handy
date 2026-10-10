@@ -340,10 +340,10 @@ ok('V88：命中我们的新建项**不走** InvokeCommand（那条对 view-obje
   /if \(cmd as u32\) == CMD_NEW_FOLDER/.test(shellMenuSrc) &&
     /if \(cmd as u32\) == CMD_NEW_TEXT/.test(shellMenuSrc));
 // 分支在、但分支体被改成 `Ok(None)` 的话上面两条仍会通过（假通过）—— 必须连分支体一起锁。
-ok('V89：CMD_NEW_FOLDER 分支必须真的建项（不许被改成 Ok(None) 吞掉）',
-  /if \(cmd as u32\) == CMD_NEW_FOLDER \{\s*return Ok\(create_new_item\("folder"\)\);/.test(
+ok('V89/V100：CMD_NEW_FOLDER 分支必须真的建项（不许被改成 Ok(None) 吞掉）',
+  /if \(cmd as u32\) == CMD_NEW_FOLDER \{\s*return Ok\(match create_new_item\("folder"\) \{/.test(
     shellMenuSrc,
-  ) && /if \(cmd as u32\) == CMD_NEW_TEXT \{\s*return Ok\(create_new_item\("text"\)\);/.test(
+  ) && /if \(cmd as u32\) == CMD_NEW_TEXT \{\s*return Ok\(match create_new_item\("text"\) \{/.test(
     shellMenuSrc,
   ));
 // 只查**调用点**：正文注释里会提到 `grid:item-created`（就是为说明它错在哪），
@@ -352,10 +352,40 @@ ok('V89：**不再**广播 grid:item-created（事件在菜单还没弹时就到
   !/app\.emit\(\s*"grid:item-created"/.test(shellMenuSrc));
 ok('V89：定义 CreatedItem 并作为返回值带回前端',
   /pub struct CreatedItem \{[\s\S]*?pub path: String,[\s\S]*?pub name: String,/.test(shellMenuSrc));
-ok('V89：run_menu / show_background_context_menu 返回 Option<CreatedItem>',
-  /pub fn show_background_context_menu\([\s\S]{0,200}?\) -> Result<Option<CreatedItem>, String>/.test(
+ok('V89/V100：run_menu / show_background_context_menu 返回 MenuOutcome（不止新建，还有注入动作）',
+  /pub fn show_background_context_menu\([\s\S]{0,200}?\) -> Result<MenuOutcome, String>/.test(
     shellMenuSrc,
-  ) && /fn run_menu\([\s\S]{0,300}?\) -> Result<Option<CreatedItem>, String>/.test(shellMenuSrc));
+  ) && /fn run_menu\([\s\S]{0,300}?\) -> Result<MenuOutcome, String>/.test(shellMenuSrc));
+
+// ——— V100：经典菜单（显示更多选项）补齐 ————
+ok('V100：定义快捷方式 / ShellNew 模板 / 视图组命令 id（0x9000+ 档）',
+  /const CMD_NEW_SHORTCUT: u32 = 0x9003;/.test(shellMenuSrc) &&
+    /const CMD_NEW_TEMPLATE_BASE: u32 = 0x9100;/.test(shellMenuSrc) &&
+    /const CMD_VIEW_RELAYOUT: u32 = 0x9201;/.test(shellMenuSrc) &&
+    /const CMD_SORT_BASE: u32 = 0x9210;/.test(shellMenuSrc));
+ok('V100：经典菜单注入顶部「查看 / 排序方式 / 刷新」组（原生三项属于 DefView，拿不到必须亲手注入）',
+  /查看\(&V\)/.test(shellMenuSrc) &&
+    /排序方式\(&O\)/.test(shellMenuSrc) &&
+    /刷新\(&E\)/.test(shellMenuSrc));
+ok('V100：注入动作走 MenuOutcome::Action（refresh / relayout / toggle-icons / sort:key）',
+  /MenuOutcome::Action\("relayout"\.to_string\(\)\)/.test(shellMenuSrc) &&
+    /MenuOutcome::Action\("toggle-icons"\.to_string\(\)\)/.test(shellMenuSrc) &&
+    /MenuOutcome::Action\("refresh"\.to_string\(\)\)/.test(shellMenuSrc) &&
+    /MenuOutcome::Action\(format!\("sort:\{key\}"\)\)/.test(shellMenuSrc));
+ok('V100：经典菜单「新建」子菜单挂上 ShellNew 模板全量（列表 ShellNew 的历史遗留：只有两项）',
+  /for \(idx, template\) in list_shell_new_templates\(\)\.into_iter\(\)\.enumerate\(\)/.test(
+    shellMenuSrc,
+  ) && /create_new_from_shell_new\(ext\)/.test(shellMenuSrc));
+ok('V100：命令层把 Action 广播为 grid:menu-action 事件（前端执行，与自绘菜单同语义）',
+  /app\.emit\("grid:menu-action", action\.as_str\(\)\)/.test(rustCmdSrc));
+ok('V100：前端监听 grid:menu-action 并执行动作',
+  /listen<string>\('grid:menu-action'/.test(overlaySrc) &&
+    /action === 'relayout'/.test(overlaySrc) &&
+    /action\.startsWith\('sort:'\)/.test(overlaySrc));
+ok('V100：自绘菜单贴边纠偏（实测 clampDelta，弃用 300px 估算夹取）',
+  /const clampDelta = /.test(overlaySrc) &&
+    /useLayoutEffect/.test(overlaySrc) &&
+    !/window\.innerHeight - 300\)\)/.test(overlaySrc));
 
 ok('V89：前端**不再**监听 grid:item-created',
   !/grid:item-created/.test(overlaySrc));
@@ -450,10 +480,10 @@ ok('V89：命令返回 Option<CreatedItem>（不再是 ()）',
   /pub async fn shell_desktop_background_menu\([\s\S]{0,200}?\) -> Result<Option<crate::platform::shell_menu::CreatedItem>, String>/.test(
     rustCmdSrc,
   ));
-ok('V89：用 mpsc 通道把菜单结果从主线程发回（命令线程阻塞等，绝不早退）',
-  /std::sync::mpsc::channel::<Option<crate::platform::shell_menu::CreatedItem>>\(\)/.test(rustCmdSrc) &&
+ok('V89/V100：用 mpsc 通道把菜单结果从主线程发回（命令线程阻塞等，绝不早退）',
+  /std::sync::mpsc::channel::<crate::platform::shell_menu::MenuOutcome>\(\)/.test(rustCmdSrc) &&
     /tx\.send\(/.test(rustCmdSrc) &&
-    /rx\.recv\(\)/.test(rustCmdSrc));
+    /rx\s*\.recv\(\)/.test(rustCmdSrc));
 ok('V89：弹菜单一律经 run_on_main_thread（TrackPopupMenuEx 需要宿主线程有消息泵）',
   /app\.run_on_main_thread\(move \|\| \{/.test(rustCmdSrc) &&
     /show_background_context_menu\(/.test(rustCmdSrc));
@@ -500,7 +530,7 @@ ok('V92：命令层只弹复刻菜单并返回 CreatedItem（不再有转发分�
 ok('V96：grid.rs 里不再有 SetForegroundWindow（V95 的「还前台」随穿透一起删）',
   !/SetForegroundWindow/.test(rustCmdSrc));
 ok('V92：命令仍用 mpsc 真正等到菜单收起（run_on_main_thread 只投递，少了 recv 就是 V88 的 bug）',
-  /rx\.recv\(\)/.test(rustCmdSrc));
+  /rx\s*\.recv\(\)/.test(rustCmdSrc));
 
 /* ================================================================== *
  * ⑨ V92：桌面目录变更检测 —— 穿透之后，原生「新建」落地的文件不能凭空消失

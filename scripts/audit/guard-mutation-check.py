@@ -748,12 +748,20 @@ MUTATIONS: dict[str, _M] = {
             "「新建文件夹 / 文本文档都失效」",
         ),
         (
-            "V89 命中新建命令却只回 Ok(None)（建了也不告诉前端）",
+            "V89/V100 命中新建命令却不 return 结果（建了也不告诉前端）",
             "src-tauri/src/platform/shell_menu.rs",
-            '            return Ok(create_new_item("folder"));',
-            "            return Ok(None);",
-            "分支还在、但结果被吞 ⇒ 前端拿到 null 走全量 refresh 对账，新增项不进原地改名，"
-            "「卡 + 整体刷新」复现（用户File 还真的被建出来了，更难查）",
+            'if (cmd as u32) == CMD_NEW_FOLDER {\n            return Ok(match create_new_item("folder") {',
+            'if (cmd as u32) == CMD_NEW_FOLDER {\n            let _ = create_new_item("folder");\n            return Ok(match create_new_item("folder") {',
+            "分支还在、但建完把结果当无事发生（let _ 吞掉）⇒ 前端拿到 null 走全量 refresh 对账，"
+            "新增项不进原地改名，「卡 + 整体刷新」复现（用户 10-08）",
+        ),
+        (
+            "V100 经典菜单顶部「查看/排序方式/刷新」注入被拆掉（显示更多选项又缺顶组）",
+            "src-tauri/src/platform/shell_menu.rs",
+            'PWSTR(w!("查看(&V)").as_ptr() as *mut u16),',
+            'PWSTR(w!("查看").as_ptr() as *mut u16),',
+            "用户 10-10 对照原生截图：显示更多选项必须有 查看/排序方式/刷新 顶组 —— "
+            "这三项是 DefView 视图层的，CreateViewObject 拿不到，丢了就没人能补",
         ),
         (
             "V89 前端不读命令返回值（又退回去靠对账认领）",
@@ -789,8 +797,8 @@ MUTATIONS: dict[str, _M] = {
         (
             "V92 命令不等菜单收起（去掉 mpsc 的 recv）",
             "src-tauri/src/commands/grid.rs",
-            "        rx.recv()",
-            "        rx.try_recv()",
+            "        let outcome = rx\n            .recv()",
+            "        let outcome = rx\n            .try_recv().unwrap_or(crate::platform::shell_menu::MenuOutcome::None)",
             "`run_on_main_thread` 只投递就返回，真正的「等」全靠这个 recv —— "
             "去掉它 ⇒ 命令在菜单还没弹出时就 resolve ⇒ 前端对账 diff 不出东西 ⇒ "
             "新建的文件进不了竖条（V88 那个 bug 的原样复现）",

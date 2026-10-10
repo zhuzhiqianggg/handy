@@ -3745,10 +3745,9 @@ pub async fn shell_desktop_background_menu(
     {
         let handle = app.clone();
         let want_extended = extended.unwrap_or(false);
-        // 菜单在主线程弹；用通道把「新建结果」带回命令线程（它不是 `Send` 友好类型，但
-        // `CreatedItem` 是 `Clone + Serialize`，跨线程发一份没问题）。
+        // 菜单在主线程弹；用通道把「结果」带回命令线程（MenuOutcome 是纯数据，Send 没问题）。
         let (tx, rx) =
-            std::sync::mpsc::channel::<Option<crate::platform::shell_menu::CreatedItem>>();
+            std::sync::mpsc::channel::<crate::platform::shell_menu::MenuOutcome>();
         app.run_on_main_thread(move || {
             let win = handle
                 .get_webview_window(GRID_LABEL)
@@ -3760,13 +3759,23 @@ pub async fn shell_desktop_background_menu(
             let result =
                 crate::platform::shell_menu::show_background_context_menu(hwnd, want_extended);
             // 菜单已收起（含「新建」落地 / 取消），把结果发回；失败按「没新建」处理。
-            let _ = tx.send(result.unwrap_or(None));
+            let _ = tx.send(result.unwrap_or(crate::platform::shell_menu::MenuOutcome::None));
         })
         .map_err(|err| format!("投递桌面背景菜单失败：{err}"))?;
         // 阻塞等主线程把菜单弹完并发回结果。`run_on_main_thread` 只投递就返回，
         // 所以「等」必须是这个 `recv()` —— 少了它就是 V88 那个「菜单还没弹就 resolve」的 bug。
-        rx.recv()
-            .map_err(|err| format!("读取新建结果失败：{err}"))
+        let outcome = rx
+            .recv()
+            .map_err(|err| format!("读取菜单结果失败：{err}"))?;
+        // V100：注入的视图类项（刷新 / 排序 / 自动整理）不在本命令的返回值里 ——
+        // 广播事件让前端执行（动作与自绘菜单同一套语义）。
+        if let crate::platform::shell_menu::MenuOutcome::Action(action) = &outcome {
+            let _ = app.emit("grid:menu-action", action.as_str());
+        }
+        return Ok(match outcome {
+            crate::platform::shell_menu::MenuOutcome::Created(item) => Some(item),
+            _ => None,
+        });
     }
     #[cfg(not(target_os = "windows"))]
     {

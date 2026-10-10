@@ -80,7 +80,7 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CallWindowProcW, CreatePopupMenu, DefWindowProcW, DeleteMenu, DestroyMenu,
     GetCursorPos, GetMenuItemCount, GetMenuStringW, InsertMenuW, GWLP_WNDPROC, HMENU, MF_BYPOSITION,
-    MF_POPUP, MF_STRING, PostMessageW, SetForegroundWindow, SetWindowLongPtrW, TPM_LEFTALIGN,
+    MF_POPUP, MF_SEPARATOR, MF_STRING, PostMessageW, SetForegroundWindow, SetWindowLongPtrW, TPM_LEFTALIGN,
     TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx, WM_DRAWITEM, WM_INITMENUPOPUP,
     WM_MEASUREITEM, WM_MENUCHAR, WM_NULL, WNDPROC,
 };
@@ -92,13 +92,37 @@ use windows::Win32::UI::WindowsAndMessaging::{
 /// 「这是我们的新建项，不用走 `InvokeCommand`」。
 const CMD_NEW_FOLDER: u32 = 0x9001;
 const CMD_NEW_TEXT: u32 = 0x9002;
+/// V100：经典菜单「新建 ›」里的快捷方式与 ShellNew 模板项。
+const CMD_NEW_SHORTCUT: u32 = 0x9003;
+/// ShellNew 模板档：`0x9100 + 模板序号`（注入时最多 64 项）。
+const CMD_NEW_TEMPLATE_BASE: u32 = 0x9100;
+/// V100：经典菜单顶部的「查看 / 排序方式 / 刷新」——原生这三项属于 DefView 的
+/// `IShellView` 视图层，`CreateViewObject` 拿不到（见 show_background_context_menu
+/// 的边界说明）。为了让「显示更多选项」和原生一样，亲手注入并把动作发回前端执行。
+const CMD_VIEW_RELAYOUT: u32 = 0x9201;
+const CMD_VIEW_ICONS: u32 = 0x9202;
+const CMD_REFRESH: u32 = 0x9203;
+/// 排序方式子菜单：`0x9210 + 0..4` = name/size/type/mtime。
+const CMD_SORT_BASE: u32 = 0x9210;
+
+/// 背景菜单弹出后的结果（V100 起不止「新建」：还有注入项被点中后要前端执行的动作）。
+#[derive(Debug, Clone)]
+pub enum MenuOutcome {
+    /// 菜单正常收起，没有我们的注入项被点中。
+    None,
+    /// 用户点了我们注入的「新建」类项，已落盘 —— 前端增量认领 + 原地改名。
+    Created(CreatedItem),
+    /// 用户点了注入的视图类项（刷新 / 排序 / 自动整理…），动作字符串发回前端执行。
+    /// 取值：`refresh` / `relayout` / `toggle-icons` / `sort:<key>`。
+    Action(String),
+}
 
 /// 我们「新建」项被点中后产出的结果，回传前端让它增量认领 + 原地改名。
 ///
 /// V89：不再用 `grid:item-created` 事件（那条路在菜单还没弹时就被 V88 的 30ms 竞速
 /// 判定为「没新建」触发整层刷新）。改为**命令直接返回** `Option<CreatedItem>`：
 /// 菜单收起后前端立刻拿到「建了什么」，建了就走增量路径、没建（普通菜单项）就走对账路径。
-#[derive(Clone, serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct CreatedItem {
     /// 新建项的完整路径（桌面用户目录 + 显示名）。
     pub path: String,
@@ -230,7 +254,10 @@ pub fn show_context_menu(hwnd: HWND, path: &str, extended: bool) -> Result<Optio
             .BindToHandler(None, &BHID_SFUIObject)
             .map_err(|err| format!("该对象没有右键菜单：{err}"))?;
         // 条目菜单不带「新建」（那是桌面背景菜单才有的能力）
-        run_menu(hwnd, &menu, extended, false)
+        match run_menu(hwnd, &menu, extended, false)? {
+            MenuOutcome::Created(item) => Ok(Some(item)),
+            _ => Ok(None),
+        }
     }
 }
 
@@ -277,7 +304,7 @@ pub fn show_context_menu(hwnd: HWND, path: &str, extended: bool) -> Result<Optio
 pub fn show_background_context_menu(
     hwnd: HWND,
     extended: bool,
-) -> Result<Option<CreatedItem>, String> {
+) -> Result<MenuOutcome, String> {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
 
@@ -357,23 +384,22 @@ unsafe fn strip_native_new_menu(hmenu: HMENU) {
 /// 而且这段里有 `SetWindowLongPtrW` / `TrackPopupMenuEx` 这种**错一步就整套失效**
 /// 的时序，绝不该抄两遍。
 ///
-/// - `inject_new`：只有桌面背景菜单才注入「新建」子菜单（见 V88），条目菜单不注入。
+/// - `inject_new`：只有桌面背景菜单才注入「顶部视图组 + 新建」（见 V88/V100），条目菜单不注入。
 ///
-/// 返回 `Ok(Some(CreatedItem))` 表示用户点了我们注入的「新建」项（已建好真实文件 / 目录，
-/// 调用方拿去增量认领 + 原地改名）；`Ok(None)` 表示菜单正常收起但没新建（普通菜单项 / 取消）。
-/// 不再用事件广播：命令直接把结果带回前端，彻底消掉 V88「菜单没弹就 30ms 竞速判没新建、
-/// 触发整层刷新」的残留 bug。
+/// 返回 `Ok(MenuOutcome::Created(_))` 表示用户点了我们注入的「新建」项（已建好真实文件 /
+/// 目录，调用方拿去增量认领 + 原地改名）；`Ok(MenuOutcome::Action(_))` 表示点了注入的视图类
+/// 项（刷新 / 排序 / 自动整理），动作字符串由命令层广播给前端执行；`Ok(MenuOutcome::None)`
+/// 表示菜单正常收起但没点我们的注入项（普通菜单项 / 取消）。
 fn run_menu(
     hwnd: HWND,
     menu: &IContextMenu,
     extended: bool,
     inject_new: bool,
-) -> Result<Option<CreatedItem>, String> {
+) -> Result<MenuOutcome, String> {
     // 菜单期间标记「我们自己的菜单在弹」，禁止 desktop_handoff 把桌面借给系统（V89）。
     let _guard = OwnMenuGuard::new();
     unsafe {
-        // 我们注入的「新建」子菜单句柄（没有则不注入），teardown 时一并销毁。
-        let mut new_sub: Option<windows::Win32::UI::WindowsAndMessaging::HMENU> = None;
+        // 我们注入的子菜单句柄（没有则不注入），teardown 时一并销毁。
 
         // 同一个对象上查 IContextMenu3 → IContextMenu2，目的是拿到 HandleMenuMsg(2)。
         // 拿不到也不致命：只是懒加载子菜单会缺项（V57 之前的行为）—— 但不许静默：
@@ -400,48 +426,129 @@ fn run_menu(
             return Err(format!("填充菜单项失败：{err}"));
         }
 
-        // —— V88：注入我们自己的「新建」子菜单（仅在桌面背景菜单）——
+        // —— V88/V100：注入我们自己的「顶部视图组 + 新建」子菜单（仅在桌面背景菜单）——
         // 原生「新建」依赖 IShellView，在我们这套 view-object 菜单里会 E_FAIL，所以亲手做。
-        // 放在最顶上，和原生项区分开；命令 id 用 0x9000+ 档，绝不与 Shell 的 1..=0x7FFF 撞车。
+        // 「查看 / 排序方式 / 刷新」压根不在 IContextMenu 里（属于 DefView 视图层），
+        // 经典菜单因此缺顶组 —— V100 起同样亲手注入，动作发回前端执行。
+        // 命令 id 用 0x9000+ 档，绝不与 Shell 的 1..=0x7FFF 撞车。
+        let mut injected_subs: Vec<HMENU> = Vec::new();
+        // 新建模板项的扩展名表（下标 = 命令 id - CMD_NEW_TEMPLATE_BASE）
+        let mut template_exts: Vec<String> = Vec::new();
         if inject_new {
             // —— V89：先摘掉原生那个必然 E_FAIL 的「新建」，再插我们自己的 ——
             // 否则菜单顶上会有两个同名「新建」，用户点中原生那个就报「未指定的错误」，
             // 观感就是「新建失效」（详见 strip_native_new_menu 的文档）。
             strip_native_new_menu(hmenu);
-            match CreatePopupMenu() {
-                Ok(sub) => {
+
+            // ①「查看 ›」子菜单（动作发回前端）
+            if let Ok(view_sub) = CreatePopupMenu() {
+                let _ = AppendMenuW(
+                    view_sub,
+                    MF_STRING,
+                    CMD_VIEW_RELAYOUT as usize,
+                    PWSTR(w!("自动整理格子").as_ptr() as *mut u16),
+                );
+                let _ = AppendMenuW(
+                    view_sub,
+                    MF_STRING,
+                    CMD_VIEW_ICONS as usize,
+                    PWSTR(w!("显示桌面图标").as_ptr() as *mut u16),
+                );
+                let _ = InsertMenuW(
+                    hmenu,
+                    0,
+                    MF_BYPOSITION | MF_POPUP | MF_STRING,
+                    view_sub.0 as usize,
+                    PWSTR(w!("查看(&V)").as_ptr() as *mut u16),
+                );
+                injected_subs.push(view_sub);
+            }
+            // ②「排序方式 ›」子菜单（动作发回前端；与自绘菜单同一份四个键）
+            if let Ok(sort_sub) = CreatePopupMenu() {
+                for (idx, label) in ["名称", "大小", "项目类型", "修改日期"].into_iter().enumerate() {
+                    let text = HSTRING::from(label);
                     let _ = AppendMenuW(
-                        sub,
+                        sort_sub,
                         MF_STRING,
-                        CMD_NEW_FOLDER as usize,
-                        PWSTR(w!("新建文件夹").as_ptr() as *mut u16),
+                        (CMD_SORT_BASE + idx as u32) as usize,
+                        PWSTR(text.as_ptr() as *mut u16),
                     );
-                    let _ = AppendMenuW(
-                        sub,
-                        MF_STRING,
-                        CMD_NEW_TEXT as usize,
-                        PWSTR(w!("新建文本文档").as_ptr() as *mut u16),
-                    );
-                    // 插到菜单顶部（位置 0）。MF_POPUP 的 uIDNewItem 是子菜单句柄本身。
-                    let inserted = InsertMenuW(
-                        hmenu,
-                        0,
-                        MF_BYPOSITION | MF_POPUP | MF_STRING,
-                        sub.0 as usize,
-                        PWSTR(w!("新建(&W)").as_ptr() as *mut u16),
-                    );
-                    if inserted.is_err() {
-                        crate::logging::write_line(
-                            "grid",
-                            "桌面背景菜单：插入「新建」子菜单失败，本次菜单不会有可用新建项",
-                        );
-                    }
-                    new_sub = Some(sub);
                 }
-                Err(err) => crate::logging::write_line(
+                let _ = InsertMenuW(
+                    hmenu,
+                    1,
+                    MF_BYPOSITION | MF_POPUP | MF_STRING,
+                    sort_sub.0 as usize,
+                    PWSTR(w!("排序方式(&O)").as_ptr() as *mut u16),
+                );
+                injected_subs.push(sort_sub);
+            }
+            // ③「刷新」直接命令项
+            let _ = InsertMenuW(
+                hmenu,
+                2,
+                MF_BYPOSITION | MF_STRING,
+                CMD_REFRESH as usize,
+                PWSTR(w!("刷新(&E)").as_ptr() as *mut u16),
+            );
+            // 顶组与 Shell 原有项之间的分隔线
+            let _ = InsertMenuW(hmenu, 3, MF_BYPOSITION | MF_SEPARATOR, 0, PWSTR::null());
+
+            // ④「新建 ›」子菜单：文件夹 + 快捷方式 + ShellNew 模板全量（V100，
+            //    与自绘菜单同一份 `list_shell_new_templates`，名字同源）
+            if let Ok(sub) = CreatePopupMenu() {
+                let _ = AppendMenuW(
+                    sub,
+                    MF_STRING,
+                    CMD_NEW_FOLDER as usize,
+                    PWSTR(w!("新建文件夹").as_ptr() as *mut u16),
+                );
+                let _ = AppendMenuW(
+                    sub,
+                    MF_STRING,
+                    CMD_NEW_TEXT as usize,
+                    PWSTR(w!("新建文本文档").as_ptr() as *mut u16),
+                );
+                let _ = AppendMenuW(
+                    sub,
+                    MF_STRING,
+                    CMD_NEW_SHORTCUT as usize,
+                    PWSTR(w!("快捷方式").as_ptr() as *mut u16),
+                );
+                let _ = AppendMenuW(sub, MF_SEPARATOR, 0, PWSTR::null());
+                for (idx, template) in list_shell_new_templates().into_iter().enumerate() {
+                    if idx >= 64 {
+                        break;
+                    }
+                    let label = HSTRING::from(template.name.as_str());
+                    let _ = AppendMenuW(
+                        sub,
+                        MF_STRING,
+                        (CMD_NEW_TEMPLATE_BASE + idx as u32) as usize,
+                        PWSTR(label.as_ptr() as *mut u16),
+                    );
+                    template_exts.push(template.ext);
+                }
+                // 插到顶组之后（位置 4）。MF_POPUP 的 uIDNewItem 是子菜单句柄本身。
+                let inserted = InsertMenuW(
+                    hmenu,
+                    4,
+                    MF_BYPOSITION | MF_POPUP | MF_STRING,
+                    sub.0 as usize,
+                    PWSTR(w!("新建(&W)").as_ptr() as *mut u16),
+                );
+                if inserted.is_err() {
+                    crate::logging::write_line(
+                        "grid",
+                        "桌面背景菜单：插入「新建」子菜单失败，本次菜单不会有可用新建项",
+                    );
+                }
+                injected_subs.push(sub);
+            } else {
+                crate::logging::write_line(
                     "grid",
-                    &format!("桌面背景菜单：注入「新建」子菜单失败：{err}"),
-                ),
+                    "桌面背景菜单：注入「新建」子菜单失败，本次菜单不会有可用新建项",
+                );
             }
         }
 
@@ -495,28 +602,64 @@ fn run_menu(
         }
         let _ = DestroyMenu(hmenu);
         // 我们注入的子菜单也要销毁，避免句柄泄漏
-        if let Some(sub) = new_sub {
+        for sub in injected_subs {
             let _ = DestroyMenu(sub);
         }
 
         let cmd = picked.0;
         // 诊断留痕：用户再报「新建失效」时，一眼能看出他点的到底是哪个命令
-        // （0 = 取消 / 0x9001 = 我们的新建文件夹 / 0x9002 = 我们的新建文本文档 / 其它 = 原生项）。
+        // （0=取消；0x9001..0x9003=我们的新建三类；0x9100+=ShellNew 模板；
+        //   0x9201..0x9213=注入的视图组；其它=原生项）。
         crate::logging::write_line(
             "grid",
-            &format!("桌面背景菜单已收起：命令 id={cmd:#x}（0=取消，0x9001/0x9002=我们的新建）"),
+            &format!("桌面背景菜单已收起：命令 id={cmd:#x}（0=取消，0x9001..0x9100 段=我们的注入项）"),
         );
         // —— V88/V89：我们自己的「新建」项，不走 InvokeCommand（那条路径对 view-object 菜单会 E_FAIL）——
         // 直接建真实文件 / 目录，把结果带回前端（V89 改为返回值而非事件，避免 30ms 竞速误判）。
         if (cmd as u32) == CMD_NEW_FOLDER {
-            return Ok(create_new_item("folder"));
+            return Ok(match create_new_item("folder") {
+                Some(item) => MenuOutcome::Created(item),
+                None => MenuOutcome::None,
+            });
         }
         if (cmd as u32) == CMD_NEW_TEXT {
-            return Ok(create_new_item("text"));
+            return Ok(match create_new_item("text") {
+                Some(item) => MenuOutcome::Created(item),
+                None => MenuOutcome::None,
+            });
+        }
+        // —— V100：注入的「快捷方式 / ShellNew 模板 / 顶部视图组」——
+        if (cmd as u32) == CMD_NEW_SHORTCUT {
+            return Ok(match create_new_shortcut() {
+                Some(item) => MenuOutcome::Created(item),
+                None => MenuOutcome::None,
+            });
+        }
+        if (cmd as u32) >= CMD_NEW_TEMPLATE_BASE && (cmd as u32) < CMD_NEW_TEMPLATE_BASE + 64 {
+            let idx = ((cmd as u32) - CMD_NEW_TEMPLATE_BASE) as usize;
+            let outcome = template_exts
+                .get(idx)
+                .and_then(|ext| create_new_from_shell_new(ext))
+                .map_or(MenuOutcome::None, MenuOutcome::Created);
+            return Ok(outcome);
+        }
+        if (cmd as u32) == CMD_VIEW_RELAYOUT {
+            return Ok(MenuOutcome::Action("relayout".to_string()));
+        }
+        if (cmd as u32) == CMD_VIEW_ICONS {
+            return Ok(MenuOutcome::Action("toggle-icons".to_string()));
+        }
+        if (cmd as u32) == CMD_REFRESH {
+            return Ok(MenuOutcome::Action("refresh".to_string()));
+        }
+        if (cmd as u32) >= CMD_SORT_BASE && (cmd as u32) < CMD_SORT_BASE + 4 {
+            let keys = ["name", "size", "type", "mtime"];
+            let key = keys[((cmd as u32) - CMD_SORT_BASE) as usize];
+            return Ok(MenuOutcome::Action(format!("sort:{key}")));
         }
         if cmd == 0 {
             // 用户点了菜单外面 / 按了 Esc
-            return Ok(None);
+            return Ok(MenuOutcome::None);
         }
 
         // MAKEINTRESOURCEA：把命令 id 当成指针传（0 基）—— Shell 约定的做法
@@ -528,7 +671,7 @@ fn run_menu(
         menu.InvokeCommand(&info)
             .map_err(|err| format!("执行菜单命令失败：{err}"))?;
     }
-    Ok(None)
+    Ok(MenuOutcome::None)
 }
 
 /// 给「新建」项算一个不重名的名字（对齐 Explorer：`新建文件夹` → `新建文件夹 (2)` → …）。
