@@ -22,8 +22,10 @@
 - ★★ **渲染几何 = 引擎几何**（V59/V70）：`height: box.height`、**不叠 `max-height`**（装不下交盒内滚动）；**常量差 1px 就少一行/列**；根画布永远 `overflow-hidden`、菜单必须 `fixed`。拖动链路（V57）：移动永远可用，锁只收编辑。
 - ★★ **菜单不许有两个同名项**（V89）：注入前先摘原生同名（`CNewMenu` 无 view 必 E_FAIL）；摘除**倒序**、判据只认**开头**。
 - ★★ **`run_on_main_thread` 只投递、不等结果**（V89）：弹菜单必配 `mpsc` 等回传（否则 Promise 早 resolve ⇒ 竞速判据必误判）。
-- ★★ **「隐藏改名框」链路已删（V96）**：V92–V95 七轮不收敛——ShellNew 要隐藏视图在前台，改名框必抢前台 ⇒ 互斥。**别再往回加**：`LVM_CANCELEDITLABEL`/`VK_RETURN`/`EDIT_*`/`grid_focus_desktop`（守卫有反向断言）。
+- ★★ **「隐藏改名框」链路已删（V96）**：ShellNew 要隐藏视图在前台、改名框必抢前台 ⇒ 互斥，V92–V95 七轮不收敛。**别再往回加** `LVM_CANCELEDITLABEL`/`VK_RETURN`/`EDIT_*`/`grid_focus_desktop`（守卫有反向断言）。
 - ★★ **条目改名框必须全选默认名**（V96）：`autoFocus` 只聚焦不选中 ⇒ 打字变**追加**。两个 input 都要 `onFocus={e => e.currentTarget.select()}`。
+- ★★ **B 模式「原生图标可点」有两条腿**（V102）：① 根画布 `pointerEvents: none`（窗口**内部**转发）；② **命中区必须收窄** —— 真正决定归属的是 Rust 25ms 轮询 `let want = interactive || cursor_hit`。B 模式下**不报整窗**、每格只报**标题栏**（`BOX_HEADER_H+BOX_BORDER_H`），内容区整片交还桌面。不变量 `HIT_PADDING(4) < GRID_PAD_Y(8)`。
+- ★★ **B 模式下拖文件进格子的落点只剩标题栏那 37px**（内容区已交还桌面）⇒ 标题栏 `title` 必须写明。
 - **复刻菜单 = 回退 + 条目菜单**（V58/V90）：`CMF_NORMAL|CMF_EXPLORE`（**不传 `CMF_CANRENAME`**）；`IContextMenu2/3` 消息**必须转发**。层级：盒子(auto)<参考线 35<工作台 38<面板 40<菜单 50<预览 95。
 - ★★ **便签 contentEditable**（V67/V68）：`\n` 写进光标所在文本节点 + 垫 ZWSP；「跳出」看「上一步是不是我们插的换行」；`applyHighlight` 每 400ms 重写 `innerHTML` ⇒ `reapplyZwsp` 必须在 `restoreCaretIn` 之前。
 - ★★ **压缩列高不许事后夹 `MIN_BOX_H`**（V68）：先缩放再夹会顶出可用区 ⇒ **二分求最大可行缩放比**。
@@ -31,10 +33,9 @@
 ## 3. 布局（用户口径 = 5 列）
 **第1列 未归类竖条 → 第2/3列 归纳格子 → 第4列 便签 → 第5列 工作台**。收纳区右界 = `workstation_rect().x - ARRANGE_GAP_X`。
 - **V69 按内容定尺寸**：尺寸只看条目数；常量 `CELL_EXTRA_W=32`、`BOX_CELL_EXTRA_H=36`（勿混竖条 30）、`BOX_HEADER_H=37`、`GRID_SCROLLBAR_W=4`、`BOX_FIT_SLACK=2`、`MIN_BOX_W=160/120`、`AUTO_MAX_W=520`、`AUTO_MAX_COLS=5`；摆放序 = `(面积, 内容量, 高, 宽)` 降序（**内容量分量不可省**）。
-  - ★★ **V95 分列 = 顺序填充**（用户「从右到左 从上到下 满了才换列」；LPT 最矮列废弃）：第一列塞满才换列；**物理装不下退回 LPT 均衡**。评分 `(-k, 自然宽优先, tallest, used_w)`：列数最少赢；**同 k 没夹宽的赢**。V94 `(tallest, used_w)` 与 V84 `min(横,纵)` 都作废。带下分流：whole `overflowed||squeezed` 才拆分，收益「不更差就换」。
+  - ★★ **V95 分列 = 顺序填充**（用户「从右到左 从上到下 满了才换列」；LPT 最矮列废弃）：第一列塞满才换列；**物理装不下退回 LPT 均衡**。评分 `(-k, 自然宽优先, tallest, used_w)`：列数最少赢；**同 k 没夹宽的赢**。V94 `(tallest, used_w)` 与 V84 `min(横,纵)` 都作废。带下分流：whole `overflowed||squeezed` 才拆分。
   - ★★ **V101 带下拆分平局裁决 = 升序遍历 + `<=`**（真机事故：便签 5→2 后六格全体甩到便签底下 y=364、上带整片留空）：降序 + `<=` 会让最后检查的 m=0 赢走所有平局。**平局时 band_a 装得更多者胜**（m 越大越优先；m=0 全塞带下只有严格更低才能赢）。
-  - ★ **V97–V99 空白右键 = 前端自绘**（`bgMenu`+`BgMenuRow`）：新式菜单**只能由 Explorer 渲染** ⇒ 自绘外壳逐项接真行为（查看/排序方式/刷新/新建›/显示设置/个性化/终端）；**显示更多选项 = 经典背景菜单**；Shift 直达经典、Ctrl = Handy 菜单。**均将于 B 方案整体删除**。
-  - ★ **V98/V99 新建› = 与原生 1:1**：数据源**不是**注册表，而是 Explorer **`Discardable\PostSetup\ShellNew` 的 `Classes` 缓存**；ShellNew 四位置：`.ext\ShellNew` / `.ext\<ProgID>\ShellNew`（← WPS）/ 顶层 `<ProgID>\ShellNew` / ext 任意子键；**空壳键原生不显示**；`.txt`/`.bmp` = Win11 内置 → 硬编码；过滤 `.lnk`/`.library-ms`；按扩展名字母序；**不许按类型名去重**（会顶掉 `.txt`）。显示名 `SHGFI_TYPENAME`；不存在路径取图标必须 `SHGFI_USEFILEATTRIBUTES`；**根画布 `select-none` 压 input 选中高亮** ⇒ 改名框 `select-text`。
+  - ★ **V97–V99 桌面右键自绘 + 新建› 对齐原生**：新式菜单只能由 Explorer 渲染 ⇒ 自绘外壳逐项接真行为；**显示更多选项 = 经典背景菜单**；Shift 直达经典、Ctrl = Handy 菜单。新建的数据源是 Explorer `Discardable\PostSetup\ShellNew` 的 **`Classes` 缓存**（**不是**注册表）；`.txt`/`.bmp` = Win11 内置硬编码。**B 方案 Step 6 整体删**（细节/踩坑见 CONVENTIONS）。
 - ★★ **V85 落位右锚定 + 列内撑满**：列**从右往左**排（第一列贴便签/工作台侧）；窄格**撑到列宽**并按新宽重算高（只撑宽、**不夹窄**）。`content_plan_in` ④ 用**右沿递减**（摆完一列 `right = x - GAP`）——写成「x = 右沿−总宽」= 块**左**端 ⇒ 左溢。
 - ★ **幂等是算出来的，不许几何去兜**（V69）：摆放序是内容的纯函数 ⇒ 尺寸没变 ⇒ 落位一字不差。
 - ★★ **V70**：内部几何两边逐像素相等（差 1px ⇒ 提前出滚动条 ⇒ 少一列）；高度上限跟 zone_h；**满了不许再建**（`probe_room_for_another_box` 真插真排看 overflowed，出错放行）。
@@ -45,11 +46,11 @@
 - **V42–V71**：竖条·三面板·Z 序锚定·挂件分列·指针拖拽·工作台·列式填满（**V64/V65 作废**）。
 - **V75–V80** 桌面日历；V80：`jumpTo` 夹 1900–2100 且带 selected、写盘走 `patchSettings`（禁 `writeSettings`）。
 - **V87/V88** 背景菜单自弹（`CreateViewObject`；`FOLDERID_Desktop`+`BindToObject` 必 `E_INVALIDARG`）；原生「新建」需 `IShellView` ⇒ 自注入。
-- **V81–V100**：桌面右键九轮，V97 定稿自绘（§3；B 方案将整体删）。V81/V82 还桌面已停用；V83–V85 几何不持久化+只算主屏（变则广播 `grid:bounds-changed`，副屏全原生）；V100 经典菜单顶组属 DefView 视图层（`CreateViewObject` 拿不到）须亲手注入。守卫 shell-menu 150、变异 94。
-- **V101 格子乱排修复**：见 §3 V101 行；cargo 86、回归 21/21。
-- **V93–V96 新建链路**（V96 收敛）：前端「改名/新建安静期」保留（重排/刷新挂起、重排优先补跑），`grid:desktop-changed` 走增量 `onDesktopChanged`（唯一新增 → `beginItemRename`）；判据/确认/还前台三块已删（见 §2）。
-- **V99**：新建列表对齐原生（§3）+ **排序方式做真**（`grid_meta.loose_sort` 持久化，系统入口钉最前，同键再点 = 倒序）+ 快捷方式（空 .lnk）。**撤消删除 / 下一桌面背景 无公开接口**。
-- ★★ **B 方案（10-10 拍板；复评 + 实施方案已出）**：`docs/04-review/REVIEW-2026-10-10.md` + `PLAN-B-PHASED.md`。根因=**「接管桌面」这条路线本身在持续生产 bug**（V42–V101 共 60 批几乎全耗在这一个模块；grid.rs 11,422 行/Rust 60%、GridOverlay 5,228 行/30 effect）。方案 6 步（预备→遥控模块→接入+FFlags→前端装饰化→切断接管→拆模块清债），**每步一 commit 可独立回滚**。**待用户拍板 4 条**：① 是否遥控图标位置（A2-full 分组摆放 / A2-lite 只画框）② 退出是否还原图标布局 ③ FFlags 原值还原 ④ 确认放弃撤消删除/下一背景。⚠️ A2-full 会**写用户桌面图标布局**（推翻 V37「一个字节不动」的一半），必须显式同意。
+- **V81–V100**：桌面右键九轮，V97 定稿自绘（§3；**B 方案整体删**）。V81/V82 还桌面已停用；V83–V85 几何不持久化+只算主屏（变则广播 `grid:bounds-changed`，副屏全原生）；V100 顶组属 DefView 视图层须亲手注入。
+- **V101 格子乱排修复**：见 §3 V101 行。
+- **V93–V96 新建链路**（V96 收敛）：前端「改名/新建安静期」保留（重排/刷新挂起、重排优先补跑），`grid:desktop-changed` 走增量 `onDesktopChanged`；判据/确认/还前台三块已删（见 §2）。
+- **V99**：**排序方式做真**（`grid_meta.loose_sort` 持久化，系统入口钉最前，同键再点 = 倒序）+ 快捷方式（空 .lnk）。**撤消删除 / 下一桌面背景 无公开接口**。**Step 6 整体删**。
+- ★★ **B 方案（10-10 拍板：决策 1–4 全按推荐锁定）**：以 `docs/04-review/{REVIEW-2026-10-10,PLAN-B-PHASED}.md` 为准；根因 = **「接管桌面」这条路线本身在持续生产 bug**（V42–V101 共 60 批几乎全耗在这一个模块）。**Step 0–3 已完成**（tag `v101-baseline`、分支 `b-plan`、`699038d`→`a62faf3`→`c682f36`）；**Step 4/5/6 未动** —— 竖条取舍与「开关翻转」需**先验收 B 模式真机可用**（翻转后关掉开关 = 既无原生摆位也无前端图标 ⇒ 格子空框）。开关 = `grid_meta.icon_control`（默认关）+ `icon_spacing_y`；探针实测 `FFlags=0x40200225`、`LVS_AUTOARRANGE=0x0100` 开着、间距 76×88 —— **不是 0x0001**（那是 `LVS_REPORT`；探针第一版写错、结论整个反了）。⚠️ A2-full **会写用户桌面图标布局**（推翻 V37「一个字节不动」的一半）。守卫：shell-menu 151、icon-control 83、变异 108。
 - ⚠️ agent 会话启动不了本 GUI ⇒ 打包 + 装机即止，**不代启动**。
 
 ## 5. 协作与操作约定
@@ -68,4 +69,5 @@
 - 回归里算错的期望值比产品代码更危险 —— 逐条反问「失败场景下它会不会也成立」。
 - 断言别打全文（会命中**注释** ⇒ 假通过）：打**调用点**或**行锚定**；顺序类用 `indexOf` 比位置。
 - 已知预存问题（非回归）：`layout-audit` 0/84；`sample-smoke` 29/29。
+- ★★ **变异自检与回归必须串行**（V102）：变异自检会**临时改源码再还原** ⇒ 并行跑回归会读到被改的源码、报假失败（本次出现 21/22，单独复跑即 22/22）。
 - GUI 问题先用已知 good 旧产物对照；浮层不见 → 日志 + `window-probe.py`。
