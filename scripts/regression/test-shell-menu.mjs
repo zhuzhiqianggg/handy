@@ -438,32 +438,38 @@ ok('V92：前端监听 grid:desktop-changed 并重扫桌面',
 ok('V92：签名只读目录项元数据（read_dir，不读内容、不递归）',
   /std::fs::read_dir\(&dir\)/.test(rustCmdSrc));
 // 原生「新建」会在**被我们隐藏的** listview 上拉起原位改名框：用户看不见，它还会
-// SetFocus 抢键盘（我们自己的改名输入框就打不进字了）。检测到必须取消。
+// SetFocus 抢键盘（我们自己的改名输入框就打不进字了）。
 //
-// V93 修的两条（用户 10-10 的三条报障全出自这里，日志实测 10:24:26–10:26:28 打了 138 条
-// 「取消了 Explorer 在隐藏桌面视图上的原位改名框」）：
-//   ① 判据必须是 `LVM_GETEDITCONTROL`。V92 用的「`FindWindowExW(.., "Edit", ..)` 找得到
-//      就算在编辑」**几乎恒为真**（`SysListView32` 的 `Edit` 子窗是常驻的）⇒ 每 50ms 无脑
-//      投一条取消消息 ⇒ 正好打断 Explorer 的 ShellNew ⇒「第一次成、第二次败、过一会又成」。
-//   ② 一次编辑只动一次（`EDIT_CANCEL_STAGE` 闩锁 + 400/800ms 有限升级），绝不重复刷屏。
-ok('V92：检测到隐藏改名框就用 LVM_CANCELEDITLABEL 取消',
-  /const LVM_CANCELEDITLABEL: u32 = 0x1000 \+ 0x77;/.test(rustCmdSrc) &&
-    /LVM_CANCELEDITLABEL,/.test(rustCmdSrc));
-ok('V93：改名框判据换成 LVM_GETEDITCONTROL（0x1000 + 0x18）',
-  /const LVM_GETEDITCONTROL: u32 = 0x1000 \+ 0x18;/.test(handoffSrc));
-ok('V93：label_edit_control 返回编辑框句柄（供有限升级用，不再只有 bool）',
-  /pub fn label_edit_control\(\) -> Option<HWND>/.test(handoffSrc) &&
+// V93 修的判据（用户 10-10 的三条报障全出自这里，日志实测 10:24:26–10:26:28 打了 138 条）：
+//   判据必须是 `LVM_GETEDITCONTROL`。V92 用的「`FindWindowExW(.., "Edit", ..)` 找得到
+//   就算在编辑」**几乎恒为真**（`SysListView32` 的 `Edit` 子窗是常驻的）⇒ 每 50ms 无脑
+//   投一条取消消息 ⇒ 正好打断 Explorer 的 ShellNew ⇒「第一次成、第二次败、过一会又成」。
+//
+// V94（用户 10-10 第三次报障「每次只能创建一个，第二次就建不出来 + 桌面自己刷新」）：
+//   **动作从「取消」改成「确认」**。原生新建的语义是「取消改名 = 删掉刚建的文件」——
+//   取消这条路天生就是死路：第一次建出来又被 Explorer 自己收走。改成向编辑框投
+//   `VK_RETURN` 让 Explorer 用默认名**完成**创建（文件必然保留），改名交给我们自己的框。
+ok('V94：检测到隐藏改名框就投 VK_RETURN 确认（保留默认名，绝不取消）',
+  /const VK_RETURN: usize = 0x0D;/.test(rustCmdSrc) &&
+    /WPARAM\(VK_RETURN\),/.test(rustCmdSrc));
+ok('V94：确认走的是编辑框句柄（label_edit_control），不是对 listview 盲发',
+  /confirm\(edit_hwnd\);/.test(rustCmdSrc) &&
     /crate::platform::desktop_handoff::label_edit_control\(\)/.test(rustCmdSrc));
+ok('V93：改名框判据是 LVM_GETEDITCONTROL（0x1000 + 0x18）',
+  /const LVM_GETEDITCONTROL: u32 = 0x1000 \+ 0x18;/.test(handoffSrc));
+ok('V93：label_edit_control 返回编辑框句柄（供确认动作用，不再只有 bool）',
+  /pub fn label_edit_control\(\) -> Option<HWND>/.test(handoffSrc));
 ok('V93：label_editing 仍对外可见（desktop_handoff 内部要用）',
   /pub fn label_editing\(\) -> bool/.test(handoffSrc));
-ok('V93：一次编辑只动一次 —— EDIT_CANCEL_STAGE 闩锁 + 400/800ms 有限升级',
+ok('V94：一次编辑只动一次 —— EDIT_CANCEL_STAGE 闩锁 + 600/1200ms 有限重试',
   /static EDIT_CANCEL_STAGE: AtomicU8 = AtomicU8::new\(0\);/.test(rustCmdSrc) &&
     /let stage = EDIT_CANCEL_STAGE\.load\(Ordering::Relaxed\);/.test(rustCmdSrc) &&
     /if stage == 0 \{/.test(rustCmdSrc) &&
-    /\} else if stage == 1 && waited_ms >= 400 \{/.test(rustCmdSrc));
-ok('V93：不在接管态绝不碰改名框（那是用户自己在用的重命名）',
+    /\} else if stage == 1 && waited_ms >= 600 \{/.test(rustCmdSrc) &&
+    /\} else if stage == 2 && waited_ms >= 1200 \{/.test(rustCmdSrc));
+ok('V94：不在接管态绝不碰改名框（那是用户自己在用的重命名）',
   /if !ICONS_TAKEN\.load\(Ordering::Relaxed\) \{/.test(rustCmdSrc));
-ok('V92：取消用 PostMessage（投递即走，Explorer 忙也不会卡住轮询线程）',
+ok('V92：确认用 PostMessage（投递即走，Explorer 忙也不会卡住轮询线程）',
   /use windows::Win32::UI::WindowsAndMessaging::PostMessageW;/.test(rustCmdSrc));
 
 // —— V93：前端的「改名 / 新建」安静期（用户 10-10：「我创建后应该聚焦到命名上，

@@ -2794,7 +2794,7 @@ fn ensure_poller(app: AppHandle) {
                         ICONS_WERE_VISIBLE.store(false, Ordering::Relaxed);
                     }
                 }
-                // —— V92/V93：取消 Explorer 在**被我们隐藏的** listview 上拉起的原位改名框 ——
+                // —— V92→V94：Explorer 在**被我们隐藏的** listview 上拉起的原位改名框 ——
                 //
                 // 桌面空白右键**穿透**给 Explorer（V92），那张菜单的「新建」是真原生的：
                 // 文件会真的建出来，随后 `CNewMenu` 会让我们 `SW_HIDE` 掉的那个
@@ -2802,22 +2802,23 @@ fn ensure_poller(app: AppHandle) {
                 //   ① **看不见**（宿主被我们藏了）⇒ 用户以为「新建没反应」；
                 //   ② 会 `SetFocus` **抢键盘** ⇒ 我们自己 overlay 的改名框打不进字。
                 //
-                // 所以检测到就取消它，改交给前端对账后弹**我们自己的**改名框。
+                // # V94（用户 10-10 第三次报障）：**确认，不是取消**
                 //
-                // # V93 修了两处（用户 10-10 的三条报障全出自这一段）
+                // V92/V93 都是「取消」它（`LVM_CANCELEDITLABEL` / Esc）—— 但原生新建的
+                // 语义是 **「取消改名 = 删掉刚建的文件」**：第一次建出来又被 Explorer 自己
+                // 收走 ⇒「第二次就建不出来了」；打断 ShellNew 还会让 Explorer 重绘桌面
+                // ⇒「创建后桌面自己刷新一下」。取消这条路是死路。
                 //
-                // ① **判据换成 `LVM_GETEDITCONTROL`**（见 `desktop_handoff::label_edit_control`
-                //    的文档）：V92 用的「`FindWindowExW(.., "Edit", ..)` 找得到就行」几乎
-                //    **恒为真**（`SysListView32` 的 `Edit` 子窗是常驻的），于是每 50ms 无脑
-                //    往隐藏视图投一条取消消息 —— 日志实测 138 条。就是这条刷屏把 Explorer 的
-                //    ShellNew 流程打断成「第一次成、第二次败、过一会又成」。
-                // ② **一次编辑只动一次，且有限升级**：先 `LVM_CANCELEDITLABEL`；400ms 还没
-                //    退出就把 `Esc` 投给编辑框本身；800ms 还不行就 `WM_CANCELMODE`，然后收手
-                //    并留一条日志。**绝不再每 50ms 重复同一条消息**。
+                // 改成向编辑框投一个 **`VK_RETURN`**：让 Explorer 用默认名（「新建文件夹」）
+                // **完成**创建 —— 文件必然保留；随后目录签名变化广播出去，前端把我们的
+                // 改名框开在它上面（`onDesktopChanged`，V93 已就位），改名体验不缺。
+                //
+                // 一次编辑只动一次：回车后 600ms 框还在再补一刀，1200ms 收手留日志。
+                // 判据 `LVM_GETEDITCONTROL`（V93）只在真编辑态才返回句柄，平时零开销。
                 // 用 `PostMessage`：投递完就走，不会因为 Explorer 忙而卡住轮询线程。
                 if icon_watch_ticks % 2 == 0 {
                     // ⚠️ 只在**接管态**才动：没接管时桌面上那个原位改名框是用户自己在用的，
-                    // 去取消它就是「我的手把我自己的重命名打断了」。
+                    // 替它按回车就是「我的手把我自己的重命名提交了」。
                     if !ICONS_TAKEN.load(Ordering::Relaxed) {
                         EDIT_SEEN_TICK.store(0, Ordering::Relaxed);
                         EDIT_CANCEL_STAGE.store(0, Ordering::Relaxed);
@@ -2842,50 +2843,40 @@ fn ensure_poller(app: AppHandle) {
                                 use windows::Win32::Foundation::{LPARAM, WPARAM};
                                 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
                                 let stage = EDIT_CANCEL_STAGE.load(Ordering::Relaxed);
+                                const WM_KEYDOWN: u32 = 0x0100;
+                                const WM_KEYUP: u32 = 0x0101;
+                                const VK_RETURN: usize = 0x0D;
+                                // listview 的改名编辑框对 `WM_KEYDOWN(VK_RETURN)` 的响应就是
+                                // 「结束编辑并提交」—— 跨进程 PostMessage 可达，无需真实键击。
+                                let confirm = |hwnd: windows::Win32::Foundation::HWND| unsafe {
+                                    let _ = PostMessageW(
+                                        hwnd,
+                                        WM_KEYDOWN,
+                                        WPARAM(VK_RETURN),
+                                        LPARAM(0),
+                                    );
+                                    let _ = PostMessageW(
+                                        hwnd,
+                                        WM_KEYUP,
+                                        WPARAM(VK_RETURN),
+                                        LPARAM(0),
+                                    );
+                                };
                                 if stage == 0 {
-                                    const LVM_CANCELEDITLABEL: u32 = 0x1000 + 0x77;
-                                    if let Some(list) = desktop_icon_view() {
-                                        unsafe {
-                                            let _ = PostMessageW(
-                                                list,
-                                                LVM_CANCELEDITLABEL,
-                                                WPARAM(0),
-                                                LPARAM(0),
-                                            );
-                                        }
-                                    }
+                                    confirm(edit_hwnd);
                                     EDIT_CANCEL_STAGE.store(1, Ordering::Relaxed);
                                     crate::logging::write_line(
                                         "grid",
-                                        "取消了 Explorer 在隐藏桌面视图上的原位改名框（改名交回我们自己的输入框）",
+                                        "已确认 Explorer 在隐藏桌面视图上的原位改名框（保留默认名，文件交给我们自己的改名框）",
                                     );
-                                } else if stage == 1 && waited_ms >= 400 {
-                                    // 列表视图没理会 —— 直接把 Esc 投给编辑框本身
-                                    const WM_KEYDOWN: u32 = 0x0100;
-                                    const VK_ESCAPE: usize = 0x1B;
-                                    unsafe {
-                                        let _ = PostMessageW(
-                                            edit_hwnd,
-                                            WM_KEYDOWN,
-                                            WPARAM(VK_ESCAPE),
-                                            LPARAM(0),
-                                        );
-                                    }
+                                } else if stage == 1 && waited_ms >= 600 {
+                                    confirm(edit_hwnd);
                                     EDIT_CANCEL_STAGE.store(2, Ordering::Relaxed);
-                                } else if stage == 2 && waited_ms >= 800 {
-                                    const WM_CANCELMODE: u32 = 0x001F;
-                                    unsafe {
-                                        let _ = PostMessageW(
-                                            edit_hwnd,
-                                            WM_CANCELMODE,
-                                            WPARAM(0),
-                                            LPARAM(0),
-                                        );
-                                    }
+                                } else if stage == 2 && waited_ms >= 1200 {
                                     EDIT_CANCEL_STAGE.store(3, Ordering::Relaxed);
                                     crate::logging::write_line(
                                         "grid",
-                                        "隐藏桌面视图上的原位改名框 800ms 仍未退出（已尽力，不再重试）",
+                                        "隐藏桌面视图上的原位改名框 1200ms 仍未结束（已尽力，不再重试）",
                                     );
                                 }
                             }
@@ -5209,26 +5200,29 @@ fn content_plan_batch(items: &[usize], band: SlotRect, icon: i64) -> ContentPlan
 /// 一套候选解：`(分列, 各格高, 各格宽, 这套尺寸有没有被夹窄过)`。
 type ColumnPick = (Vec<Vec<usize>>, Vec<i64>, Vec<i64>, bool);
 
-/// 挑列数与尺寸（V84 定稿）：在 `k = 1..=capacity`、每个 k「先自然宽度、再夹到
-/// `zone_w / k`」的所有候选里，取 **`min(横向填充率, 纵向填充率)` 最大**的那个解。
+/// 挑列数与尺寸（V94 定稿）：在 `k = 1..=capacity`、每个 k「先自然宽度、再夹到
+/// `zone_w / k`」的所有**装得下**的候选里，取 **纵向填充率最大、并列时横向填充率最大**
+/// 的那个解 —— 即评分字典序 `(tallest, used_w)` 更大者优先。
 ///
 /// 返回 `(命中解, 兜底解)`：
-///   · 命中解 = 宽高都装得下、两轴填充率较小者最大的解；
+///   · 命中解 = 宽高都装得下、`(tallest, used_w)` 最大的解；
 ///   · 兜底解 = 宽度装得下、但高度越界里**最矮**的那个（随后交给 [`fit_column_heights`] 压列高）。
 ///
-/// # 这条判据是两代用户反馈合成的
+/// # 这条判据是三代用户反馈合成的
 ///
 /// · **09-23（V71）**：「文档」独占一列、下方空掉 501px，两个小格挤在另一列 ——
-///   用户骂「怎么还是补补丁一样的」 ⇒ **不能只顾少列**：一列空半截、另一列摞满的解，
-///   纵向填充率被拉低，`min` 直接淘汰。
-/// · **09-29（V84）**：「搞成那么多列，却空了大量的空白，格子宽度反而压缩到文件名
-///   都看不清了」「这部分完全可以合并到一列里面」 ⇒ **也不能铺满列数**：真机 6 个格子
-///   920×968 排成 5 列、占高只有 717，每列 ~176px。列一多，竖向大片空白，
-///   `min` 同样把它拉低。
+///   用户骂「怎么还是补补丁一样的」。⇒ 横向填充率做**平局裁决**：当几个 k 的最高列一样满
+///   （典型：大格独占一列、换 k 也压不下 tallest），多开列能把零散小格摊开的解赢。
+/// · **09-29（V84）**：「搞成那么多列，却空了大量的空白」⇒ V84 用 `min(横, 纵)`。
+/// · **10-10（V94，本次）**：真机 6 格又被排成 5 列，几个小格各自占一条窄列
+///   （用户原话：「红框这三列明显可以自动流布局到一列里面，为什么要搞成三列那么丑，
+///   而且列有很窄的。一点也不智能」）。`min(横, 纵)` 的毛病：k 大时横向填充率逼近 1，
+///   把纵向偏低的解也抬了上去 —— **列多这件事必须由纵向优先直接否掉**。
 ///
-/// 也就是说 `min(横, 纵)` 同时否掉两个方向的畸形：**横向铺满、纵向空一半（列太多）**，
-/// 和**纵向摞满、横向空一半（列太少 / 补丁洞）**。平局时先到先得 —— `k` 从小到大、
-/// 同一个 k 里自然尺寸在前 —— 于是「能少一列就少一列、能不夹宽就不夹宽」。
+/// 纵向优先 ≈ **最小可行列数**：装得下的前提下 `k` 越小 `tallest` 越大（LPT 把高度摊进
+/// 更少的列），评分自然更高；只有小 k **装不下**（溢出进兜底 / 宽度淘汰）时才会让位给大 k。
+/// 横向裁决保住 09-23 的教训 —— 「大格独占一列 + 小格挤一列」与「小格摊两列」tallest 相同，
+/// 后者横向更满而胜出，不会退回「补丁洞」。
 ///
 /// `capped_at(k)` 给出「这一套尺寸夹到 `zone_w / k` 之后」的 `(各格高, 各格宽)`；
 /// 与自然尺寸完全相同时会跳过，不做重复劳动。
@@ -5240,7 +5234,7 @@ fn pick_columns(
     zone_h: i64,
     capped_at: impl Fn(usize) -> (Vec<i64>, Vec<i64>),
 ) -> (Option<ColumnPick>, Option<(i64, ColumnPick)>) {
-    let mut best: Option<(i64, ColumnPick)> = None;
+    let mut best: Option<((i64, i64), ColumnPick)> = None;
     let mut fallback: Option<(i64, ColumnPick)> = None;
     for k in 1..=capacity {
         let mut trials: Vec<(Vec<i64>, Vec<i64>, bool)> =
@@ -5264,10 +5258,11 @@ fn pick_columns(
                 }
                 continue;
             }
-            // 两轴填充率的较小者（交叉乘积通分比较，避免浮点）：
-            //   横向 = used_w/zone_w，纵向 = tallest/zone_h。
+            // V94：纵向优先、横向裁决（字典序，避免浮点）——
+            //   先比最高列 `tallest`（越满越好 ⇒ 列数越少越赢），
+            //   并列再比总宽 `used_w`（把零散小格摊开的解赢 ⇒ 不出「补丁洞」）。
             // 严格更优才替换 ⇒ 平局保持先到者：k 更小、自然尺寸优先。
-            let score = (used_w * zone_h).min(tallest * zone_w);
+            let score = (tallest, used_w);
             if best.as_ref().map_or(true, |(s, _)| score > *s) {
                 best = Some((score, (cols, hs, ws, capped)));
             }
@@ -5331,7 +5326,7 @@ fn content_plan_in(order: &[usize], items: &[usize], band: SlotRect, icon: i64) 
     };
 
     // ①② 挑列数与尺寸：每个 `k` 先试自然宽度、再试夹宽，在全部装得下的候选里取
-    // **两轴填充率较小者最大**的解（V84 —— 见 [`pick_columns`] 的注释）。
+    // **纵向优先、横向裁决**的解（V94 —— 见 [`pick_columns`] 的注释）。
     let (pick, over) = pick_columns(&natural_h, &natural_w, capacity, zone_w, zone_h, capped_at);
 
     // ③ 落定：命中解优先；否则用「最矮」的兜底（随后压列高，格子内部滚而不是整层滚）
@@ -5469,6 +5464,17 @@ fn content_plan_with_lower_band(
     // 打底 = 「全部塞进 band_a」（= 没有带下空间时的行为），`m` 从 n-1 往下试、只有严格更低
     // 才替换，于是并列时永远选「band_a 装得更多」的那个（带下那条起点更低，多用它一格都不划算）。
     let mut best = (whole.bottom(), whole);
+    // V94：**上带装得下（且没被压）就不再往带下分流**。
+    //
+    // V94 的列数判据改成了纵向优先（见 [`pick_columns`]）—— 上带的解本来就排得高，
+    // 「分几个小格去带下、max 底沿更低」几乎总能找到收益 ⇒ 小格子被塞进便签底下、
+    // 上带底部反而空一截，又成了用户 09-23 骂的「补丁洞」。
+    // 带下空间的用武之地（V68 的动机、以及下面的契约用例）从来都是「上带**装不下**」：
+    // 溢出、或者列高被 [`fit_column_heights`] 压扁 / 格子被夹窄（`squeezed`）——
+    // 也就是上带真的装不下**自然高度**时，才允许分流。
+    if !best.1.overflowed && !best.1.squeezed {
+        return scatter_back(&order, best.1, items.len());
+    }
     for m in (0..order.len()).rev() {
         let pa = content_plan_in(&order[..m], items, band_a, icon);
         // 左沿：`band_a` 用到的右沿 + 一道缝（`band_a` 空着时就从收纳区左沿起）
@@ -9227,10 +9233,14 @@ mod flow_placer_tests {
     ///
     /// V69 的分列更紧凑，真机那批 17 个格子正好 3 列装下 ⇒ 不再需要带下那条；所以那条路
     /// 改由这条用例直接钉：上带装不下时，多出来的格子必须住进**挂件下方**那块地方。
+    ///
+    /// ⚠️ V94 起上带**装得下（且没被压）就不分流**（见 `content_plan_with_lower_band`
+    /// 的门槛）—— 12 个 20 项格夹宽后 3 列正好装进 600×848，会留在上带；样本加到 14 个，
+    /// 让上带真的装不下自然高度（3 列要摞 5 行 ≈ 1066 > 848，只能压扁）⇒ 走分流。
     #[test]
     fn the_lower_band_hosts_boxes_when_the_upper_band_cannot_hold_them_all() {
         // 上带 = 便签左侧（600 宽，整幅高）；带下那条 = 便签下方（236 × 521，真机量级）
-        let items = vec![20usize; 12];
+        let items = vec![20usize; 14];
         let band_a = SlotRect {
             x: ARRANGE_MARGIN,
             y: ARRANGE_MARGIN,
@@ -10215,14 +10225,14 @@ mod layout_pipeline_tests {
             .filter(|b| is_content(&b.kind))
             .map(|b| b.x)
             .collect();
-        // V66.1：列数是**动态算**的 —— 先把高度收进一屏（这三格总高 784 ≤ 848，一列也够），
-        // 再把宽度尽量占满。本样本三个格子宽 366 / 226 / 160：排到第三列用掉 800 / 935，
-        // 再开一列（+184）就顶出可用宽度，所以落在三列上。
+        // V66.1：列数是**动态算**的。V94 起判据是纵向优先（见 `pick_columns`）——
+        // 这三格总高 784 ≤ 848，**一列就装得下** ⇒ 收成一列（V94 用户口径：
+        // 「红框这三列明显可以自动流布局到一列里面」），而不是 V84 时代摊成三列。
         // 这里留两个锚点（V85 右锚定）：最右一列贴收纳区右沿（本样本没有未归类竖条）、
-        // 列 x 自左向右严格递增（列式落位的定义）。
+        // 列 x 自左向右严格递增（列式落位的定义；单列时后一条自然成立）。
         assert!(
-            column_xs.len() >= 2,
-            "宽度装得下就不该只排一列（要占满空间）：{column_xs:?}"
+            column_xs.len() >= 1,
+            "格子必须落在列网格上：{column_xs:?}"
         );
         let zone_right = first
             .iter()

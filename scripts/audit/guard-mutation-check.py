@@ -813,6 +813,23 @@ MUTATIONS: dict[str, _M] = {
             "不是「名字上有了光标」，而是「整张桌面自己刷了一下、格子全跳一遍」——"
             "正是用户 10-10 说的「跟正常的桌面行为不一样」",
         ),
+        (
+            "V94 确认退回取消（VK_RETURN 被换成 VK_ESCAPE）",
+            "src-tauri/src/commands/grid.rs",
+            "                                const VK_RETURN: usize = 0x0D;",
+            "                                const VK_RETURN: usize = 0x1B;",
+            "原生新建的语义是「取消改名 = 删掉刚建的文件」—— 投 Esc ⇒ 第一次建出来又被 Explorer "
+            "自己收走 ⇒「每次只能创建一个，第二次就建不出来」，打断 ShellNew 还让桌面重绘"
+            "（用户 10-10 第三次报障，V92/V93 的取消路是死路）",
+        ),
+        (
+            "V94 改名框判据瘫痪（永远 None ⇒ 隐藏框没人管，抢着键盘焦点）",
+            "src-tauri/src/commands/grid.rs",
+            "                        match crate::platform::desktop_handoff::label_edit_control() {",
+            "                        match Option::<windows::Win32::Foundation::HWND>::None {",
+            "检测一瘫痪，Explorer 在隐藏视图上拉起的改名框就没人确认：它 SetFocus 抢走键盘，"
+            "我们自己的改名框打不进字，新建看起来又「没反应」",
+        ),
     ],
 }
 
