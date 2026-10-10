@@ -1126,39 +1126,24 @@ export function GridOverlay(): React.JSX.Element {
   const [itemDragging, setItemDragging] = useState(false);
 
   /**
-   * **B 模式**（不接管原生桌面）是否开启 —— 见 `docs/04-review/PLAN-B-PHASED.md`。
+   * **桌面整理 = 遥控原生图标（B 方案）—— 这是唯一模式**（Step 4，2026-10-10 收尾）。
    *
-   * 开启后这一层退化成**纯装饰**：
-   *   - 不再画文件 / 文件夹图标（原生图标就在下面，再画一份就是重复内容）；
-   *   - 格子标题栏以外的区域**不吃点击**（让原生图标的双击 / 右键 / 拖拽全部可用）；
+   * 见 `docs/04-review/PLAN-B-PHASED.md`。这一层整体退化成**纯装饰**：
+   *   - 不画文件 / 文件夹图标（原生图标就在下面，再画一份就是重复内容）；
+   *   - 格子标题栏以外的区域**不吃点击**（原生图标的双击 / 右键 / 拖拽全部可用）；
    *   - 「未归类」竖条不渲染（原生图标本来就看得见，竖条纯冗余）。
-   * 默认 `false` = 完全保持 V101 的行为。
+   *
+   * # 为什么是常量而不是 state
+   *
+   * V102 时它是个开关（关 = 回退到 V101 的「接管原生桌面」模型），由用户在管理页切换、
+   * 这里 2 秒轮询对齐。用户 10-10 真机验收通过后，接管路线整体退场 —— 没有「关掉」
+   * 这个状态了（关掉 = 既无原生摆位、又无前端图标 = 一堆空框）。
+   *
+   * 留成常量而不是把 `iconControl &&` 全删：句子的主语还在（「这是 B 模式下的行为」），
+   * 且本文件里那些 `!iconControl &&` 分支守着「旧的接管渲染路径」，一次全删会牵动
+   * 条目拖拽 / 改名 / 菜单一整套状态机 —— 那属于 Step 6a 的独立清理，不混进这次行为切换。
    */
-  const [iconControl, setIconControl] = useState(false);
-
-  // B 模式状态：挂载读一次 + 2 秒轮询对齐（用户在管理页切换后这里要跟上）。
-  //
-  // 用轮询而不是事件：管理页是**另一个窗口**，跨窗口没有通用事件总线（V21 起就是
-  // 这个口径，`grid-overlay-status` 也是轮询）。查询本身只读一行 `grid_meta`，开销可忽略。
-  useEffect(() => {
-    let alive = true;
-    const sync = (): void => {
-      void ipc
-        .desktopIconControlGet()
-        .then((status) => {
-          if (alive) {
-            setIconControl(status.enabled);
-          }
-        })
-        .catch(() => undefined);
-    };
-    sync();
-    const timer = window.setInterval(sync, 2000);
-    return () => {
-      alive = false;
-      window.clearInterval(timer);
-    };
-  }, []);
+  const iconControl = true;
 
   // V51：格子视图模式——'grid'（图标网格）或 'list'（列表）。每格子可独立切换，
   // 未设的默认 'grid'。用户 09-19：「格子里面显示方式可以切换图标和列表两种方式」
@@ -1415,12 +1400,12 @@ export function GridOverlay(): React.JSX.Element {
       void ipc
         .gridRelayout()
         .then(() => refresh())
-        // B 模式：格子几何变了，把原生图标按新网格**重摆一次** —— 否则底板挪了、
-        // 图标还停在旧位置。未开启 B 模式时这条命令会直接报错，被 catch 吞掉，零副作用。
-        .then(() => (iconControl ? ipc.desktopIconLayoutApply() : Promise.resolve(null)))
+        // 摆位：格子几何变了，把原生图标按新网格**重摆一次** —— 否则底板挪了、
+        // 图标还停在旧位置（Step 4 起 B 模式是唯一路径，这条恒执行）。
+        .then(() => ipc.desktopIconLayoutApply())
         .catch(() => undefined);
     }, RELAYOUT_DEBOUNCE_MS);
-  }, [holdQuiet, isQuiet, refresh, iconControl]);
+  }, [holdQuiet, isQuiet, refresh]);
 
   /** 上一次「未归类」竖条快照：路径序 + 矩形宽（对账时 diff 出新文件 / 宽度变化） */
   const looseSnapRef = useRef<{ paths: string[]; width: number }>({ paths: [], width: 0 });
@@ -2143,7 +2128,7 @@ export function GridOverlay(): React.JSX.Element {
     sidePanel === null ? '' : `${sidePanel.tab}:${sidePanel.entry?.id ?? ''}`
   }|pw=${panelWide ? 'full' : 'half'}|menu=${[menuBox, menuItem, menuLoose, menuDock]
     .map((m) => (m === null ? '0' : '1'))
-    .join('')}|tb=${toolbarOpen ? '1' : '0'}|ic=${iconControl ? '1' : '0'}`;
+    .join('')}|tb=${toolbarOpen ? '1' : '0'}`;
 
   /**
    * 是否有右键菜单开着。
@@ -2172,47 +2157,30 @@ export function GridOverlay(): React.JSX.Element {
       // 换成了我们自己的。而「穿透给 Explorer」在图标视图被我们隐藏的前提下，那几个原生
       // 项本来就作用在看不见的视图上、等于空转，却顺带引入了「隐藏改名框」这条修了七轮
       // 都不收敛的链路（V87–V95）。
-      // ★ V102（B 模式）：这一条**必须让路** —— `iconControl` 时整窗命中区绝不能报。
+      // ★★ V102 / Step 4：**整窗命中区绝不报** —— 这是 B 方案的地基。
       //
       // 「根画布 pointerEvents:none」只解决**窗口内部**的转发：点击落在我们窗口上、
       // 穿过 DOM 之后仍然停在我们这层窗，到不了 Explorer。真正决定「这个点归谁」的是
       // Rust 那条 25ms 命中轮询：`let want = interactive || cursor_hit(&win)` ——
       // 只要光标命中我们上报的任一矩形，就 `set_ignore_cursor_events(false)`（窗口吃点击）。
       //
-      // 所以 B 模式下只要还报整窗，就等于「整张桌面还是我们的」：原生图标看得见、
-      // 点不动（双击没反应、右键出的是我们的菜单）。这正是 B 方案唯一要保住的东西。
-      if (!iconControl) {
-        regions.push({
-          x: 0,
-          y: 0,
-          width: window.innerWidth * scaleFactor,
-          height: window.innerHeight * scaleFactor,
-        });
-      }
+      // 所以只要还报整窗，就等于「整张桌面还是我们的」：原生图标看得见、点不动
+      // （双击没反应、右键出的是我们的菜单）。这正是 B 方案唯一要保住的东西。
       for (const box of visibleBoxes) {
-        if (iconControl) {
-          // B 模式：每个格子**只报标题栏那一条**。
-          //
-          // 标题栏是格子唯一「属于我们」的部分（拖动 / 右键 / 改名都在它上面，V57）；
-          // 内容区必须整片交还桌面 —— 原生图标就画在那里，多报 1px 就有一个像素点的
-          // 图标点不着。`BOX_BORDER_H` 一并算进来是因为标题栏下方那条 2px 边框是它的
-          // 视觉下沿（不算的话，贴着边框点的「按住拖格子」会漏到桌面去）。
-          //
-          // 不去单独报四周那圈 2px 边框：那会在桌面正中铺出一圈极细的「吃点击的线」，
-          // 用户根本瞄不到，却正好压在图标网格的缝上 —— 收益为零、风险非零。
-          regions.push({
-            x: box.posX * scaleFactor,
-            y: box.posY * scaleFactor,
-            width: box.width * scaleFactor,
-            height: (BOX_HEADER_H + BOX_BORDER_H) * scaleFactor,
-          });
-          continue;
-        }
+        // 每个格子**只报标题栏那一条**。
+        //
+        // 标题栏是格子唯一「属于我们」的部分（拖动 / 右键 / 改名都在它上面，V57）；
+        // 内容区必须整片交还桌面 —— 原生图标就画在那里，多报 1px 就有一个像素点的
+        // 图标点不着。`BOX_BORDER_H` 一并算进来是因为标题栏下方那条 2px 边框是它的
+        // 视觉下沿（不算的话，贴着边框点的「按住拖格子」会漏到桌面去）。
+        //
+        // 不去单独报四周那圈 2px 边框：那会在桌面正中铺出一圈极细的「吃点击的线」，
+        // 用户根本瞄不到，却正好压在图标网格的缝上 —— 收益为零、风险非零。
         regions.push({
           x: box.posX * scaleFactor,
           y: box.posY * scaleFactor,
           width: box.width * scaleFactor,
-          height: box.height * scaleFactor,
+          height: (BOX_HEADER_H + BOX_BORDER_H) * scaleFactor,
         });
       }
     }
@@ -2248,15 +2216,16 @@ export function GridOverlay(): React.JSX.Element {
       });
     }
     void ipc.gridOverlayUpdateRegions(regions).catch(() => undefined);
-    // regionsKey 已覆盖 boxes / 菜单几何变化；contentHidden 翻转时要重算命中区（只留工具栏）；
-    // V102 起 `iconControl` 也进键 —— 模式切换后命中区整批变了（整窗 → 只剩标题栏），
-    // 不重报的话「切到 B 模式后整张桌面还是点不着」（要等下一次几何变化才偶然自愈）。
+    // regionsKey 已覆盖 boxes / 菜单几何变化；contentHidden 翻转时要重算命中区（只留工具栏）。
+    //
+    // Step 4 起不再需要「模式切换后重报」这一段（原先 `iconControl` 也在依赖里）：模式是常量，
+    // 命中区形状因此是稳定的（整窗从不报、格子只报标题栏）。
     //
     // V96：**又上报「整窗」命中区了**（V92 曾删掉）。那时删它是因为「空白右键该给 Explorer」，
     // 但那条路最终证明不成立（见 `openDesktopBackgroundMenu` 的注释）—— 空白右键必须回到我们
     // 自己的菜单，否则「新建」永远压在 Explorer 的 ShellNew 上、时好时坏。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [regionsKey, scaleFactor, contentHidden, iconControl]);
+  }, [regionsKey, scaleFactor, contentHidden]);
 
   /**
    * 右键菜单开着期间**强制整窗可交互**（V47）。
@@ -3879,11 +3848,15 @@ export function GridOverlay(): React.JSX.Element {
         //
         // 内容收起（V44.3）时才交回桌面 —— 那时整层都不该吃事件。
         //
-        // ★ B 模式（不接管原生桌面）：**根画布同样整层穿透** —— 桌面空白处的右键要落到
-        // Explorer 自己那张原生菜单上（查看 / 排序方式 / 刷新 / 新建，全是原生的）。
-        // 只有格子的标题栏保留 `auto`，让「拖动格子 / 右键格子」还能用。
-        // 见 `docs/04-review/PLAN-B-PHASED.md` Step 3。
-        pointerEvents: contentHidden || iconControl ? 'none' : 'auto',
+        // ★★ B 方案（Step 4 起是唯一模式）：**根画布整层穿透**。
+        //
+        // 桌面空白处的右键要落到 Explorer 自己那张原生菜单上（查看 / 排序方式 / 刷新 /
+        // 新建，全是原生的、且天然带「撤消删除 / 下一个桌面背景」）；左键同理 —— 空白处
+        // 的框选、图标单击都由 Explorer 处理。
+        //
+        // 只有两处例外，各自显式打开：格子的**标题栏**（拖动 / 右键 / 改名）与**菜单本体**
+        // （菜单矩形已单独上报命中区）。见 `docs/04-review/PLAN-B-PHASED.md` Step 3。
+        pointerEvents: 'none',
       }}
       onContextMenu={(event) => {
         // V97：**桌面空白右键在这里分发** —— 根画布整窗可交互（见上方 `pointerEvents`），
@@ -4079,14 +4052,12 @@ export function GridOverlay(): React.JSX.Element {
                 setMenuBox({ id: box.id, x: event.clientX, y: event.clientY });
               }}
               className="flex h-9 shrink-0 cursor-move items-center gap-1.5 px-3 active:cursor-grabbing bg-gradient-to-b from-white/[0.04] to-transparent border-b border-white/[0.06]"
-              /* B 模式（V102）：**标题栏是格子唯一还能收东西的地方** —— 内容区已经整片
-                 交还桌面（原生图标就画在那儿），所以「拖文件进格子」的落点只剩这条 37px。
+              /* **标题栏是格子唯一还能收东西的地方** —— 内容区已经整片交还桌面
+                 （原生图标就画在那儿），所以「拖文件进格子」的落点只剩这条 37px。
                  不说清楚的话，用户按老习惯往格子中间拖，文件会被 Explorer 当成「丢到桌面
                  空白处」（原位不动、只登记失败），看起来像「拖进去没反应」。 */
               title={
-                iconControl
-                  ? '把文件拖到这条标题栏上 = 登记进这个格子（格子里的图标是原生图标，直接双击就能打开）· 拖拽移动 · 双击重命名标题'
-                  : '拖拽移动 · 双击重命名标题'
+                '把文件拖到这条标题栏上 = 登记进这个格子（格子里的图标是原生图标，直接双击就能打开）· 拖拽移动 · 双击重命名标题'
               }
             >
               {renamingId === box.id ? (
@@ -4237,10 +4208,10 @@ export function GridOverlay(): React.JSX.Element {
                 className={getBoxViewMode(box.id) === 'list'
                   ? "flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto px-2 py-1.5 grid-scroll"
                   : "grid min-h-0 flex-1 content-start gap-1.5 overflow-y-auto px-2.5 py-2 grid-scroll"}
-                // B 模式：内容区**不吃点击** —— 原生图标就在下面，双击 / 右键 / 拖拽
-                // 全部交还 Explorer（见 `docs/04-review/PLAN-B-PHASED.md` Step 3）。
+                // 内容区**不吃点击** —— 原生图标就在下面，双击 / 右键 / 拖拽
+                // 全部交还 Explorer（见 `docs/04-review/PLAN-B-PHASED.md` Step 3/4）。
                 style={{
-                  pointerEvents: iconControl ? 'none' : undefined,
+                  pointerEvents: 'none',
                   ...(getBoxViewMode(box.id) === 'grid'
                     ? {
                         gridTemplateColumns: `repeat(auto-fill, minmax(${iconSize + 32}px, 1fr))`,
@@ -4405,140 +4376,15 @@ export function GridOverlay(): React.JSX.Element {
         </div>
       )}
 
-      {/* 左侧「未归类」竖条（V42）：系统入口 + 快捷方式 + 落单条目都排在这里。
-          用户原话「不整理的和快捷方式别整理到格子了，他们就是自动在桌面左上角从上往下
-          排开即可，不需要放到格子里面，没有必要」——
-          所以这里**不是格子**：没有卡片外框、没有标题栏、没有条目计数，就是纯粹的一列
-          桌面图标（和系统桌面自己排的那排长得一样）。
+      {/* ★ Step 5（B 方案收尾）：左侧「未归类」竖条已退场 —— 见 `docs/04-review/PLAN-B-PHASED.md`。
 
-          列数 / 几何全部由 Rust 算好（与收纳格条目同一套度量），这里只按 `columns` 列
-          等宽网格「先自上而下、再往右一列」铺开 —— 前后端差一列就会盖住分类格。
+          它当年的存在前提是「原生图标被我们藏起来了，得有个地方展示没登记的文件」。
+          B 方案把图标交还 Explorer 之后，原生图标一直看得见，竖条变成纯冗余 —— 而且是
+          **白占一列宽**的冗余（布局为它预留 `strip.right + ARRANGE_GAP_X`，那列却没东西画）。
 
-          只在接管模式下渲染：接管关着时桌面本来就看得见这些图标，再画一份就是两份。 */}
-      {!contentHidden && takeover?.enabled === true && !iconControl && loose !== null && loose.columns > 0 && (
-        <div
-          ref={looseRef}
-          style={{
-            left: loose.x,
-            top: loose.y,
-            width: loose.width,
-            height: loose.height,
-            pointerEvents: 'auto',
-            gridAutoFlow: 'column',
-            gridTemplateColumns: `repeat(${loose.columns}, ${loose.iconSize + STRIP_CELL_EXTRA_W}px)`,
-            gridTemplateRows: `repeat(${Math.ceil(
-              loose.items.length / Math.max(1, loose.columns),
-            )}, ${loose.iconSize + STRIP_CELL_EXTRA_H}px)`,
-          }}
-          title="未归类：系统入口 · 快捷方式 · 没进格子的文件；拖进任意格子即可收纳"
-          /* V59：竖条的 onDragOver / onDrop 也一并删掉 —— 拖到竖条 = 移出格子，
-             这条现在由指针拖拽主循环在 mouseup 里处理（落点在所有格子之外即移出），
-             不需要竖条自己再接一层。落点高亮仍然靠 `dropTargetId`。 */
-
-          /* ⚠️ `overflow-y-auto` 不是装饰，是**必须**的（V59 追加；V86 起是兜底）。
-           *
-           * Rust `loose_strip_rect` 的行数是这么定的：先按「一列放得下几行」(`rows_per_col`)
-           * 反推需要几列，再把列数夹在「**竖条最多占工作区一半宽**」内（V86 起不再拍死 4 列
-           * —— 那会把多出的条目全藏进内部滚动区，用户 09-30 抱怨的「下面空了」正是它）。
-           * 正常条目数下 `rows = ceil(n / columns) ≤ rows_per_col`，**没有滚动**、每列满高；
-           * 列数撞到宽度上限时（极端条目数），`rect.h` 封顶到 `avail_h`，前端渲染的行数
-           * 仍然按 `ceil(n / columns)` —— 内容天然比区域高，由这个 `overflow-y-auto`
-           * 在竖条内部滚（与收纳格「装不下就内部出滚动条」同一口径），**不许**溢出到
-           * 桌面根画布（V59 的回归就是这么来的）。 */
-          className="absolute grid content-start gap-1.5 overflow-y-auto grid-scroll"
-        >
-          {loose.items.map((entry) => (
-            <div
-              key={entry.path}
-              data-grid-item="1"
-              data-path={entry.path}
-              title={`${entry.name}\n${entry.path}\n双击打开 · 拖进格子收纳 · Ctrl/Shift 多选 · Ctrl+右键更多操作`}
-              onMouseDown={(event) => {
-                event.stopPropagation();
-                beginLooseDrag(entry, event);
-              }}
-              onDoubleClick={() =>
-                void ipc.gridOpenPath(entry.path).catch((error: Error) => showHint(error.message))
-              }
-              onContextMenu={(event) => {
-                // V43：左条条目同样「普通右键 = 系统原生菜单」（同格子里的条目）
-                event.preventDefault();
-                event.stopPropagation();
-                setMenuBox(null);
-                setMenuItem(null);
-                // V58：Shift 让回系统的扩展菜单（CMF_EXTENDEDVERBS），Handy 自己的
-                // 菜单改用 Ctrl + 右键。
-                //
-                // V82：**系统图标（此电脑 / 回收站）也交回原生**。
-                //
-                // 这里原来写着「系统图标没有文件路径，Shell 给不了菜单，只能走我们自己的」
-                // —— 那句话是**错的**。用户 09-27 贴图报「我的电脑都变成这样了」，正是
-                // 右键「此电脑」弹出的是我们复刻的菜单（只有 打开 / 打开文件位置）。
-                // 系统入口的 `path` 就是 shell CLSID（`::{20D04FE0-…}` 等），
-                // `SHCreateItemFromParsingName` 认得它：`cargo run --example menu_dump --`
-                // `"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}"` 实测拿到 **14 项**完整原生菜单
-                // （打开 / 管理 / 映射网络驱动器 / 创建快捷方式 / 删除 / 重命名 / 属性…）。
-                if (!event.ctrlKey) {
-                  setMenuLoose(null);
-                  void ipc
-                    .shellContextMenu(entry.path, event.shiftKey)
-                    .catch(() => {
-                      // 极少数命名空间对象 Shell 确实给不出菜单 —— 这时才回落到
-                      // 我们自己的菜单（原来是无条件回落，现在降级成兜底）。
-                      setMenuLoose({ entry, x: event.clientX, y: event.clientY });
-                    });
-                  return;
-                }
-                setMenuLoose({ entry, x: event.clientX, y: event.clientY });
-              }}
-              onClick={() => {
-                // V87：与格子条目同一套「单击两次改名」
-                const now = Date.now();
-                const last = lastClickRef.current;
-                if (last.path === entry.path && now - last.at > 350 && now - last.at < 1500) {
-                  lastClickRef.current = { path: '', at: 0 };
-                  beginItemRename(entry.path, entry.name);
-                  return;
-                }
-                lastClickRef.current = { path: entry.path, at: now };
-              }}
-              className={"group flex cursor-pointer flex-col items-center gap-1 rounded-xl p-1.5 transition-all duration-200 hover:bg-white/10 hover:shadow-[0_4px_16px_rgba(0,0,0,0.3),0_0_0_1px_rgba(255,255,255,0.08)]"
-                + (selectedPaths.has(entry.path)
-                  // V86：多选高亮（与格子条目同一套）
-                  ? " bg-sky-500/20 !shadow-none ring-2 ring-inset ring-sky-400/80"
-                  : "")}
-            >
-              <LooseIcon entry={entry} size={loose.iconSize} />
-              {renamingItemPath === entry.path ? (
-                <input
-                  autoFocus
-                  value={itemRenameDraft}
-                  onChange={(event) => setItemRenameDraft(event.target.value)}
-                  // V96：新建后自动聚焦时**全选默认名**（同上方格子里那条）。
-                  onFocus={(event) => event.currentTarget.select()}
-                  onBlur={commitItemRename}
-                  onClick={(event) => event.stopPropagation()}
-                  onMouseDown={(event) => event.stopPropagation()}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter') {
-                      commitItemRename();
-                    } else if (event.key === 'Escape') {
-                      setRenamingItemPath(null);
-                      setItemRenameDraft('');
-                    }
-                  }}
-                  // V98：`select-text` 同上 —— 根画布 select-none 压掉 input 选中高亮，显式恢复
-                  className="w-full select-text rounded bg-neutral-900/95 px-1 text-center text-[11px] leading-tight text-white outline-none ring-1 ring-sky-400/70 selection:bg-sky-500/70 selection:text-white"
-                />
-              ) : (
-                <span className="w-full truncate text-center text-[11px] font-medium leading-tight text-white [text-shadow:0_1px_3px_rgba(0,0,0,0.95)]">
-                  {entry.name.replace(/\.lnk$/i, '')}
-                </span>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
+          想找没进格子的文件：它们就在桌面上，Explorer 自己排着。
+          两个竖条专属组件（`LooseIcon` / `LooseArea` 的渲染）与 Rust 侧的 `grid_loose_list`
+          一并留给 Step 6a 清 —— 这次只做「不再预留、不再渲染」，行为先落地。 */}
 
       {/* 一个格子都没有时给引导（卡片自身可交互，已纳入命中区域） */}
       {!contentHidden && boxes.length === 0 && (
@@ -4549,10 +4395,10 @@ export function GridOverlay(): React.JSX.Element {
         >
           <p className="text-sm font-medium text-neutral-100">桌面上还没有格子</p>
           <p className="max-w-sm text-xs leading-relaxed text-neutral-300">
-            收纳格是桌面上的分区：把文件拖进去，它就
-            <span className="text-neutral-100">归拢显示在格子里，文件本身留在桌面原位，不会被移动或删除</span>；
-            双击图标用默认程序打开；把图标拖出格子（或右键选「移出格子」）它就回到左侧
-            「未归类」竖条——不是删除文件。
+            收纳格是桌面上的分区：把文件拖到格子的**标题栏**上，它就
+            <span className="text-neutral-100">被归拢到这个格子里，文件本身留在桌面原位，不会被移动或删除</span>；
+            图标是桌面上原生的那些，双击就用默认程序打开；把图标拖出格子（或右键选「移出格子」）
+            它就只是不再属于这一格——**不是删除文件**。
             <br />
             也可以直接加一个便签，桌面随手记；日历在右侧常驻的「工作台」里。
           </p>

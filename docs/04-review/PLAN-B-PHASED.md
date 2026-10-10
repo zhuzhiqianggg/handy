@@ -11,7 +11,9 @@
 > **进展（2026-10-10）**：决策 1–4 **按推荐选项已锁定并实施**（A2-full 遥控图标位置 / 首次
 > 接管快照 + 提供手动还原 / FFlags 原值还原 / 放弃「撤消删除」与「下一个桌面背景」）。
 > Step 0–3 已完成；**Step 5 已拍板「5b 删掉竖条」**；**Step 4/6 等真机验收**。
-> 见 §3 顶部「实施进展」。**Step 4/6 未动** —— 见该节末尾的状态表与验收清单。
+> 见 §3 顶部「实施进展」。**Step 0–5 已实施完毕**（Step 4/5 是全批最危险的两步，已过全部门禁，
+> **尚未真机验收**）；Step 6 的范围经实地核查后**已重新裁剪** —— 方案 v1 里有 3 条删除建议
+> 被证伪，见 §3 的 Step 6 一节。
 
 ### 决策 1 ⭐ 图标位置是否由我们遥控？
 
@@ -105,9 +107,9 @@ B 方案下它们会直接出现在原生右键菜单里，**由系统提供**�
 | Step 1 遥控模块 | ✅ 完成 | `a62faf3` · `src-tauri/src/platform/desktop_icons.rs` | 纯函数 + 4 条单测（`pack_point` 往返 / 位序 / 只清两位 / 本机真值判读） |
 | Step 2 接入 + 开关 | ✅ 完成 | `a62faf3` · `src-tauri/src/commands/grid_icons.rs` | 4 条命令；`grid_meta` 键名取 `icon_control` / `icon_spacing_y`（非方案里的 `icontrol_enabled`） |
 | Step 3 前端装饰化 | ✅ 完成 | 见本次提交 · `GridOverlay.tsx` / `GridManagerView.tsx` | 含 Step 3 里原先漏掉的那条**功能性**要求：B 模式下命中区收窄到标题栏（详见下方注） |
-| Step 4 切断接管 | ⏸ **未动** | — | 用户选「先验收当前装机版本」，见本节末尾 |
-| Step 5 竖条取舍 | ✅ **已定 5b 删掉** | — | 决定已拍板；**实施挂在 Step 4 之后**（见该节） |
-| Step 6 拆模块 + 清死代码 | ⏸ **未动** | — | 纯删除，与 Step 4 同批做 |
+| Step 4 切断接管 | ✅ 完成（**待真机验收**） | 见本次提交 · `grid.rs` / `grid_icons.rs` / `migrations.rs` / `lib.rs` | 不是「开关翻转」而是**能力整体删除**：`takeover_icons` 恒不隐藏、`reassert_takeover` 空转、`grid_desktop_icons_set` 降级成幂等恢复、`icon_control` 镜像与 `desktop_icons_apply(true)` 全仓归零；迁移 **v12** 清三个接管键 |
+| Step 5 竖条取舍 | ✅ 完成（**待真机验收**） | 见本次提交 · `grid.rs` / `GridOverlay.tsx` | 拍板 5b：布局不再为竖条预留（`min_x = ARRANGE_MARGIN`）、前端 125 行渲染块删除；旧单测「不压竖条」是**因巧合通过**的，已换成 `content_boxes_ignore_the_retired_loose_strip` |
+| Step 6 拆模块 + 清死代码 | ⏸ **范围已重新裁剪** | — | 方案 v1 的 3 条删除建议被实地核查**证伪**，见下方 Step 6 一节 |
 
 **Step 3 补的那条**（方案 v1 只写了「区域上报同步缩小」一句，实现时才发现它其实是**
 「原生图标能不能点」的决定性一环**）：
@@ -124,23 +126,42 @@ B 方案下它们会直接出现在原生右键菜单里，**由系统提供**�
 配套不变量：命中区外扩 `HIT_PADDING = 4.0` **必须小于**内容区上内边距 `GRID_PAD_Y = 8`
 （否则标题栏下面那一圈外扩会啃掉第一行原生图标的最上面几像素）。已进守卫。
 
-**Step 4/5/6 的状态（用户 10-10 拍板）**：
+**Step 4/5/6 的实施记录（2026-10-11）**：
 
-| 项 | 决定 | 说明 |
+| 项 | 状态 | 说明 |
 | --- | --- | --- |
-| Step 5 竖条取舍 | ✅ **5b 删掉竖条** | 实施**挂在 Step 4 之后**（接管态下竖条是「未归类」的唯一入口，先删会功能回退） |
-| Step 4 开关翻转 | ⏸ **等真机验收** | 用户选「先验收当前装机版本」。理由：**Step 4 一旦翻转，接管彻底作废**（不再隐藏 `SysListView32`），而 Step 3 已删掉前端图标绘制 ⇒ 此时关掉 B 模式开关，格子会变成**既无原生摆位、也无前端图标的空框**。而 agent 在本环境**启动不了 GUI**，无法自证 B 模式真机可用 |
-| Step 6 拆模块 + 清死代码 | ⏸ **等 Step 4/5** | 纯删除（2,400+ 行），与 Step 4 同批做，避免删到一半两种模式都不成立 |
+| Step 5 删掉竖条 | ✅ 已实施 | 布局不再为它预留一列（那条空白列会把所有格子整体往右挤）；前端渲染块删除，位置留注释 |
+| Step 4 切断接管 | ✅ 已实施 | **能力删掉，而不是约束住**：一个还能藏图标的入口就是一条绕开「恒不隐藏」的路，V45「桌面全空」随时能从那儿回来 |
+| Step 6 拆模块 + 清死代码 | ⏸ 裁剪后待定 | 见下方 Step 6 一节（方案 v1 有 3 条建议被证伪） |
 
-**验收清单（用户点「用原生桌面」后逐条看）**：
+**本批门禁（全绿）**：
+
+- `node node_modules/typescript/bin/tsc --noEmit` → exit 0
+- `node scripts/regression/run.mjs` → **22/22**（test-shell-menu 150 / test-drag-pointer 163 / test-icon-control 97）
+- `source scripts/rust-env.sh && cd src-tauri && cargo test --lib` → **90/90**
+- `python scripts/audit/guard-mutation-check.py` → **4 个守卫 / 118 个破坏用例全部被捕获，源码已还原**
+
+**门禁期间真被抓到的两件事**（记下来，因为是「流程拦住问题」的实例，不是形式主义）：
+
+1. **两条断言判别力归零** —— `test-icon-control.mjs` 与 `test-shell-menu.mjs` 都写了
+   「文件里存在 `pointerEvents: 'none',`」就通过。而本文件另有 3 处 `none`（内容区 / 提示外框 /
+   预览）⇒ 任何一处穿透都能让两条断言同时变绿。**这是本轮换代变异用例时当场揪出来的**：
+   新加的「根画布回到有条件穿透」变异在旧断言下**仍是绿的**。两条断言已改成锚定式
+   （根画布那一处 / 内容区那一处）。
+2. **4 条变异用例锚点失效**（Step 4/5 删掉的源码形态）：3 条换到新锚点；1 条
+   （「竖条系统项特判」）**登记为「已知无变异证据」**—— 竖条退场时 `entry` 标识符一起消失，
+   真实退化写不出来，硬凑的变异只会证明「工具自己能塞串」，那是自欺。
+
+**验收清单（装机后逐条看）**：
 
 1. 图标是否被摆进各格子的网格里（且**没有**和我们画的底板错位）；
 2. 格子里的图标能否**双击打开**、**右键出原生菜单**；
 3. 桌面空白处右键是否出**原生菜单**（带「查看 / 排序方式 / 刷新 / 新建」）；
 4. 新增一个文件，是否**立刻出现在桌面上**（而不是要等我们刷新）；
 5. 拖动格子标题栏后，图标是否**跟着重摆**（不是留在旧位置）；
-6. 关掉开关后，桌面「自动排列 / 对齐网格」是否**还原成原来的值**；
-7. 点「还原图标布局」是否回到开启前的位置。
+6. 退出 Handy 后图标位置是否**保持不动**（决策 2：退出不还原）；
+7. 点「还原图标布局」是否回到开启前的位置，**且「自动排列 / 对齐网格」一起还原**（决策 3）；
+8. 桌面上**没有**左边那条空白（竖条已退场，格子从左边第一条边距开始）。
 
 ### Step 0 — 预备（不改行为，1 次提交）
 
@@ -190,7 +211,15 @@ B 方案下它们会直接出现在原生右键菜单里，**由系统提供**�
 
 > 回滚点：`git checkout` 本步提交。
 
-### Step 4 — 切断接管（本步是"开关翻转"）
+### Step 4 — 切断接管（✅ 实施时升级为「能力整体删除」，不止开关翻转）
+
+> ✅ **2026-10-11 实施记录**：动手时做得比方案更彻底 —— 不只是「让开关默认关」，而是
+> **把「藏图标」这个能力从代码里删掉**：`takeover_icons` 恒不隐藏、`reassert_takeover` 空转、
+> `grid_desktop_icons_set` 降级成幂等恢复、`icon_control` 镜像四函数删除、
+> `desktop_icons_apply(true)` 全仓归零。
+> 理由：**能力删掉比约束住更可靠** —— 约束靠人记得住，删掉不靠任何人的记忆。
+> 迁移号是 **v12**（不是方案里写的「清两个键」：实际清三个 —— `desktop_takeover` /
+> `desktop_icons_hidden` / `icon_control`）。
 
 - `apply_takeover_pref` / `takeover_icons` / `reassert_takeover` / `heal_desktop_icons`
   **不再隐藏** `SysListView32`（函数保留但恒不执行隐藏；删留给 Step 6）。
@@ -219,13 +248,35 @@ B 方案下它们会直接出现在原生右键菜单里，**由系统提供**�
 
 ### Step 6 — 拆模块 + 清死代码（收尾）
 
-- `grid.rs` 拆为 `grid/{db,layout,desktop,commands}.rs`；**`layout.rs` 不得出现 `windows::`**。
-- 删除：`shell_menu.rs` · `desktop_menu.rs` · `desktop_handoff.rs` · `itemDragging` ·
-  `ensure_dir` · `NoteWindow.tsx` / `NoteListView.tsx` / `MarkdownEditor.tsx`。
-- 守卫同步：`test-shell-menu.mjs` 删除（150 断言）；`test-drag-pointer.mjs` 白名单收敛；
-  `guard-mutation-check.py` 的 shell-menu 组移除；`test-desktop-constants.mjs` 复核。
-- `cargo test --lib` 预期从 86 条降一批（Z 序 / 接管类测试随代码一起删），**新增遥控与
-  FFlags 还原的测试**。
+> ⚠️ **本节 v1 版本有 3 条建议经实地核查证伪**（2026-10-11）。记在这里，因为它们是
+> 「凭印象写方案」的典型代价 —— 每条都足以让执行者删掉一个活着的功能。
+
+**证伪的三条**：
+
+| v1 写的 | 实地核查结果 | 证据 |
+| --- | --- | --- |
+| 删 `NoteWindow.tsx` | ❌ **它是活的** | `src/App.tsx:111` 就是 `return <NoteWindow noteId={noteId} />;` —— note 窗口（`windows/note`）的主视图，删了便签窗直接白屏 |
+| 删 `shell_menu.rs`（1,313 行） | ❌ **它是活的** | `grid.rs:3668` 调 `shell_menu::show_context_menu(hwnd, &target, want_extended)` —— 这就是**格子条目右键的原生菜单**（V97/V100 刚补齐的那条）。另有 `test-shell-menu.mjs` 150 条断言 + 变异组 16 条用例挂在它上面 |
+| 删 `desktop_menu.rs`（431 行） | ❌ **它是活的** | `commands/app.rs` 的 `desktop_menu_status / install / remove` 与 `grid.rs::ensure_desktop_menu` 都在用 —— 这是**产品功能**（在桌面右键菜单里加/删 Handy 项），不是接管残留 |
+
+**核查后剩下的真实清理项**（按风险从低到高）：
+
+1. **零引用文件**（已 grep 确认）：`NoteListView.tsx` · `MarkdownEditor.tsx`；
+2. **半死模块** `desktop_handoff.rs`（684 行）：主人（接管）已死，但 `grid.rs` 里
+   `poll_menu()`（2670）· `ensure_watcher()`（3132）· `is_active()`（2930）仍在调用 ——
+   删它要先摘这三个调用点，并同步 `test-shell-menu.mjs:485` 的 `HANDOFF_DISABLED` 断言
+   与变异表里 5 条 handoff 用例；
+3. **前端 `loose` 状态机**（竖条已不渲染，约 145 处引用）：`LooseIcon` / `LooseArea` /
+   `fetchLoose` / `looseSnapRef` / `menuLoose` / `looseMenuRef` / `looseDragRef` / `looseSort`；
+   以及 Rust 侧 `grid_loose_list` / `loose_strip_rect` / `loose_cell_size` / `loose_desktop_items`
+   —— ⚠️ `grid_loose_list` 被 `test-shell-menu.mjs` 的 V99 排序断言引用，**不能连带删**；
+4. **拆 `grid.rs`**（实测 **11,457** 行，v1 写的 11,540 是估值）：拆为
+   `grid/{db,layout,desktop,commands}.rs`，**`layout.rs` 不得出现 `windows::`**。
+   纯搬运、不改行为，但 1.1 万行规模下「搬运引入的编译错误」与「搬运引入的行为差异」
+   混在一起极难区分 —— **建议单独一个批次做，配 `cargo test --lib` 逐条对照**。
+
+**不做的**：删 `test-shell-menu.mjs`。v1 说「随 shell_menu.rs 一起删 150 条断言」，但
+`shell_menu.rs` 是活的 ⇒ 这 150 条断言守的是活代码，**一条都不能删**。
 
 ---
 

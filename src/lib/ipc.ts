@@ -468,19 +468,17 @@ export const ipc = {
 
   // —— B 方案：不接管原生桌面（图标遥控）——
   //
-  // 默认关。开启后：不再隐藏 `SysListView32`，改为把图标**遥控**摆进各格子的网格。
-  // 它会写桌面图标位置与 `FFlags`（自动排列开关），所以做成**显式开关**而不是默认行为。
+  // Step 4 起是**唯一模式**（原先是「默认关」的可开关能力）。不再隐藏 `SysListView32`，
+  // 改为把图标**遥控**摆进各格子的网格。它会写桌面图标位置与 `FFlags`（自动排列开关），
+  // 所以**进入前先存快照、并提供手动一键还原**（`desktopIconLayoutRestore`）。
 
-  /** 读 B 模式状态（是否开启 / 是否已关自动排列 / 间距 / 快照条数） */
+  /** 读桌面整理运行状态（图标数 / 间距 / 快照条数 / 本轮摆位计数） */
   desktopIconControlGet: (): Promise<IconControlStatus> =>
     call<IconControlStatus>('desktop_icon_control_get'),
-  /** 开 / 关 B 模式（开启会快照位置 + 备份 FFlags + 关自动排列 + 立即摆一次） */
-  desktopIconControlSet: (enabled: boolean): Promise<IconControlStatus> =>
-    call<IconControlStatus>('desktop_icon_control_set', { enabled }),
-  /** 按当前格子布局重新摆一次图标（B 模式未开启会报错，不会动桌面） */
+  /** 按当前格子布局重新摆一次原生图标（Step 4 起恒生效，重排后自动调用） */
   desktopIconLayoutApply: (): Promise<IconControlStatus> =>
     call<IconControlStatus>('desktop_icon_layout_apply'),
-  /** 还原到「开启 B 模式之前」的图标布局 */
+  /** 把桌面还给系统：还原图标位置 **+** 「自动排列 / 对齐网格」偏好 */
   desktopIconLayoutRestore: (): Promise<IconControlStatus> =>
     call<IconControlStatus>('desktop_icon_layout_restore'),
 

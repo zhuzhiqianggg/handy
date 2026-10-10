@@ -1,19 +1,19 @@
 //! B 方案运行时：**不接管原生桌面**，只「遥控」图标位置。
 //!
-//! 配套文档：`docs/04-review/PLAN-B-PHASED.md`（Step 2）。
+//! 配套文档：`docs/04-review/PLAN-B-PHASED.md`（Step 2 / Step 4）。
 //!
-//! # 它做什么
+//! # 它做什么（Step 4 起：**唯一模式**，没有开关）
 //!
-//! | 开关 | 行为 |
-//! | --- | --- |
-//! | 关（默认） | **一切照旧** —— V101 的接管模型，一个像素都不动 |
-//! | 开 | ① 快照图标位置 ② 备份并清掉「自动排列 / 对齐网格」 ③ 把图标摆进各格子的网格 |
+//! ① 启动期 [`ensure_native_layout`]：快照图标位置 → 备份并清掉「自动排列 / 对齐网格」
+//!    → 记下 Explorer 的图标间距；② 每次重排后 [`desktop_icon_layout_apply`] 把登记条目
+//! 按格子网格摆到原生图标上；③ 用户随时可 [`desktop_icon_layout_restore`] 一键还原。
 //!
-//! # 为什么必须「默认关」
+//! # 曾经是「默认关」的可开关能力（V101 时）
 //!
-//! 这一步会**写用户桌面图标的位置**（`LVM_SETITEMPOSITION`）与**注册表偏好**
-//! （`Bags\1\Desktop` 的 `FFlags`）。旧模型随时可退回，所以先把新模型做成一个
-//! **可开关**的能力，由用户在真实桌面上验证后再切换默认值 —— 而不是直接替换。
+//! Step 2 把它做成开关，是为了先在真实桌面上验证再切默认 —— 因为它会**写用户桌面图标的
+//! 位置**（`LVM_SETITEMPOSITION`）与**注册表偏好**（`Bags\1\Desktop` 的 `FFlags`）。
+//! 用户 10-10 真机验收通过后，Step 4 把开关去掉：接管路线整体退场，B 方案不再有
+//! 「关掉」这个状态（关掉 = 格子空框，见方案文档 §3 Step 4 的说明）。
 //!
 //! # 几何（B 模式）
 //!
@@ -34,8 +34,6 @@ use tauri::AppHandle;
 use crate::db;
 use crate::platform::desktop_icons as di;
 
-/// `grid_meta` 键：B 模式开关（`"1"` / `"0"`）。
-pub(crate) const META_ICON_CONTROL: &str = "icon_control";
 /// `grid_meta` 键：启用前 `FFlags` 的原值（十进制字符串）。
 pub(crate) const META_FFLAGS_BACKUP: &str = "fflags_backup";
 /// `grid_meta` 键：启用前的图标位置快照（JSON，`[[x,y], …]` 按下标）。
@@ -67,10 +65,6 @@ fn meta_set(conn: &Connection, key: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn meta_clear(conn: &Connection, key: &str) {
-    let _ = conn.execute("DELETE FROM grid_meta WHERE key = ?1", params![key]);
-}
-
 #[cfg(target_os = "windows")]
 fn listview() -> Result<windows::Win32::Foundation::HWND, String> {
     crate::commands::grid::desktop_icon_view()
@@ -81,7 +75,8 @@ fn listview() -> Result<windows::Win32::Foundation::HWND, String> {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IconControlStatus {
-    /// B 模式是否开启
+    /// B 模式是否生效。**Step 4 起恒为 true** —— 保留字段只为不改前端类型；
+    /// 语义已从「用户开没开」变成「遥控链路是否可用」。
     pub enabled: bool,
     /// 桌面图标视图是否已关掉「自动排列」（遥控的**前提**）
     pub autoarrange_off: bool,
@@ -130,7 +125,7 @@ fn status_of(conn: &Connection, placed: usize, unmatched: usize) -> IconControlS
     let (count, spacing, autoarrange_off, fflags) = (0usize, (76, 88), false, None);
 
     IconControlStatus {
-        enabled: meta_get(conn, META_ICON_CONTROL).as_deref() == Some("1"),
+        enabled: true,
         autoarrange_off,
         fflags,
         fflags_backup: meta_get(conn, META_FFLAGS_BACKUP).and_then(|v| v.parse::<u32>().ok()),
@@ -264,113 +259,103 @@ fn apply_layout(_conn: &Connection, _app: &AppHandle) -> Result<(usize, usize), 
     Err("桌面图标遥控仅支持 Windows".to_string())
 }
 
-/// 开启 / 关闭 B 模式。
+/// **启动期幂等装配**（Step 4：取代原来的「开启 B 模式」开关）。
 ///
-/// 开启：快照图标位置 → 备份 `FFlags` → 关「自动排列」→ 落盘间距 → 立即摆一次。
-/// 关闭：还原 `FFlags` → 恢复 `LVS_AUTOARRANGE` → 清掉开关与间距。
-#[tauri::command]
-pub async fn desktop_icon_control_set(
-    app: AppHandle,
-    enabled: bool,
-) -> Result<IconControlStatus, String> {
-    let conn = connect(&app)?;
+/// 做四件事，每一件都**只在第一次**做（快照 / 备份不能反复覆盖，否则「还原到进入前」
+/// 这个承诺就没了）：
+///
+/// ① 快照全部图标位置（`icon_pos_backup`）—— 用户点「还原图标布局」的凭据；
+/// ② 备份 `FFlags`（`fflags_backup`）—— 退出 / 关闭整理时还原「自动排列 / 对齐网格」用；
+/// ③ 关掉「自动排列」（先动当前视图 = 立刻生效，再写注册表 = Explorer 重启后仍生效）；
+/// ④ 记下 Explorer 的图标纵向间距 —— 布局引擎据此把格子高对齐到原生图标网格。
+///
+/// 找不到桌面图标视图（Explorer 没跑 / 被第三方桌面工具接管）时**不算失败**：静默返回，
+/// 下次重排或下次启动会再试。`apply_layout` 本身也会重测间距，两条路互为兜底。
+///
+/// 幂等：反复调用只是重复读几行、写同样的值。
+pub fn ensure_native_layout(app: &AppHandle) {
+    let Ok(conn) = connect(app) else {
+        return;
+    };
     #[cfg(target_os = "windows")]
     {
-        let list = listview()?;
-        if enabled {
-            // ① 快照（只在第一次开时存，避免反复开关把「原始布局」覆盖掉）
-            if meta_get(&conn, META_POS_BACKUP).is_none() {
-                match di::positions(list) {
-                    Ok(pos) => {
-                        let raw = serde_json::to_string(&pos).unwrap_or_else(|_| "[]".to_string());
-                        meta_set(&conn, META_POS_BACKUP, &raw)?;
-                    }
-                    Err(err) => {
-                        crate::logging::write_line(
-                                "grid",
-                                &format!("图标位置快照失败（不阻断启用）：{err}"),
-                            );
-                    }
+        let Ok(list) = listview() else {
+            return;
+        };
+        // ① 位置快照（只存一次；反复覆盖会把「原始布局」弄丢）
+        if meta_get(&conn, META_POS_BACKUP).is_none() {
+            match di::positions(list) {
+                Ok(pos) => {
+                    let raw = serde_json::to_string(&pos).unwrap_or_else(|_| "[]".to_string());
+                    let _ = meta_set(&conn, META_POS_BACKUP, &raw);
                 }
+                Err(err) => crate::logging::write_line(
+                    "grid",
+                    &format!("图标位置快照失败（不影响摆位，只是「还原」暂不可用）：{err}"),
+                ),
             }
-            // ② 备份并清 FFlags（只清自动排列 / 对齐网格两位）
-            if meta_get(&conn, META_FFLAGS_BACKUP).is_none() {
-                if let Some(flags) = di::read_folder_flags() {
-                    meta_set(&conn, META_FFLAGS_BACKUP, &flags.to_string())?;
-                }
-            }
-            // ③ 关「自动排列」：**先动当前视图**（立刻生效），再写注册表（Explorer 重启后仍生效）
-            di::set_autoarrange(list, false);
-            if let Some(flags) = di::read_folder_flags() {
-                let cleared = di::flags_cleared(flags);
-                if cleared != flags {
-                    if let Err(err) = di::write_folder_flags(cleared) {
-                        crate::logging::write_line(
-                                "grid",
-                                &format!("写桌面 FFlags 失败（本次只在内存里关了自动排列）：{err}"),
-                            );
-                    }
-                }
-            }
-            // ④ 记下间距（布局引擎据此定格子高）与开关
-            let spacing = di::icon_spacing(list);
-            meta_set(&conn, META_SPACING_Y, &spacing.1.to_string())?;
-            meta_set(&conn, META_ICON_CONTROL, "1")?;
-            crate::commands::grid::set_icon_control_runtime(true);
-            // 保险：万一上一版把图标藏了（接管态），这里立刻还给系统 —— B 模式下
-            // 图标必须由 Explorer 画，否则「遥控」没有对象。
-            crate::commands::grid::restore_desktop_icons(&app);
-        } else {
-            // 还原偏好：先恢复 LVS_AUTOARRANGE 位，再写回备份的 FFlags
-            let backup = meta_get(&conn, META_FFLAGS_BACKUP).and_then(|v| v.parse::<u32>().ok());
-            if let Some(flags) = backup {
-                di::set_autoarrange(list, di::flags_autoarrange_on(flags));
-                let _ = di::write_folder_flags(flags);
-            }
-            meta_clear(&conn, META_ICON_CONTROL);
-            meta_clear(&conn, META_SPACING_Y);
-            crate::commands::grid::set_icon_control_runtime(false);
         }
+        // ② FFlags 备份（同样只存一次）
+        if meta_get(&conn, META_FFLAGS_BACKUP).is_none() {
+            if let Some(flags) = di::read_folder_flags() {
+                let _ = meta_set(&conn, META_FFLAGS_BACKUP, &flags.to_string());
+            }
+        }
+        // ③ 关「自动排列 / 对齐网格」：**先动当前视图**（立刻生效），再写注册表
+        //    （Explorer 重启后仍生效）。两条路都必须走 —— 只写注册表要等 Explorer 重启，
+        //    只动视图则重启就打回原形。
+        di::set_autoarrange(list, false);
+        if let Some(flags) = di::read_folder_flags() {
+            let cleared = di::flags_cleared(flags);
+            if cleared != flags {
+                if let Err(err) = di::write_folder_flags(cleared) {
+                    crate::logging::write_line(
+                        "grid",
+                        &format!("写桌面 FFlags 失败（本次只在当前视图关了自动排列）：{err}"),
+                    );
+                }
+            }
+        }
+        // ④ 记下间距（布局引擎据此定格子高）
+        let spacing = di::icon_spacing(list);
+        let _ = meta_set(&conn, META_SPACING_Y, &spacing.1.to_string());
     }
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = (listview(), enabled);
-        return Err("桌面图标遥控仅支持 Windows".to_string());
+        let _ = &conn;
     }
-
-    let (placed, unmatched) = if enabled {
-        match apply_layout(&conn, &app) {
-            Ok(v) => v,
-            Err(err) => {
-                crate::logging::write_line("grid", &format!("B 模式首次摆位失败：{err}"));
-                (0, 0)
-            }
-        }
-    } else {
-        (0, 0)
-    };
-    Ok(status_of(&conn, placed, unmatched))
+    // 保险：万一历史版本把图标藏了（接管态残留），这里立刻还给系统 ——
+    // B 方案下图标必须由 Explorer 画，否则「遥控」没有对象。
+    crate::commands::grid::restore_desktop_icons(app);
 }
 
-/// 重新摆位（改了格子/条目之后调）。
+/// 重新摆位（改了格子 / 条目之后调）。返回本轮摆位计数。
 #[tauri::command]
 pub async fn desktop_icon_layout_apply(app: AppHandle) -> Result<IconControlStatus, String> {
     let conn = connect(&app)?;
-    if meta_get(&conn, META_ICON_CONTROL).as_deref() != Some("1") {
-        return Err("B 模式未开启（不会动你的桌面图标）".to_string());
-    }
     let (placed, unmatched) = apply_layout(&conn, &app)?;
     Ok(status_of(&conn, placed, unmatched))
 }
 
-/// 还原到「开启 B 模式之前」的图标布局。
+/// **一键把桌面还给系统**：还原图标位置 **+** 还原「自动排列 / 对齐网格」偏好。
+///
+/// # 为什么两件事必须一起做（决策 2 / 3 的合流点）
+///
+/// 方案里决策 2 定的是「退出不还原位置」、决策 3 定的是「还原偏好原值」。**两者在
+/// 「退出」这一点上互相打架**：单独把「自动排列」恢复成开，Explorer 下一次刷新（F5 /
+/// 新建文件 / 重启）就会立刻按它自己的网格把图标**重新打散** —— 于是「保留位置」这个
+/// 承诺自动作废，还不如主动还回去。
+///
+/// 所以实现取**合流**：位置与偏好绑定，**要么都保持、要么都还原**，还原入口只有一个
+/// —— 这里。App 退出时两者都不动（同 Fences / 腾讯桌面整理：整理生效期间桌面归 Handy，
+/// 重启 Handy 继续生效）。
 #[tauri::command]
 pub async fn desktop_icon_layout_restore(app: AppHandle) -> Result<IconControlStatus, String> {
     let conn = connect(&app)?;
     #[cfg(target_os = "windows")]
     {
         let raw = meta_get(&conn, META_POS_BACKUP)
-            .ok_or_else(|| "没有可还原的快照（从未开启过 B 模式）".to_string())?;
+            .ok_or_else(|| "没有可还原的快照（本机还没进入过桌面整理）".to_string())?;
         let saved: Vec<(i32, i32)> =
             serde_json::from_str(&raw).map_err(|err| format!("快照损坏：{err}"))?;
         let list = listview()?;
@@ -380,6 +365,17 @@ pub async fn desktop_icon_layout_restore(app: AppHandle) -> Result<IconControlSt
             .map(|(idx, (x, y))| (idx, *x, *y))
             .collect();
         let placed = di::set_positions(list, &placements);
+        // 偏好一起还：先恢复视图里的 `LVS_AUTOARRANGE` 位，再写回备份的 `FFlags`
+        // （只做前者，Explorer 一重启就打回原形；只做后者，当前这张桌面要等刷新才变）。
+        if let Some(flags) = meta_get(&conn, META_FFLAGS_BACKUP).and_then(|v| v.parse::<u32>().ok())
+        {
+            di::set_autoarrange(list, di::flags_autoarrange_on(flags));
+            let _ = di::write_folder_flags(flags);
+        }
+        crate::logging::write_line(
+            "grid",
+            &format!("用户点「还原桌面图标布局」：已还原 {placed} 个图标的位置与自动排列偏好"),
+        );
         return Ok(status_of(&conn, placed, 0));
     }
     #[cfg(not(target_os = "windows"))]
