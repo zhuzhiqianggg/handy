@@ -31,10 +31,11 @@
 
 ## 3. 布局（用户口径 = 5 列）
 **第1列 未归类竖条 → 第2/3列 归纳格子 → 第4列 便签 → 第5列 工作台**。挂件带/收纳区右界 = `workstation_rect().x - ARRANGE_GAP_X`。
-- **V69 按内容定尺寸 + LPT 最短列填充**：尺寸只看条目数；常量 `CELL_EXTRA_W=32`、`BOX_CELL_EXTRA_H=36`（勿混竖条 30）、`BOX_HEADER_H=37`、`GRID_SCROLLBAR_W=4`、`BOX_FIT_SLACK=2`、`MIN_BOX_W=160/120`、`AUTO_MAX_W=520`、`AUTO_MAX_COLS=5`。
-  - ★ 摆放序 = `(面积, 内容量, 高, 宽)` 降序（**内容量分量不可省**，否则退化成登记顺序）；每个格子放进**当前最矮的列**（并列取最左）。
-  - 列数 k（**V94 纵向优先、横向裁决**）：全部候选（k=1..=capacity × 自然/夹到 `zone_w/k`，夹宽**同时按新宽重算高**）取字典序 **`(tallest, used_w)` 最大** = 装得下前提下列数最少；并列比总宽（防 09-23 补丁洞）。V84 的 `min(横,纵)` 在 k 大时被横向填充率抬高 ⇒ 复发 5 列窄格（用户 10-10 骂「一点也不智能」）。
-  - ★★ **带下分流门槛（V94）**：`content_plan_with_lower_band` 只在 whole `overflowed||squeezed` 时才往挂件下方带分流 —— 纵向优先的解排得高，没门槛就 frequent 分流留洞。
+- **V69 按内容定尺寸**：尺寸只看条目数；常量 `CELL_EXTRA_W=32`、`BOX_CELL_EXTRA_H=36`（勿混竖条 30）、`BOX_HEADER_H=37`、`GRID_SCROLLBAR_W=4`、`BOX_FIT_SLACK=2`、`MIN_BOX_W=160/120`、`AUTO_MAX_W=520`、`AUTO_MAX_COLS=5`。
+  - ★ 摆放序 = `(面积, 内容量, 高, 宽)` 降序（**内容量分量不可省**）。
+  - ★★ **V95 分列 = 顺序填充**（用户原话「从右到左 从上到下 满了才换列」；LPT 最矮列废弃）：第一列自上往下塞满才换列；**物理装不下（有列越过 cap）退回 LPT 均衡**（顺序填充尾列爆炸，MIN_BOX_H 夹不动）。评分 `(-k, 自然宽优先, tallest, used_w)`：列数最少赢；**同 k 没夹宽的赢** —— 夹宽让格子变高，纵向判据下会反杀。V94 的 `(tallest, used_w)` 与 V84 `min(横,纵)` 都作废。
+  - ★★ **带下分流（V94/V95）**：whole `overflowed||squeezed` 才进拆分；拆分候选 pa/pb 任一溢出跳过；收益「不更差就换」（压扁场景底沿恒=上限，严格 < 永远落空）。
+  - ★★ **V95 还前台**：Explorer 的 CNewMenu **要求 view 在前台** —— 我们 setFocus 抢前台 ⇒ 下一次原生新建静默失败（V91 死法换入口复发）。改名框关闭时 `grid_focus_desktop`（SetForegroundWindow(GetAncestor(list,GA_ROOT))，仅接管态）。涉及原生新建的改动先问「此时前台是谁」。
 - ★★ **V85 落位右锚定 + 列内撑满**：列**从右往左**排（第一列贴便签/工作台侧）；窄格**撑到列宽**并按新宽重算高（只撑宽、**不夹窄**）。`content_plan_in` ④ 用**右沿递减**（摆完一列 `right = x - GAP`）——写成「x = 右沿−总宽」= 块**左**端 ⇒ 左溢。
 - ★ **幂等是算出来的，不许几何去兜**（V69）：摆放序是内容的纯函数 ⇒ 尺寸没变 ⇒ 落位一字不差。
 - ★★ **V70**：内部几何两边逐像素相等（差 1px ⇒ 提前出滚动条 ⇒ 少一列 ⇒ 更溢出）；高度上限跟 zone_h；**满了不许再建**（`probe_room_for_another_box` 真插真排看 overflowed，出错当放行）。
