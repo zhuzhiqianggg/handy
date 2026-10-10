@@ -220,7 +220,6 @@ pub fn run() {
             commands::grid::desktop_open_view,
             commands::grid::shell_context_menu,
             commands::grid::shell_desktop_background_menu,
-            commands::grid::grid_focus_desktop,
             commands::grid::grid_reveal_path,
             commands::grid::grid_loose_list,
             // —— 接口测试（api-tester，V28）：Rust 直发 HTTP，绕开 webview CORS ——

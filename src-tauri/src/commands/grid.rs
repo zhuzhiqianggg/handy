@@ -1672,17 +1672,6 @@ pub(crate) fn desktop_icon_view() -> Option<HWND> {
 /// V92：上一次看到的桌面目录签名（条目数, 最新 mtime 秒）。见 [`desktop_dir_signature`]。
 static DESKTOP_DIR_SIG: std::sync::Mutex<(usize, u64)> = std::sync::Mutex::new((0, 0));
 
-/// V93：第一次看到「隐藏桌面视图上正在原位改名」时的拍号（0 = 现在不在编辑态）。
-///
-/// 与 [`EDIT_CANCEL_STAGE`] 一起构成「一次编辑只动一次」的闩锁。V92 当年没有这两个东西，
-/// 于是每 50ms 往隐藏的 `SysListView32` 重复投一条 `LVM_CANCELEDITLABEL` —— 日志实测 138 条，
-/// 直接打断了 Explorer 的 ShellNew 流程。详见那段代码上的注释。
-static EDIT_SEEN_TICK: AtomicU64 = AtomicU64::new(0);
-
-/// V93：本轮取消做到第几步（0=没动 / 1=已发 `LVM_CANCELEDITLABEL` /
-/// 2=已补 `Esc` / 3=已补 `WM_CANCELMODE`，收手）。
-static EDIT_CANCEL_STAGE: AtomicU8 = AtomicU8::new(0);
-
 /// V92：桌面目录的**廉价签名** —— `(条目数, 最新修改时间)`。
 ///
 /// # 为什么需要它
@@ -2794,99 +2783,24 @@ fn ensure_poller(app: AppHandle) {
                         ICONS_WERE_VISIBLE.store(false, Ordering::Relaxed);
                     }
                 }
-                // —— V92→V94：Explorer 在**被我们隐藏的** listview 上拉起的原位改名框 ——
+                // —— V96：这里原来有一段「确认 Explorer 在被我们隐藏的 listview 上拉起的
+                // 原位改名框」的代码（V92 取消 → V94 改确认 → V95 还前台），已**整块删除**。
                 //
-                // 桌面空白右键**穿透**给 Explorer（V92），那张菜单的「新建」是真原生的：
-                // 文件会真的建出来，随后 `CNewMenu` 会让我们 `SW_HIDE` 掉的那个
-                // `SysListView32` 进入原位改名。那个框有两个坏处：
-                //   ① **看不见**（宿主被我们藏了）⇒ 用户以为「新建没反应」；
-                //   ② 会 `SetFocus` **抢键盘** ⇒ 我们自己 overlay 的改名框打不进字。
+                // 删除理由：那条链路的前提是「桌面空白右键**穿透**给 Explorer → 走原生 ShellNew
+                // → 在**看不见的**视图上进入改名 → 我们再隔空把它确认掉」。V87–V95 修了七轮仍不
+                // 收敛（日志最后一次：前两次建出来、第三次连文件都没落地）。根子在于 ShellNew
+                // 要求隐藏视图处于前台，而我们要给用户一个能打字的改名框就必然抢前台 —— 两者
+                // 互斥（V91「菜单不消失 vs 新建能用」就是同一个死结）。
                 //
-                // # V94（用户 10-10 第三次报障）：**确认，不是取消**
-                //
-                // V92/V93 都是「取消」它（`LVM_CANCELEDITLABEL` / Esc）—— 但原生新建的
-                // 语义是 **「取消改名 = 删掉刚建的文件」**：第一次建出来又被 Explorer 自己
-                // 收走 ⇒「第二次就建不出来了」；打断 ShellNew 还会让 Explorer 重绘桌面
-                // ⇒「创建后桌面自己刷新一下」。取消这条路是死路。
-                //
-                // 改成向编辑框投一个 **`VK_RETURN`**：让 Explorer 用默认名（「新建文件夹」）
-                // **完成**创建 —— 文件必然保留；随后目录签名变化广播出去，前端把我们的
-                // 改名框开在它上面（`onDesktopChanged`，V93 已就位），改名体验不缺。
-                //
-                // 一次编辑只动一次：回车后 600ms 框还在再补一刀，1200ms 收手留日志。
-                // 判据 `LVM_GETEDITCONTROL`（V93）只在真编辑态才返回句柄，平时零开销。
-                // 用 `PostMessage`：投递完就走，不会因为 Explorer 忙而卡住轮询线程。
-                if icon_watch_ticks % 2 == 0 {
-                    // ⚠️ 只在**接管态**才动：没接管时桌面上那个原位改名框是用户自己在用的，
-                    // 替它按回车就是「我的手把我自己的重命名提交了」。
-                    if !ICONS_TAKEN.load(Ordering::Relaxed) {
-                        EDIT_SEEN_TICK.store(0, Ordering::Relaxed);
-                        EDIT_CANCEL_STAGE.store(0, Ordering::Relaxed);
-                    } else {
-                        match crate::platform::desktop_handoff::label_edit_control() {
-                            None => {
-                                // 不在编辑态：复位闩锁，下一次新建重新开始计数
-                                EDIT_SEEN_TICK.store(0, Ordering::Relaxed);
-                                EDIT_CANCEL_STAGE.store(0, Ordering::Relaxed);
-                            }
-                            Some(edit_hwnd) => {
-                                let prev = EDIT_SEEN_TICK.load(Ordering::Relaxed);
-                                let seen = if prev == 0 {
-                                    EDIT_SEEN_TICK.store(icon_watch_ticks, Ordering::Relaxed);
-                                    icon_watch_ticks
-                                } else {
-                                    prev
-                                };
-                                // 本分支每 2 拍进一次 ⇒ 1 拍 = POLL_INTERVAL_MS × 2
-                                let waited_ms =
-                                    icon_watch_ticks.saturating_sub(seen) * (POLL_INTERVAL_MS * 2);
-                                use windows::Win32::Foundation::{LPARAM, WPARAM};
-                                use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
-                                let stage = EDIT_CANCEL_STAGE.load(Ordering::Relaxed);
-                                const WM_KEYDOWN: u32 = 0x0100;
-                                const WM_KEYUP: u32 = 0x0101;
-                                const VK_RETURN: usize = 0x0D;
-                                // listview 的改名编辑框对 `WM_KEYDOWN(VK_RETURN)` 的响应就是
-                                // 「结束编辑并提交」—— 跨进程 PostMessage 可达，无需真实键击。
-                                let confirm = |hwnd: windows::Win32::Foundation::HWND| unsafe {
-                                    let _ = PostMessageW(
-                                        hwnd,
-                                        WM_KEYDOWN,
-                                        WPARAM(VK_RETURN),
-                                        LPARAM(0),
-                                    );
-                                    let _ = PostMessageW(
-                                        hwnd,
-                                        WM_KEYUP,
-                                        WPARAM(VK_RETURN),
-                                        LPARAM(0),
-                                    );
-                                };
-                                if stage == 0 {
-                                    confirm(edit_hwnd);
-                                    EDIT_CANCEL_STAGE.store(1, Ordering::Relaxed);
-                                    crate::logging::write_line(
-                                        "grid",
-                                        "已确认 Explorer 在隐藏桌面视图上的原位改名框（保留默认名，文件交给我们自己的改名框）",
-                                    );
-                                } else if stage == 1 && waited_ms >= 600 {
-                                    confirm(edit_hwnd);
-                                    EDIT_CANCEL_STAGE.store(2, Ordering::Relaxed);
-                                } else if stage == 2 && waited_ms >= 1200 {
-                                    EDIT_CANCEL_STAGE.store(3, Ordering::Relaxed);
-                                    crate::logging::write_line(
-                                        "grid",
-                                        "隐藏桌面视图上的原位改名框 1200ms 仍未结束（已尽力，不再重试）",
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
+                // V96 起空白右键改走**我们自己的菜单**（[`shell_menu::show_background_context_menu`]
+                // 拿到的本来就是完整背景菜单，只把必然 E_FAIL 的原生「新建」换成我们注入的那个），
+                // 新建由 [`shell_menu::create_new_item`] 直接在桌面目录里落文件 —— 不经过 ShellNew，
+                // 也就不存在「隐藏改名框」这回事。
                 // —— V92：桌面目录内容变了 ⇒ 广播，让前端把新文件收进未归类竖条 ——
                 //
-                // 动机见 [`desktop_dir_signature`]：穿透之后原生「新建」落地的文件我们收不到
-                // 任何通知，只能靠这个签名发现。
+                // 动机见 [`desktop_dir_signature`]：桌面目录可能被**我们以外**的东西改动
+                // （其它程序另存到桌面、用户在资源管理器里删/建、第三方同步盘），那些改动
+                // 我们收不到任何通知，只能靠这个签名发现。
                 //
                 // V93 由 `% 8` 收紧到 `% 4`（≈100ms）：新建之后要**尽快**把改名框送到用户
                 // 面前，200ms 的粒度会让「点了新建 → 能打字」这一段明显慢半拍。读的只是目录
@@ -3858,44 +3772,6 @@ pub async fn shell_desktop_background_menu(
     {
         let _ = (app, extended);
         Err("当前平台暂未适配桌面背景菜单".to_string())
-    }
-}
-
-/// 把**前台还给 Explorer 桌面**（V95）。
-///
-/// 用户 10-10 的第 5 次报障（「第一次新建成功，第二次就不行了」）的根因：
-/// 新建后前端 `setFocus()` 把前台抢到我们窗口上 —— 而 Explorer 的 `CNewMenu`
-/// （原生「新建」）**要求 view 处于前台**（V91 已用转发路径验证过同款死法）：
-/// 前台一旦不是桌面，下一次「新建文件夹」就静默失败，菜单收起时还让桌面重绘闪一下。
-///
-/// 所以改名框一关（改完名 / Esc 取消），就把前台还回去 —— 下一次右键新建时
-/// `CNewMenu` 才找得到它的 view。只有**接管态**才做：没接管时前台本来就在桌面。
-#[tauri::command]
-pub async fn grid_focus_desktop(app: AppHandle) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    {
-        use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, SetForegroundWindow, GA_ROOT};
-        app.run_on_main_thread(move || {
-            if !ICONS_TAKEN.load(Ordering::Relaxed) {
-                return;
-            }
-            let Some(view) = desktop_icon_view() else {
-                return;
-            };
-            // 桌面 listview 的根 = Progman / WorkerW —— 前台要给的是它（宿主），不是 listview
-            let host = unsafe { GetAncestor(view, GA_ROOT) };
-            if !host.0.is_null() {
-                unsafe {
-                    let _ = SetForegroundWindow(host);
-                }
-            }
-        })
-        .map_err(|err| format!("投递还前台失败：{err}"))
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = app;
-        Err("当前平台暂未适配".to_string())
     }
 }
 

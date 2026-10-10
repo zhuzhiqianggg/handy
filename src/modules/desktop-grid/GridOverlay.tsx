@@ -1383,12 +1383,6 @@ export function GridOverlay(): React.JSX.Element {
     renamingRef.current = renamingItemPath !== null;
     if (renamingItemPath === null) {
       quietKickRef.current();
-      // V95：把前台还给 Explorer 桌面。改名框开着时我们 setFocus 抢了前台 ——
-      // 而原生「新建」（CNewMenu）要求 view 在前台，不还回去的话下一次
-      // 「新建文件夹」就静默失败（用户 10-10：「第一次新建成功，第二次就不行了」）。
-      if (isTauri()) {
-        void ipc.gridFocusDesktop().catch(() => undefined);
-      }
     }
   }, [renamingItemPath]);
 
@@ -1499,19 +1493,18 @@ export function GridOverlay(): React.JSX.Element {
    */
   const openDesktopBackgroundMenu = useCallback(
     (extended: boolean): void => {
-      // V90：接管态的桌面空白右键**转发给 Explorer 自己的桌面视图**，弹出它的
-      // **完整原生菜单**（查看 / 排序方式 / 刷新 / 撤销 / 完整的 ShellNew「新建」14 项）。
+      // V96：接管态的桌面空白右键弹**我们自己的背景菜单**（`shell_menu::show_background_context_menu`
+      // 拿到的就是 `SHGetDesktopFolder().CreateViewObject` 的完整背景菜单：查看 / 排序方式 /
+      // 刷新 / 粘贴 / 撤销…），只把那个必然 E_FAIL 的原生「新建」摘掉、换成我们注入的那个
+      // （`create_new_item` 直接在桌面目录落文件）。
       //
-      // 用户 10-08 23:01 拿两张图质问「这是你搞得右键菜单，你到底能不能实现原始功能」
-      // —— 对比的就是「退出接管后的原生菜单（图1，齐全）」vs「接管态我们复刻的菜单
-      // （图2，只有新建两项，连查看/排序/刷新都没有）」。那两块钱**不经过 IContextMenu**，
-      // 复刻永远追不平，所以改成转发（详见 `shell_menu::show_desktop_view_context_menu`）。
+      // 命名里的「Returned CreatedItem」就是这么来的：命令在菜单**收起后**才 resolve，
+      // 点了我们注入的「新建」就带回 [`CreatedItem`]（直接知道建了什么，省掉对账）；
+      // 点了普通项（查看 / 排序 / 刷新 / 取消）回 `null`，走下面那条增量对账兜底。
       //
-      // 命令在菜单**收起后**才 resolve：
-      //   · 原生路径（首选）→ 回 `null`：用户点了什么我们不知道，做**增量对账** ——
-      //     只把新增项送进竖条 + 原地改名，**只有出现删除 / 改名才重排格子**
-      //     （单纯新建绝不整层 refresh，那才是用户抱怨的「卡 + 整体刷新」）；
-      //   · 复刻菜单回退路径 → 回 `CreatedItem`：直接知道建了什么，省掉对账。
+      // ⚠️ V92–V95 曾把空白右键**穿透给 Explorer**、赌它那张菜单的完整 ShellNew「新建」，
+      // 结果是「隔空操作被我们隐藏的视图」——七轮都没收敛（用户 10-10：第一次成功、第二次
+      // 起时好时坏、第三次直接建不出来）。彻底回退，见 `shell_menu` / `grid` 里的 V96 说明。
       void (async () => {
         // V93：先进安静期 —— 下面 `fetchLoose` 会让竖条变宽、排一次 `relayoutSoon()`，
         // 而它 120ms 后就 `refresh()`，正好把紧跟着打开的改名框冲掉（就是用户 10-10 报的
@@ -1945,14 +1938,29 @@ export function GridOverlay(): React.JSX.Element {
       return;
     }
     // 内容收起（V44.3）时只报工具栏命中区，其余区域交还原生桌面（点击穿透）。
-    const regions: GridRegion[] = contentHidden
-      ? []
-      : visibleBoxes.map((box) => ({
+    const regions: GridRegion[] = [];
+    if (!contentHidden) {
+      // V96：接管态把**整窗**报成命中区（回到 V89 的原设计）。桌面空白右键必须落到我们
+      // 自己的上下文菜单上（见 `openDesktopBackgroundMenu`）—— 它本来就能拿到完整的桌面
+      // 背景菜单（查看 / 排序方式 / 刷新 / 粘贴…），只把那个必然 E_FAIL 的原生「新建」
+      // 换成了我们自己的。而「穿透给 Explorer」在图标视图被我们隐藏的前提下，那几个原生
+      // 项本来就作用在看不见的视图上、等于空转，却顺带引入了「隐藏改名框」这条修了七轮
+      // 都不收敛的链路（V87–V95）。
+      regions.push({
+        x: 0,
+        y: 0,
+        width: window.innerWidth * scaleFactor,
+        height: window.innerHeight * scaleFactor,
+      });
+      for (const box of visibleBoxes) {
+        regions.push({
           x: box.posX * scaleFactor,
           y: box.posY * scaleFactor,
           width: box.width * scaleFactor,
           height: box.height * scaleFactor,
-        }));
+        });
+      }
+    }
     // 工具栏与空态卡片常驻可交互（锁定态也要能点「隐藏挂件 / 解锁」，空态要能直接建盒子）；
     // 未归类竖条（V41）/ 快捷条 / 右侧统一面板（V45）渲染出来时同样要可交互
     //
@@ -1985,11 +1993,11 @@ export function GridOverlay(): React.JSX.Element {
       });
     }
     void ipc.gridOverlayUpdateRegions(regions).catch(() => undefined);
-    // regionsKey 已覆盖 boxes / 菜单几何变化；contentHidden 翻转时要重算命中区（只留工具栏）
+    // regionsKey 已覆盖 boxes / 菜单几何变化；contentHidden 翻转时要重算命中区（只留工具栏）。
     //
-    // V92：**不再上报「整窗」命中区**。那一块是 V89 为了「桌面空白右键归 Handy」加的，
-    // 代价是把空白右键从 Explorer 手里抢走 —— 而 Explorer 那张菜单才带「查看 / 排序方式 /
-    // 刷新」和完整 ShellNew「新建」，我们复刻不出来。现在空白一律穿透给 Explorer。
+    // V96：**又上报「整窗」命中区了**（V92 曾删掉）。那时删它是因为「空白右键该给 Explorer」，
+    // 但那条路最终证明不成立（见 `openDesktopBackgroundMenu` 的注释）—— 空白右键必须回到我们
+    // 自己的菜单，否则「新建」永远压在 Explorer 的 ShellNew 上、时好时坏。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [regionsKey, scaleFactor, contentHidden]);
 
@@ -3537,38 +3545,36 @@ export function GridOverlay(): React.JSX.Element {
        * 根画布是 `fixed inset-0`（高度 = 窗口高度），格子 / 竖条都是它的**绝对定位子元素**
        * —— 绝对定位元素会把自己的溢出算进包含块的**可滚动溢出区**。于是只要有任何一处
        * 子元素比视口高出哪怕十几像素，这一层就变成了**可滚动容器**：
-       *   · 空白处 `pointerEvents: 'none'` → 事件穿透到桌面，滚不动（所以那一块正常）；
-       *   · 图标 / 格子上恢复了指针事件 → 滚轮冒泡到根画布 → **整个桌面跟着滚**。
+       *   · 图标 / 格子上的滚轮冒泡到根画布 → **整个桌面跟着滚**。
        * 这正是用户看到的「只有光标在图标或格子上时整层会动一点」。
+       * （V96 起根画布整窗可交互，这条约束更硬：一旦能滚，空白处也会跟着动。）
        *
        * 盒内滚动是**内容区**的事（`flex-1 min-h-0 overflow-y-auto`），竖条过满是竖条自己的事
        * （见下方竖条的 `overflow-y-auto`）。桌面层本身只负责「把东西画在屏幕上」，
        * 它一旦能滚，用户就永远对不齐自己的桌面。 */
       className="fixed inset-0 select-none overflow-hidden"
       style={{
-        // V92：桌面空白区的右键**必须穿透给 Explorer** —— 只有它那张菜单带「查看 / 排序方式 /
-        // 刷新」和完整的 ShellNew「新建」（14 项）；我们复刻不出这两块（不经过 IContextMenu），
-        // 强行自己弹就是用户 10-08 拿对比图质问的那张残缺菜单。
+        // V96：接管态根画布**整窗可交互**（回到 V89）—— 桌面空白右键必须落到我们自己的
+        // 上下文菜单上（`openDesktopBackgroundMenu`）。
         //
-        // 穿透会不会「翻白」？不会 —— V89 已把 `desktop_handoff` 整体停用（HANDOFF_DISABLED），
-        // 不再有「菜单期间把原生视图显示回来」这回事，桌面全程保持整理态。
+        // 为什么不再「穿透给 Explorer」（V92–V95 的做法）：
+        //   ① 我们既然把图标视图隐藏了，菜单里那几个原生项（查看 / 排序方式 / 刷新）
+        //      作用在**看不见的视图**上，本来就是空转，对 overlay 毫无影响；
+        //   ② ShellNew 的「新建」要在隐藏视图上拉起原位改名框，我们只能隔空确认 ——
+        //      V87–V95 修了七轮仍不收敛（用户 10-10 三次报障：时好时坏、第三次直接建不出来）。
+        // 改回我们自己的菜单后，「新建」由 `create_new_item` 直接在桌面目录落文件，100% 可控；
+        // 菜单本体仍是完整 Shell 背景菜单，只是把必然 E_FAIL 的原生「新建」换成了我们的。
         //
-        // 只有拖拽期间才需要整窗可交互；其余时候空白一律穿透。
-        pointerEvents: itemDragging ? 'auto' : 'none',
+        // 内容收起（V44.3）时才交回桌面 —— 那时整层都不该吃事件。
+        pointerEvents: contentHidden ? 'none' : 'auto',
       }}
       onContextMenu={(event) => {
-        // V92：**桌面空白处右键已经穿透给 Explorer 了**（见上方 `pointerEvents` 的说明），
-        // 所以这里只会在**我们自己渲染出来的元素上**被触发 —— 格子 / 竖条 / 面板是
-        // `pointerEvents:'auto'`，它们的右键会冒泡到根画布。
+        // V96：**桌面空白右键也在这里处理** —— 根画布整窗可交互（见上方 `pointerEvents`），
+        // 所以空白处的右键会落到这里，进 `openDesktopBackgroundMenu`（我们自己的背景菜单：
+        // 完整 Shell 背景菜单 + 我们注入的、一定建得出来的「新建」）。
         //
-        // 这一支保留我们自己的复刻菜单（V87/V88）：`CreateViewObject` 的背景菜单 +
-        // 我们自注入的「新建文件夹 / 新建文本文档」。那两项**确实能建出真实文件**
-        // （V88 日志可证：`桌面新建成功："新建文件夹 (3)"`），只是没有「查看 / 排序 /
-        // 刷新」和 ShellNew 那 14 项 —— 那两块不经过 `IContextMenu`，复刻不出来。
-        // 好在桌面空白右键已经走原生，用户要完整菜单就在空白处右键。
-        //
-        // V90/V91 曾试图把**桌面空白右键也转发**给 Explorer（WM_CONTEXTMENU +
-        // 「观测屏幕」判据），结果每次都弹出两个菜单、且新建彻底失效 —— 已全部删除。
+        // V92–V95 曾把空白右键**穿透给 Explorer**，指望靠它那张菜单拿到完整 ShellNew「新建」；
+        // 但那条路要隔空操作被我们隐藏的视图，七轮都没收敛 —— 已回退（见上）。
         event.preventDefault();
         if (event.ctrlKey) {
           // Ctrl + 右键 = Handy 自己的菜单（对齐条目那条约定：Ctrl+右键在 Explorer
@@ -3992,6 +3998,9 @@ export function GridOverlay(): React.JSX.Element {
                       autoFocus
                       value={itemRenameDraft}
                       onChange={(event) => setItemRenameDraft(event.target.value)}
+                      // V96：新建后自动聚焦时**全选默认名** —— 否则用户打字是「追加」，
+                      // 会得到「新建文件夹 (20)123」这种名字（Explorer 的行为是选中基名、打字替换）。
+                      onFocus={(event) => event.currentTarget.select()}
                       onBlur={commitItemRename}
                       onClick={(event) => event.stopPropagation()}
                       onMouseDown={(event) => event.stopPropagation()}
@@ -4166,6 +4175,8 @@ export function GridOverlay(): React.JSX.Element {
                   autoFocus
                   value={itemRenameDraft}
                   onChange={(event) => setItemRenameDraft(event.target.value)}
+                  // V96：新建后自动聚焦时**全选默认名**（同上方格子里那条）。
+                  onFocus={(event) => event.currentTarget.select()}
                   onBlur={commitItemRename}
                   onClick={(event) => event.stopPropagation()}
                   onMouseDown={(event) => event.stopPropagation()}

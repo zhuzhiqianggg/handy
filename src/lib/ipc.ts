@@ -356,13 +356,6 @@ export const ipc = {
     call<CreatedItem | null>('shell_desktop_background_menu', { extended }),
 
   /**
-   * 把前台还给 Explorer 桌面（V95）：改名框关闭时调用。
-   * Explorer 的原生「新建」（CNewMenu）要求 view 处于前台 —— 我们 setFocus 抢了前台
-   * 之后，下一次「新建文件夹」会静默失败（V91 同款死法），必须还回去。
-   */
-  gridFocusDesktop: (): Promise<void> => call<void>('grid_focus_desktop'),
-
-  /**
    * 条目改名（V87）：对齐 Explorer 的「重命名 / F2 / 单击两次」。
    *
    * 只在本目录内改名，**绝不搬动文件**（后端会拒绝含路径分隔符的名字）。

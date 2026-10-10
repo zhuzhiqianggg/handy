@@ -738,20 +738,20 @@ MUTATIONS: dict[str, _M] = {
         # （用户 10-10 00:12 原话，取证确认那一轮十几次右键一个文件都没建出来）。
         # 现在空白一律穿透，下面几条守住「穿透」与它的补偿措施不被改回。
         (
-            "V92 根画布又变整窗可交互（重新抢走 Explorer 的空白右键 ⇒ 菜单回到残缺版）",
+            "V96 根画布又改回「只拖拽时可交互」（空白右键穿透给 Explorer ⇒ 新建又压在 ShellNew 上）",
             "src/modules/desktop-grid/GridOverlay.tsx",
+            "        pointerEvents: contentHidden ? 'none' : 'auto',",
             "        pointerEvents: itemDragging ? 'auto' : 'none',",
-            "        pointerEvents: 'auto',",
-            "空白区不再穿透 ⇒ 右键又落到我们的复刻菜单上 —— 那张菜单没有「查看 / 排序方式 / "
-            "刷新」和完整 ShellNew「新建」（都不经过 IContextMenu），正是用户拿两张对比图质问的那件事",
+            "空白右键一穿透，就又回到「隔空操作被我们隐藏的图标视图」那条路 —— V92/V93/V94/V95 "
+            "修了七轮都不收敛（用户 10-10：第一次成、第二次时好时坏、第三次直接建不出来）",
         ),
         (
-            "V92 又把「接管态整窗可交互」加回来（V89 的老毛病）",
+            "V96 不再上报「整窗」命中区（Rust 命中轮询会把整窗切回穿透 ⇒ 空白右键点不到）",
             "src/modules/desktop-grid/GridOverlay.tsx",
-            "        pointerEvents: itemDragging ? 'auto' : 'none',",
-            "        pointerEvents: takeover?.enabled === true ? 'auto' : 'none',",
-            "接管时整窗吃事件 ⇒ 桌面空白右键进不了 Explorer ⇒ 回到「菜单残缺 / 双菜单 / "
-            "新建失效」那一串，V87–V91 五次迭代的坑重来一遍",
+            "        width: window.innerWidth * scaleFactor,",
+            "        width: 0,",
+            "整窗命中区没了 ⇒ Rust 的 25ms 命中测试判「光标不在交互区」⇒ set_ignore_cursor_events(true) "
+            "⇒ 桌面空白处右键直接漏给真实桌面，我们自己的菜单根本收不到",
         ),
         (
             "V92 命令不等菜单收起（去掉 mpsc 的 recv）",
@@ -771,34 +771,6 @@ MUTATIONS: dict[str, _M] = {
             "没了它，用户点「新建文件夹」看到的就是「什么都没发生」",
         ),
         (
-            "V93 改名框判据用错消息（LVM_GETEDITCONTROL 被换掉）",
-            "src-tauri/src/platform/desktop_handoff.rs",
-            "    const LVM_GETEDITCONTROL: u32 = 0x1000 + 0x18;",
-            "    const LVM_GETEDITCONTROL: u32 = 0x1000 + 0x77;",
-            "用 LVM_CANCELEDITLABEL（0x1077）当「读」消息使，语义完全错位、返回值无意义 —— "
-            "判据一旦不可信，就会退回 V92 那条「找得到 Edit 子窗就算在编辑」的老病："
-            "每 50ms 无脑投一条取消消息，把 Explorer 的 ShellNew 打断成「第一次成、第二次败」",
-        ),
-        (
-            "V93 一次编辑只动一次」的闩锁被拆（回到每 50ms 刷屏）",
-            "src-tauri/src/commands/grid.rs",
-            "                                if stage == 0 {",
-            "                                if true {",
-            "`if true` ⇒ 每 2 拍（50ms）无条件重发 LVM_CANCELEDITLABEL。这正是用户 10-10 报的"
-            "三条的病根：日志实测 138 条刷屏把 Explorer 的 ShellNew 打断成「第一次创建成功、"
-            "第二次就失败、过一会又好了」，还让桌面一直重绘（「我创建文件夹后桌面自己刷新了」）",
-        ),
-        (
-            "V93 取消改名框不再限接管态（会掐掉用户自己的重命名）",
-            "src-tauri/src/commands/grid.rs",
-            "                    // 替它按回车就是「我的手把我自己的重命名提交了」。\n"
-            "                    if !ICONS_TAKEN.load(Ordering::Relaxed) {",
-            "                    // 替它按回车就是「我的手把我自己的重命名提交了」。\n"
-            "                    if true {",
-            "没接管时桌面上的原位改名框是**用户自己在用**的系统行为（F2 / 两次单击改名）—— "
-            "去掉这道门，用户在自己的桌面上改个名会被我们每 50ms 取消一次",
-        ),
-        (
             "V93 前端安静期拆掉（新建后整层刷新冲掉刚打开的改名框）",
             "src/modules/desktop-grid/GridOverlay.tsx",
             "    if (isQuiet()) {\n      holdQuiet(1500);\n      pendingRefreshRef.current = true;\n      return;\n    }",
@@ -814,23 +786,6 @@ MUTATIONS: dict[str, _M] = {
             "退回 syncDesktop() ⇒ gridDesktopSync() + 整层 refresh()：用户点「新建文件夹」看到的"
             "不是「名字上有了光标」，而是「整张桌面自己刷了一下、格子全跳一遍」——"
             "正是用户 10-10 说的「跟正常的桌面行为不一样」",
-        ),
-        (
-            "V94 确认退回取消（VK_RETURN 被换成 VK_ESCAPE）",
-            "src-tauri/src/commands/grid.rs",
-            "                                const VK_RETURN: usize = 0x0D;",
-            "                                const VK_RETURN: usize = 0x1B;",
-            "原生新建的语义是「取消改名 = 删掉刚建的文件」—— 投 Esc ⇒ 第一次建出来又被 Explorer "
-            "自己收走 ⇒「每次只能创建一个，第二次就建不出来」，打断 ShellNew 还让桌面重绘"
-            "（用户 10-10 第三次报障，V92/V93 的取消路是死路）",
-        ),
-        (
-            "V94 改名框判据瘫痪（永远 None ⇒ 隐藏框没人管，抢着键盘焦点）",
-            "src-tauri/src/commands/grid.rs",
-            "                        match crate::platform::desktop_handoff::label_edit_control() {",
-            "                        match Option::<windows::Win32::Foundation::HWND>::None {",
-            "检测一瘫痪，Explorer 在隐藏视图上拉起的改名框就没人确认：它 SetFocus 抢走键盘，"
-            "我们自己的改名框打不进字，新建看起来又「没反应」",
         ),
     ],
 }

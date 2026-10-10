@@ -335,19 +335,23 @@ ok('V89：菜单收起时留痕命令 id（下次再报「新建失效」能一�
 ok('V89：新建成功也写日志（成功不静默，才能区分「没点到」与「建失败」）',
   /桌面新建成功/.test(shellMenuSrc));
 
-// Ⓐ V92：桌面空白右键**还给 Explorer** + 不再借出
+// Ⓐ V96：桌面空白右键**归 Handy 自己**（回到 V89 的方向）。
 //
-// 这是 V92 的核心反转。V89 把空白右键从 Explorer 手里抢过来自己弹，代价是那张菜单
-// 天生残缺（没有「查看 / 排序方式 / 刷新」和完整 ShellNew「新建」—— 那两块都不经过
-// `IContextMenu`）。V90/V91 又试图「转发」，结果双菜单 + 新建彻底失效。
-// 现在一律穿透：空白右键归 Explorer，原生功能 100% 完整，我们一行代理都不写。
-ok('V92：根画布只在拖拽时可交互（桌面空白右键一律穿透给 Explorer）',
-  /pointerEvents: itemDragging \? 'auto' : 'none',/.test(overlaySrc));
-ok('V92：**不再**有「接管态整窗可交互」分支（那会把 Explorer 的空白右键抢走）',
-  !/takeover\?\.enabled === true && !contentHidden[\s\S]{0,120}?'auto'/.test(overlaySrc));
-ok('V92：**不再**上报「整窗」命中区（否则 Rust 命中轮询会让整窗吃掉点击）',
-  !/width: window\.innerWidth \* scaleFactor/.test(overlaySrc));
-ok('V92：命中区依赖数组不再带 takeover（整窗区已删，留着会误触发重算）',
+// 历史：V89 空白右键归 Handy 自己弹；V92 改成穿透给 Explorer，理由是「Explorer 那张菜单
+// 才带查看/排序/刷新 + 完整 ShellNew 新建」。但穿透要求**隔空操作被我们隐藏的图标视图**：
+//   · 菜单里那几个原生项作用在看不见的视图上 ⇒ 本来就是空转，对 overlay 毫无影响；
+//   · ShellNew 的「新建」要在隐藏视图上拉原位改名框，我们只能隔空确认 ——
+//     V92 取消 → V93 换判据 → V94 改确认 → V95 还前台，七轮都不收敛
+//     （用户 10-10 报障一路到「第三次直接建不出来」）。
+// V96 回退：整窗命中区 + 根画布接管态整窗可交互 ⇒ 空白右键进我们自己的菜单
+// （`show_background_context_menu` = 完整背景菜单 + 我们注入的、必成的「新建」）。
+ok('V96：根画布接管态整窗可交互（空白右键归 Handy 自己的菜单）',
+  /pointerEvents: contentHidden \? 'none' : 'auto',/.test(overlaySrc));
+ok('V96：**恢复**上报「整窗」命中区（否则 Rust 命中轮询把整窗切回穿透、空白右键点不到）',
+  /width: window\.innerWidth \* scaleFactor/.test(overlaySrc));
+ok('V96：整窗命中区只在内容可见时上报（内容收起时交回桌面）',
+  /const regions: GridRegion\[\] = \[\];[\s\S]{0,160}?if \(!contentHidden\) \{/.test(overlaySrc));
+ok('V96：命中区依赖数组仍是 [regionsKey, scaleFactor, contentHidden]（不含 takeover）',
   !/\}, \[regionsKey, scaleFactor, contentHidden, takeover\]\);/.test(overlaySrc) &&
     /\}, \[regionsKey, scaleFactor, contentHidden\]\);/.test(overlaySrc));
 ok('V89：handoff 整体停用（HANDOFF_DISABLED）',
@@ -413,10 +417,8 @@ ok('V92：**不再**有「观测屏幕」判据（菜单圆角 / 透明区会让
 ok('V92：命令层只弹复刻菜单并返回 CreatedItem（不再有转发分支）',
   !/forward_desktop_view_menu/.test(rustCmdSrc) &&
     /show_background_context_menu\(hwnd, want_extended\)/.test(rustCmdSrc));
-ok('V92/V95：SetForegroundWindow 只许出现在「还前台给桌面宿主」里（给我们的窗口 = V91 死法）',
-  !/SetForegroundWindow\(hwnd\)|SetForegroundWindow\(win\)/.test(rustCmdSrc) &&
-    /SetForegroundWindow\(host\)/.test(rustCmdSrc) &&
-    /GA_ROOT/.test(rustCmdSrc));
+ok('V96：grid.rs 里不再有 SetForegroundWindow（V95 的「还前台」随穿透一起删）',
+  !/SetForegroundWindow/.test(rustCmdSrc));
 ok('V92：命令仍用 mpsc 真正等到菜单收起（run_on_main_thread 只投递，少了 recv 就是 V88 的 bug）',
   /rx\.recv\(\)/.test(rustCmdSrc));
 
@@ -439,49 +441,25 @@ ok('V92：前端监听 grid:desktop-changed 并重扫桌面',
   /listen\('grid:desktop-changed'/.test(overlaySrc));
 ok('V92：签名只读目录项元数据（read_dir，不读内容、不递归）',
   /std::fs::read_dir\(&dir\)/.test(rustCmdSrc));
-// 原生「新建」会在**被我们隐藏的** listview 上拉起原位改名框：用户看不见，它还会
-// SetFocus 抢键盘（我们自己的改名输入框就打不进字了）。
+// —— V96：**整条「隔空确认被隐藏的改名框」链路已删除** ——
 //
-// V93 修的判据（用户 10-10 的三条报障全出自这里，日志实测 10:24:26–10:26:28 打了 138 条）：
-//   判据必须是 `LVM_GETEDITCONTROL`。V92 用的「`FindWindowExW(.., "Edit", ..)` 找得到
-//   就算在编辑」**几乎恒为真**（`SysListView32` 的 `Edit` 子窗是常驻的）⇒ 每 50ms 无脑
-//   投一条取消消息 ⇒ 正好打断 Explorer 的 ShellNew ⇒「第一次成、第二次败、过一会又成」。
+// V92 取消 → V93 换 `LVM_GETEDITCONTROL` 判据 → V94 改「回车确认」→ V95「还前台」，
+// 七轮都没收敛。根因：ShellNew 要求隐藏视图在前台，而我们要给用户一个能打字的改名框
+// 就必然抢前台 ⇒ 两者互斥。V96 起「新建」由我们自己的菜单在桌面目录里落文件，
+// 根本不经过 ShellNew，也就不存在「隐藏改名框」这回事。
 //
-// V94（用户 10-10 第三次报障「每次只能创建一个，第二次就建不出来 + 桌面自己刷新」）：
-//   **动作从「取消」改成「确认」**。原生新建的语义是「取消改名 = 删掉刚建的文件」——
-//   取消这条路天生就是死路：第一次建出来又被 Explorer 自己收走。改成向编辑框投
-//   `VK_RETURN` 让 Explorer 用默认名**完成**创建（文件必然保留），改名交给我们自己的框。
-ok('V94：检测到隐藏改名框就投 VK_RETURN 确认（保留默认名，绝不取消）',
-  /const VK_RETURN: usize = 0x0D;/.test(rustCmdSrc) &&
-    /WPARAM\(VK_RETURN\),/.test(rustCmdSrc));
-ok('V94：确认走的是编辑框句柄（label_edit_control），不是对 listview 盲发',
-  /confirm\(edit_hwnd\);/.test(rustCmdSrc) &&
-    /crate::platform::desktop_handoff::label_edit_control\(\)/.test(rustCmdSrc));
-ok('V93：改名框判据是 LVM_GETEDITCONTROL（0x1000 + 0x18）',
-  /const LVM_GETEDITCONTROL: u32 = 0x1000 \+ 0x18;/.test(handoffSrc));
-ok('V93：label_edit_control 返回编辑框句柄（供确认动作用，不再只有 bool）',
-  /pub fn label_edit_control\(\) -> Option<HWND>/.test(handoffSrc));
-ok('V93：label_editing 仍对外可见（desktop_handoff 内部要用）',
-  /pub fn label_editing\(\) -> bool/.test(handoffSrc));
-ok('V94：一次编辑只动一次 —— EDIT_CANCEL_STAGE 闩锁 + 600/1200ms 有限重试',
-  /static EDIT_CANCEL_STAGE: AtomicU8 = AtomicU8::new\(0\);/.test(rustCmdSrc) &&
-    /let stage = EDIT_CANCEL_STAGE\.load\(Ordering::Relaxed\);/.test(rustCmdSrc) &&
-    /if stage == 0 \{/.test(rustCmdSrc) &&
-    /\} else if stage == 1 && waited_ms >= 600 \{/.test(rustCmdSrc) &&
-    /\} else if stage == 2 && waited_ms >= 1200 \{/.test(rustCmdSrc));
-ok('V94：不在接管态绝不碰改名框（那是用户自己在用的重命名）',
-  (() => {
-    // 打**调用点**：确认动作 confirm(edit_hwnd) 必须紧跟在「替它按回车」注释的
-    // ICONS_TAKEN 门之后 —— 只判「存在 ICONS_TAKEN 判断」没判别力（文件里还有好几处），
-    // 变异把门里的那处改掉守卫照样绿（自检抓到的假通过）。
-    const anchor = rustCmdSrc.indexOf('替它按回车');
-    if (anchor < 0) return false;
-    const gate = rustCmdSrc.indexOf('if !ICONS_TAKEN.load(Ordering::Relaxed) {', anchor);
-    const confirmAt = rustCmdSrc.indexOf('confirm(edit_hwnd);');
-    return gate >= 0 && confirmAt > gate && confirmAt - gate < 3000;
-  })());
-ok('V92：确认用 PostMessage（投递即走，Explorer 忙也不会卡住轮询线程）',
-  /use windows::Win32::UI::WindowsAndMessaging::PostMessageW;/.test(rustCmdSrc));
+// 这几条是**反向**守卫：谁把那条路加回来，它就红。
+ok('V96：grid 轮询里不再有「确认 / 取消隐藏改名框」的代码',
+  !/LVM_CANCELEDITLABEL/.test(rustCmdSrc) &&
+    !/label_edit_control/.test(rustCmdSrc) &&
+    !/const VK_RETURN: usize = 0x0D;/.test(rustCmdSrc));
+ok('V96：EDIT_SEEN_TICK / EDIT_CANCEL_STAGE 闩锁也一并删除（整段状态机没了）',
+  !/EDIT_CANCEL_STAGE/.test(rustCmdSrc) && !/EDIT_SEEN_TICK/.test(rustCmdSrc));
+ok('V96：删掉的位置留了说明注释（防后人把穿透那条路再加回来）',
+  /V96：这里原来有一段「确认 Explorer 在被我们隐藏的 listview 上拉起的/.test(rustCmdSrc));
+ok('V96：不再有 grid_focus_desktop 命令（V95 的「还前台」随穿透一起删）',
+  !/grid_focus_desktop/.test(rustCmdSrc) && !/gridFocusDesktop/.test(ipcSrc) &&
+    !/grid_focus_desktop/.test(libSrc));
 
 // —— V93：前端的「改名 / 新建」安静期（用户 10-10：「我创建后应该聚焦到命名上，
 //    现在刷新，重命名都没有了」）——
@@ -501,9 +479,8 @@ ok('V93：唯一新增项立刻就地改名（对齐 Explorer「新建后焦点�
     /beginItemRename\(target, target\.split/.test(overlaySrc));
 ok('V93：安静期内的挂起刷新一定会被补跑（改名结束就踢一脚）',
   /quietKickRef\.current\(\);[\s\S]{0,300}\}, \[renamingItemPath\]\)/.test(overlaySrc));
-ok('V95：改名框关闭时把前台还给 Explorer 桌面（CNewMenu 要 view 在前台，否则下次新建静默失败）',
-  /gridFocusDesktop\(\)/.test(overlaySrc) && /gridFocusDesktop/.test(ipcSrc) &&
-    /grid_focus_desktop/.test(rustCmdSrc));
+ok('V96：条目改名框自动聚焦时全选默认名（否则新建后打字是追加，会得到「新建文件夹 (20)123」）',
+  (overlaySrc.match(/onFocus=\{\(event\) => event\.currentTarget\.select\(\)\}/g) ?? []).length >= 2);
 
 /* ================================================================== *
  * 结果
