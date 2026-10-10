@@ -592,28 +592,48 @@ const iconPending = new Map<string, Promise<IconEntry | null>>();
  * 和桌面/资源管理器里的样子对不上。这里也不再写死 `h-8 w-8`，按真实尺寸渲染。
  */
 async function loadIcon(path: string): Promise<IconEntry | null> {
-  try {
-    const data = await ipc.gridFileIcon(path);
-    if (!data || data.width <= 0 || data.height <= 0) {
+  // V102：失败必须留痕。此前这里是纯静默（`catch { return null }`），前端一旦回退
+  // 到线条图标，日志里一个字都没有 —— 用户 10-10 深夜报「系统图标变成黄色文件夹」，
+  // 事后 Rust 侧同函数同机器实测全部成功（此电脑/回收站/用户的文件 48×48 原生图标），
+  // 却无法回答「应用里那一刻为什么失败」，就是因为这条链路零取证。失败打一条 warn，
+  // 含路径与后端返回形态；后端链路本身已在测试里锁死（见 grid.rs 的图标探针教训）。
+  const attempt = async (): Promise<IconEntry | null> => {
+    try {
+      const data = await ipc.gridFileIcon(path);
+      if (!data || data.width <= 0 || data.height <= 0) {
+        void ipc
+          .logFrontend('warn', `图标提取空返回，条目将回退线条图标：${path}`)
+          .catch(() => undefined);
+        return null;
+      }
+      const bytes = Uint8Array.from(atob(data.rgbaBase64), (char) => char.charCodeAt(0));
+      const canvas = document.createElement('canvas');
+      canvas.width = data.width;
+      canvas.height = data.height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        return null;
+      }
+      ctx.putImageData(
+        new ImageData(new Uint8ClampedArray(bytes.buffer, bytes.byteOffset, bytes.byteLength), data.width, data.height),
+        0,
+        0,
+      );
+      return { url: canvas.toDataURL('image/png'), size: data.width };
+    } catch (error: unknown) {
+      void ipc
+        .logFrontend('warn', `图标提取失败，条目将回退线条图标：${path}`, String(error))
+        .catch(() => undefined);
       return null;
     }
-    const bytes = Uint8Array.from(atob(data.rgbaBase64), (char) => char.charCodeAt(0));
-    const canvas = document.createElement('canvas');
-    canvas.width = data.width;
-    canvas.height = data.height;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) {
-      return null;
-    }
-    ctx.putImageData(
-      new ImageData(new Uint8ClampedArray(bytes.buffer, bytes.byteOffset, bytes.byteLength), data.width, data.height),
-      0,
-      0,
-    );
-    return { url: canvas.toDataURL('image/png'), size: data.width };
-  } catch {
-    return null;
+  };
+  const first = await attempt();
+  if (first !== null) {
+    return first;
   }
+  // 后端首次失败可能是瞬时态（整理风暴期 IPC 挤压）；隔 1.5s 重试一次，仍败才回退。
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  return attempt();
 }
 
 /**
