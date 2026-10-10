@@ -413,8 +413,10 @@ ok('V92：**不再**有「观测屏幕」判据（菜单圆角 / 透明区会让
 ok('V92：命令层只弹复刻菜单并返回 CreatedItem（不再有转发分支）',
   !/forward_desktop_view_menu/.test(rustCmdSrc) &&
     /show_background_context_menu\(hwnd, want_extended\)/.test(rustCmdSrc));
-ok('V92：**不再** SetForegroundWindow（它让 CNewMenu 找不到目标视图 ⇒ 新建静默失败）',
-  !/SetForegroundWindow/.test(rustCmdSrc));
+ok('V92/V95：SetForegroundWindow 只许出现在「还前台给桌面宿主」里（给我们的窗口 = V91 死法）',
+  !/SetForegroundWindow\(hwnd\)|SetForegroundWindow\(win\)/.test(rustCmdSrc) &&
+    /SetForegroundWindow\(host\)/.test(rustCmdSrc) &&
+    /GA_ROOT/.test(rustCmdSrc));
 ok('V92：命令仍用 mpsc 真正等到菜单收起（run_on_main_thread 只投递，少了 recv 就是 V88 的 bug）',
   /rx\.recv\(\)/.test(rustCmdSrc));
 
@@ -468,7 +470,16 @@ ok('V94：一次编辑只动一次 —— EDIT_CANCEL_STAGE 闩锁 + 600/1200ms 
     /\} else if stage == 1 && waited_ms >= 600 \{/.test(rustCmdSrc) &&
     /\} else if stage == 2 && waited_ms >= 1200 \{/.test(rustCmdSrc));
 ok('V94：不在接管态绝不碰改名框（那是用户自己在用的重命名）',
-  /if !ICONS_TAKEN\.load\(Ordering::Relaxed\) \{/.test(rustCmdSrc));
+  (() => {
+    // 打**调用点**：确认动作 confirm(edit_hwnd) 必须紧跟在「替它按回车」注释的
+    // ICONS_TAKEN 门之后 —— 只判「存在 ICONS_TAKEN 判断」没判别力（文件里还有好几处），
+    // 变异把门里的那处改掉守卫照样绿（自检抓到的假通过）。
+    const anchor = rustCmdSrc.indexOf('替它按回车');
+    if (anchor < 0) return false;
+    const gate = rustCmdSrc.indexOf('if !ICONS_TAKEN.load(Ordering::Relaxed) {', anchor);
+    const confirmAt = rustCmdSrc.indexOf('confirm(edit_hwnd);');
+    return gate >= 0 && confirmAt > gate && confirmAt - gate < 3000;
+  })());
 ok('V92：确认用 PostMessage（投递即走，Explorer 忙也不会卡住轮询线程）',
   /use windows::Win32::UI::WindowsAndMessaging::PostMessageW;/.test(rustCmdSrc));
 
@@ -489,7 +500,10 @@ ok('V93：唯一新增项立刻就地改名（对齐 Explorer「新建后焦点�
   /if \(added\.length !== 1 \|\| renamingRef\.current\)/.test(overlaySrc) &&
     /beginItemRename\(target, target\.split/.test(overlaySrc));
 ok('V93：安静期内的挂起刷新一定会被补跑（改名结束就踢一脚）',
-  /quietKickRef\.current\(\);[\s\S]{0,40}\}, \[renamingItemPath\]\)/.test(overlaySrc));
+  /quietKickRef\.current\(\);[\s\S]{0,300}\}, \[renamingItemPath\]\)/.test(overlaySrc));
+ok('V95：改名框关闭时把前台还给 Explorer 桌面（CNewMenu 要 view 在前台，否则下次新建静默失败）',
+  /gridFocusDesktop\(\)/.test(overlaySrc) && /gridFocusDesktop/.test(ipcSrc) &&
+    /grid_focus_desktop/.test(rustCmdSrc));
 
 /* ================================================================== *
  * 结果

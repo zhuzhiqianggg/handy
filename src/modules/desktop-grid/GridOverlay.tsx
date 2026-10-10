@@ -1383,6 +1383,12 @@ export function GridOverlay(): React.JSX.Element {
     renamingRef.current = renamingItemPath !== null;
     if (renamingItemPath === null) {
       quietKickRef.current();
+      // V95：把前台还给 Explorer 桌面。改名框开着时我们 setFocus 抢了前台 ——
+      // 而原生「新建」（CNewMenu）要求 view 在前台，不还回去的话下一次
+      // 「新建文件夹」就静默失败（用户 10-10：「第一次新建成功，第二次就不行了」）。
+      if (isTauri()) {
+        void ipc.gridFocusDesktop().catch(() => undefined);
+      }
     }
   }, [renamingItemPath]);
 

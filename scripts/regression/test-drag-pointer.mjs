@@ -606,7 +606,7 @@ ok('视图模式切换后写回 localStorage',
 }
 
 /* ================================================================== *
- * ⑭ 列数判据：纵向优先、横向裁决（V71 → V84 → V94）
+ * ⑭ 列数判据：顺序填充 + 最少列优先（V71 → V84 → V94 → V95）
  *
  * 用户 09-23（附截图）：「你看整体效果怎么还是补补丁一样的，三个图表最多的不应该 2 3 列
  * 上面开始平均放置，然后把零散的少量的格子补在下面即可哇，至于便签这个列前面的空间不够再放」
@@ -616,33 +616,45 @@ ok('视图模式切换后写回 localStorage',
  * 看不清了」「这部分完全可以合并到一列里面」 —— V71 的「k 从大到小、能多铺一列就多铺
  * 一列」被推翻：真机 6 格 920×968 被排成 5 列、每列 ~176px。
  *
- * 用户 10-10（附截图，红框圈三个窄列）：「红框这三列明显可以自动流布局到一列里面，
- * 为什么要搞成三列那么丑，而且列有很窄的。一点也不智能」 —— V84 的 min(横, 纵) 有毛病：
- * k 大时横向填充率逼近 1，把纵向偏低的解也抬了上去 ⇒ 真机 6 格又被排成 5 列。
- *
- * V94 定稿：装得下的候选里取**纵向填充率最大**（tallest 最大 = 列数最少）、并列再比
- * 横向（used_w 最大 = 零散小格摊开、不出「补丁洞」）。行为判据在 Rust 侧
- * （`cargo test --lib`）：`the_biggest_boxes_share_the_top_row_instead_of_piling_up` /
+ * 用户 10-10（两轮截图）：「红框这三列明显可以自动流布局到一列里面……一点也不智能」
+ * 「至少流布局从右到左 从上到下 满了才换列吧」 —— V84 的 min(横, 纵) 被横向填充率抬了
+ * 列多的解；V94 的纵向优先又被「夹宽让格子变高」钻了空子。V95 定稿：
+ *   · pack_columns 改**顺序填充**（从第一列自上往下塞，满了才换列；LPT「最矮列」废弃）；
+ *   · 物理装不下时退回 LPT 均衡（溢出摊薄，交给 fit_column_heights 压扁）；
+ *   · pick_columns 评分 = (−k, 自然宽优先, tallest, used_w)：装得下的解里**列数最少**赢，
+ *     同 k 里**没夹宽**的赢（夹宽 ⇒ 格子变高，在纵向判据下会反杀，变异自检抓到过）；
+ *   · 带下分流门槛（V94）保留：上带装得下且没被压就不往便签底下分流。
+ * 行为判据在 Rust 侧（`cargo test --lib`）：`the_biggest_boxes_share_the_top_row...` /
  * `small_boxes_fill_in_below_the_big_ones` / `a_roomy_zone_keeps_natural_box_widths` /
- * `six_boxes_pack_into_wide_natural_columns_not_five_cramped_ones`。
- * mjs 这边只确认「这段结构还在」，防止重构时整块丢掉、而没人发现。
+ * `six_boxes_pack_into_wide_natural_columns_not_five_cramped_ones` /
+ * `small_boxes_fill_the_shortest_column`。mjs 这边只确认「这段结构还在」。
  * ================================================================== */
 
 {
-  const at = rustCmdCode.indexOf('fn pick_columns(');
-  ok('Rust 里有挑列数的实现（pick_columns）',
+  const at = rustCmdCode.indexOf('fn pack_columns(');
+  ok('Rust 里有分列实现（pack_columns）',
     at >= 0,
-    '函数被改名/搬走 ⇒ 下面两条断言会全部落空，必须同步本守卫');
-  const body = at < 0 ? '' : rustCmdCode.slice(at, at + 2600);
-  ok('列数循环里同时准备「自然宽度」与「夹到 zone_w/k」两套尺寸，且自然在前',
-    /vec!\[\(natural_h\.to_vec\(\), natural_w\.to_vec\(\), false\)\][\s\S]{0,260}?trials\.push\(\(ch, cw, true\)\)/.test(body),
+    '函数被改名/搬走 ⇒ 下面几条断言会全部落空，必须同步本守卫');
+  const body = at < 0 ? '' : rustCmdCode.slice(at, at + 3200);
+  ok('V95：分列是顺序填充（流不回头），不是 LPT 最矮列',
+    body.indexOf('cur + 1 < k') >= 0 && body.indexOf('load2[best]') >= 0,
+    '退回 LPT「每个格子放最矮列」会把小格子撒进各列尾部 —— 用户 10-10 原话'
+      + '「至少流布局从右到左 从上到下 满了才换列吧」');
+  ok('V95：物理装不下（有列越过 cap）时退回 LPT 均衡（fit_column_heights 才压得动）',
+    /if load\.iter\(\)\.any\(\|&l\| l > cap\) \{/.test(body),
+    '没有这道兜底，顺序填充会把放不下的格子全堆进最后一列 —— MIN_BOX_H 一夹，'
+      + '整列溢出（v68/with_no_widget 两条用例当场红）');
+
+  const at2 = rustCmdCode.indexOf('fn pick_columns(');
+  const body2 = at2 < 0 ? '' : rustCmdCode.slice(at2, at2 + 3000);
+  ok('V95：列数循环里同时准备「自然宽度」与「夹到 zone_w/k」两套尺寸，且自然在前',
+    /vec!\[\(natural_h\.to_vec\(\), natural_w\.to_vec\(\), false\)\][\s\S]{0,260}?trials\.push\(\(ch, cw, true\)\)/.test(body2),
     '把「夹宽」挪出列数循环（或排到自然之前）⇒ 宽度一紧张就少开一列，布局又变成「补补丁一样」');
-  ok('k 从小到大扫全部候选，评分是纵向优先、横向裁决的字典序（V94）',
-    body.indexOf('for k in 1..=capacity') >= 0 &&
-      body.indexOf('for k in 1..=capacity') < body.indexOf('trials.push((ch, cw, true))') &&
-      /let score = \(tallest, used_w\);/.test(body),
-    '退回 min(横, 纵) 会重新产出用户 10-10 截图里的多列窄格；退回「只比纵向」会丢了横向裁决、'
-      + '复活 09-23 的「补丁洞」（大格独占列 + 小格挤一列）');
+  ok('V95：评分 = 列数最少优先、自然宽优先（防夹宽反杀），k 从小到大扫',
+    body2.indexOf('for k in 1..=capacity') >= 0 &&
+      /let score = \(-\(k as i64\), if capped \{ 0 \} else \{ 1 \}, tallest, used_w\);/.test(body2),
+    '退回 min(横, 纵) 会重新产出多列窄格（09-29 / 10-10 两轮截图）；'
+      + '去掉「自然宽优先」会被夹宽解反杀（夹宽 ⇒ 格子变高 ⇒ 纵向判据下反而赢）');
 }
 
 /* ================================================================== *

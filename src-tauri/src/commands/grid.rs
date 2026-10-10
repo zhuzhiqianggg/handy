@@ -3861,6 +3861,44 @@ pub async fn shell_desktop_background_menu(
     }
 }
 
+/// 把**前台还给 Explorer 桌面**（V95）。
+///
+/// 用户 10-10 的第 5 次报障（「第一次新建成功，第二次就不行了」）的根因：
+/// 新建后前端 `setFocus()` 把前台抢到我们窗口上 —— 而 Explorer 的 `CNewMenu`
+/// （原生「新建」）**要求 view 处于前台**（V91 已用转发路径验证过同款死法）：
+/// 前台一旦不是桌面，下一次「新建文件夹」就静默失败，菜单收起时还让桌面重绘闪一下。
+///
+/// 所以改名框一关（改完名 / Esc 取消），就把前台还回去 —— 下一次右键新建时
+/// `CNewMenu` 才找得到它的 view。只有**接管态**才做：没接管时前台本来就在桌面。
+#[tauri::command]
+pub async fn grid_focus_desktop(app: AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, SetForegroundWindow, GA_ROOT};
+        app.run_on_main_thread(move || {
+            if !ICONS_TAKEN.load(Ordering::Relaxed) {
+                return;
+            }
+            let Some(view) = desktop_icon_view() else {
+                return;
+            };
+            // 桌面 listview 的根 = Progman / WorkerW —— 前台要给的是它（宿主），不是 listview
+            let host = unsafe { GetAncestor(view, GA_ROOT) };
+            if !host.0.is_null() {
+                unsafe {
+                    let _ = SetForegroundWindow(host);
+                }
+            }
+        })
+        .map_err(|err| format!("投递还前台失败：{err}"))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = app;
+        Err("当前平台暂未适配".to_string())
+    }
+}
+
 /// 从**桌面层**（格子挂件窗 / 快捷条）唤出主窗口并跳到指定视图（V42）。
 ///
 /// 用户原话：「我们这个工具本来就是为了方便顺手使用，其他都可以直接在桌面上实现功能，
@@ -5091,33 +5129,52 @@ fn placement_order(items: &[usize], sizes: &[(i64, i64)]) -> Vec<usize> {
     idx
 }
 
-/// 分列（V69）：按摆放序，每个格子放进「**当前最矮的那一列**」（并列取最左）。
+/// 分列（V95）：按摆放序**顺序填充** —— 从第一列（最右）自上往下塞，**满了才换列**。
 ///
-/// 这就是用户那句「先把大格子算了布局好，然后把小格子找空隙插入」：空隙 = 那一列还没用掉的
-/// 高度，最矮的那一列就是当前最大的那个空隙。这也是经典的 LPT 调度 ——「最高的那一列」不超过
-/// 最优解的 4 / 3。
+/// 用户 10-10（附截图，红框）原话：「至少流布局从右到左 从上到下 满了才换列吧」。
+/// V69–V94 的 LPT「每个格子放进当前最矮的列」被推翻：它会把小格子撒进各列的尾部空隙，
+/// 视觉上就是「格子摊得到处都是、每条都窄」。
 ///
-/// 为什么不再是 V66 的「保序切段」：`balanced_partition` 只在**连续区间**上切，于是「谁排前面」
-/// 由登记顺序说了算 —— 空的「新格子」先登记就先占住第一列顶端，大格子反被挤到它们下面
-/// （用户 09-23 的截图）。顺序一旦改由大小决定，这个问题从根上消失。
+/// `cap` 是一列的高度上限（= 收纳区可用高）：当前列装不下就换下一列；
+/// 已是最后一列还装不下就只能硬塞 —— `tallest` 会越界，由 [`pick_columns`] 判溢出进兜底。
+/// 所以 k 仍是「允许的最大列数」，而**实际列数由内容自然决定**（装不满就不开新列）。
 ///
 /// 返回的下标是「摆放序里的位置」（`heights` / `widths` 的下标），不是格子 id。
-fn pack_columns(heights: &[i64], k: usize) -> Vec<Vec<usize>> {
-    let mut cols: Vec<Vec<usize>> = vec![Vec::new(); k.max(1)];
-    let mut load = vec![0_i64; cols.len()];
+fn pack_columns(heights: &[i64], k: usize, cap: i64) -> Vec<Vec<usize>> {
+    let k = k.max(1);
+    let mut cols: Vec<Vec<usize>> = vec![Vec::new(); k];
+    let mut load = vec![0_i64; k];
+    let mut cur = 0usize;
     for (i, h) in heights.iter().copied().enumerate() {
-        // 最矮的那一列；并列取最左（用 `<` 而不是 `<=`）—— 与列序无关地稳定
-        let mut best = 0usize;
-        for c in 1..cols.len() {
-            if load[c] < load[best] {
-                best = c;
+        let add = |len: usize| if len == 0 { h } else { h + ARRANGE_GAP_Y };
+        // 当前列装不下、且还有下一列 ⇒ 换列（「满了才换列」）
+        if load[cur] + add(cols[cur].len()) > cap && cur + 1 < k {
+            cur += 1;
+        }
+        load[cur] += add(cols[cur].len());
+        cols[cur].push(i);
+    }
+    // ⚠️ 有列越过 cap ⇒ **物理装不下**（k 是上限，塞不下的全堆进了最后一列）。
+    // 这时顺序填充的「前列疏松、尾列爆炸」是压扁的噩梦 —— [`fit_column_heights`]
+    // 有 `MIN_BOX_H` 下限，尾列越长越压不回去。退回 LPT 均衡（V69 的旧行为）：
+    // 把溢出摊到每一列上，压扁代价最小。装得下的解不受影响（不会走到这）。
+    if load.iter().any(|&l| l > cap) {
+        let mut lpt: Vec<Vec<usize>> = vec![Vec::new(); k];
+        let mut load2 = vec![0_i64; k];
+        for (i, h) in heights.iter().copied().enumerate() {
+            let mut best = 0usize;
+            for c in 1..k {
+                if load2[c] < load2[best] {
+                    best = c;
+                }
             }
+            if !lpt[best].is_empty() {
+                load2[best] += ARRANGE_GAP_Y;
+            }
+            load2[best] += h;
+            lpt[best].push(i);
         }
-        if !cols[best].is_empty() {
-            load[best] += ARRANGE_GAP_Y;
-        }
-        load[best] += h;
-        cols[best].push(i);
+        return lpt;
     }
     cols
 }
@@ -5234,7 +5291,7 @@ fn pick_columns(
     zone_h: i64,
     capped_at: impl Fn(usize) -> (Vec<i64>, Vec<i64>),
 ) -> (Option<ColumnPick>, Option<(i64, ColumnPick)>) {
-    let mut best: Option<((i64, i64), ColumnPick)> = None;
+    let mut best: Option<((i64, i64, i64, i64), ColumnPick)> = None;
     let mut fallback: Option<(i64, ColumnPick)> = None;
     for k in 1..=capacity {
         let mut trials: Vec<(Vec<i64>, Vec<i64>, bool)> =
@@ -5244,7 +5301,7 @@ fn pick_columns(
             trials.push((ch, cw, true));
         }
         for (hs, ws, capped) in trials {
-            let cols = pack_columns(&hs, k);
+            let cols = pack_columns(&hs, k, zone_h);
             let used_w = packed_total_width(&cols, &ws);
             // 宽度装不下直接淘汰 —— 这是「不许压到挂件带 / 工作台上」的硬约束
             if used_w > zone_w {
@@ -5258,11 +5315,14 @@ fn pick_columns(
                 }
                 continue;
             }
-            // V94：纵向优先、横向裁决（字典序，避免浮点）——
-            //   先比最高列 `tallest`（越满越好 ⇒ 列数越少越赢），
-            //   并列再比总宽 `used_w`（把零散小格摊开的解赢 ⇒ 不出「补丁洞」）。
-            // 严格更优才替换 ⇒ 平局保持先到者：k 更小、自然尺寸优先。
-            let score = (tallest, used_w);
+            // V95 评分（字典序，严格更优才替换 ⇒ 平局保持先到者）：
+            //   ① **列数最少**（k 取负）—— 装得下的前提下 k 小的先到先赢：
+            //      顺序填充下「满了才换列」，实际列数由内容自然决定，k 只是上限；
+            //   ② **自然宽优先**（capped 记 0 / 自然记 1）—— ⚠️ 这条在顺序填充下是**必须的**：
+            //      夹宽 ⇒ 格子变高 ⇒ tallest 变大，在「纵向优先」评分下夹宽解反而会赢
+            //      （变异自检当场抓到：`a_roomy_zone_keeps_natural_box_widths` 被夹到 306）。
+            //   ③④ tallest / used_w 只是同 k 两个候选之外的次序兜底（现在是空集，留作保险）。
+            let score = (-(k as i64), if capped { 0 } else { 1 }, tallest, used_w);
             if best.as_ref().map_or(true, |(s, _)| score > *s) {
                 best = Some((score, (cols, hs, ws, capped)));
             }
@@ -5461,8 +5521,9 @@ fn content_plan_with_lower_band(
     // 带下那条的**硬右沿**（= 收纳区右沿）：左沿随 `band_a` 的实际用量浮动，
     // 右沿永远钉在这儿。
     let hard_right = band_b.x + band_b.w;
-    // 打底 = 「全部塞进 band_a」（= 没有带下空间时的行为），`m` 从 n-1 往下试、只有严格更低
-    // 才替换，于是并列时永远选「band_a 装得更多」的那个（带下那条起点更低，多用它一格都不划算）。
+    // 打底 = 「全部塞进 band_a」（= 没有带下空间时的行为）。循环里的判据是
+    // `cost <= best.0`（不更高就换）—— 并列时 m 从 n-1 往下先到先得，
+    // 永远选「band_a 装得更多」的那个（带下那条起点更低，多用它一格都不划算）。
     let mut best = (whole.bottom(), whole);
     // V94：**上带装得下（且没被压）就不再往带下分流**。
     //
@@ -5493,8 +5554,17 @@ fn content_plan_with_lower_band(
             continue;
         }
         let pb = content_plan_in(&order[m..], items, lower, icon);
+        // V95：带下那条**装不下就别硬塞** —— 顺序填充下溢出的格子会越过带下沿，
+        // 留在那是「越界」，拽回去又挤坏上带；这种拆分不比整层溢出好，跳过。
+        // 上带那半同理：拆完上带还溢出，等于把烂摊子摊到两条带上。
+        if pb.overflowed || pa.overflowed {
+            continue;
+        }
+        // 走到循环里就说明 whole 溢出 / 被压扁（上面有门槛）—— 拆分只要底沿**不更高**
+        // 就是改善（压扁场景里上带被 fit 压到贴着可用高，底沿恒等于上限，
+        // 用严格 < 的话拆分永远落空）。
         let cost = pa.bottom().max(pb.bottom());
-        if cost < best.0 {
+        if cost <= best.0 {
             // ⚠️ 拼接顺序必须与 `order` 对齐（`pa` 覆盖 `order[..m]`、`pb` 覆盖 `order[m..]`）——
             // 一旦反了，格子名与坑位就会错配（`scatter_back` 是按位摊回去的）。
             let mut slots = pa.slots;
@@ -8090,36 +8160,36 @@ mod flow_placer_tests {
         );
     }
 
-    /// 真机那一组（V71）：收纳区 637×848、条目数 18 / 8 / 8 —— 见 [`pick_columns`] 里那张表。
+    /// 真机那一组（V71→V95）：收纳区 637×848、条目数 18 / 8 / 8 —— 见 [`pick_columns`] 里那张表。
     const REAL_ITEMS: [usize; 3] = [18, 8, 8];
     const REAL_ZONE_W: i64 = 637;
     const REAL_ZONE_H: i64 = 848;
     const REAL_MIN_X: i64 = 330;
     const REAL_ICON: i64 = 32;
 
-    /// V71：**大格子并排铺在最上面**，不许挤在一列里让另一列空半截。
-    ///
-    /// 判据取「顶行有没有占满可用列数」而不是笼统的「列数是多少」—— 后者在宽度不紧张时
-    /// 两三种答案都能通过，而前者正是用户 09-23 那句
-    /// 「三个图表最多的不应该 2 3 列上面开始平均放置」的可测版本。
-    ///
-    /// 变异对照：把 [`pick_columns`] 里「先自然、后夹宽」改回 V69 的「只有全败才夹宽」，
-    /// 这里立刻变成 2 列（18 项独占第一列、另外两个摞在第二列）⇒ 红。
+    /// V95（用户 10-10：「从右到左 从上到下 满了才换列」）：顺序填充下 18 项格占满第一列，
+    /// 两个 8 项格摞进第二列 —— **2 列**，而不是 V71 时代的「各占一列铺开」。
+    /// 18 项格（~550 高）+ 8 项格（~300 高）> 848 ⇒ 一列装不下，换列后的高度由内容自然决定。
     #[test]
     fn the_biggest_boxes_share_the_top_row_instead_of_piling_up() {
         let plan = content_plan(&REAL_ITEMS, REAL_ZONE_W, REAL_ZONE_H, REAL_ICON, REAL_MIN_X);
         assert_eq!(
             plan.column_count(),
-            REAL_ITEMS.len(),
-            "3 个格子在 637 宽的收纳区里应当各占一列（并排铺开），实际只开了 {} 列",
+            2,
+            "18/8/8 在 637×848 里应当顺序填满一列再换列（= 2 列），实际 {} 列",
             plan.column_count()
         );
-        assert!(
-            plan.slots.iter().all(|s| s.y == ARRANGE_MARGIN),
-            "3 个格子 3 列 ⇒ 全都该落在顶行，实际 y = {:?}",
-            plan.slots.iter().map(|s| s.y).collect::<Vec<_>>()
-        );
-        assert!(!plan.overflowed, "并排铺开之后不该再越过可用区的下沿");
+        // 摆放序第一（18 项 = 面积最大）必须在第一列顶部
+        let top = plan
+            .slots
+            .iter()
+            .filter(|s| s.y == ARRANGE_MARGIN)
+            .count();
+        assert_eq!(top, 2, "两列顶部各一格：{:?}", plan.slots);
+        assert!(!plan.overflowed, "不许越过可用区的下沿");
+        // 列内撑满：同列格子同宽（8 项格被撑到 18 项格的列宽，V85 的设计内行为）
+        let widths: std::collections::BTreeSet<i64> = plan.slots.iter().map(|s| s.w).collect();
+        assert_eq!(widths.len(), 2, "两列各一个列宽（列内撑满）：{widths:?}");
     }
 
     /// V71 → V85：**放得下就不许夹窄**（`pick_columns` 里「同一个 k 里自然尺寸在前」那一条）。
@@ -9205,28 +9275,54 @@ mod flow_placer_tests {
         );
     }
 
-    /// `pack_columns`：每个格子放进「**当前最矮的那一列**」—— 这就是「小格子找空隙插入」。
+    /// `pack_columns`（V95）：**顺序填充、满了才换列**（用户 10-10 口径）。
     #[test]
     fn small_boxes_fill_the_shortest_column() {
-        // 三个大格子（400 高）各占一列，三个小格子（40 高）分别补进这三条列
+        // 列高上限 464：三个大格子（400 高）各占一列（400+24+40 = 464 恰好满），
+        // 三个小格子（40 高）依次补进各列的残余空间
         let heights = [400i64, 400, 400, 40, 40, 40];
-        let cols = pack_columns(&heights, 3);
+        // 小格 cap=500：一列装得下全部（472 ≤ 500）⇒ 顺序填充全摞第一列（「没满不换列」）
+        let cols = pack_columns(&[100i64, 100, 100, 100], 3, 500);
+        assert_eq!(
+            cols,
+            vec![vec![0usize, 1, 2, 3], vec![], vec![]],
+            "第一列没满就不许换列：{cols:?}"
+        );
+        // cap=300：100+24+100=224 放得下、再加就满 ⇒ 正好在第二格后换列（「满了才换列」）
+        let cols = pack_columns(&[100i64, 100, 100, 100], 3, 300);
+        assert_eq!(
+            cols,
+            vec![vec![0usize, 1], vec![2, 3], vec![]],
+            "塞满一列才开下一列：{cols:?}"
+        );
+        // 大格 cap=464：物理装不下（400+40×3+24×3 = 592 越界）⇒ 退回 LPT 均衡交给上层压扁
+        let cols = pack_columns(&heights, 3, 464);
         assert_eq!(
             cols,
             vec![vec![0usize, 3], vec![1, 4], vec![2, 5]],
-            "大格子先各占一列，小格子按「最矮的那一列」依次补进去：{cols:?}"
+            "装不下时退回 LPT 均衡（溢出摊薄，压扁代价最小）：{cols:?}"
         );
-        // 补完之后三条列等高（LPT 的平衡性）—— 不再是「第一列塞满、最后一列孤零零」
         let col_h = |c: &Vec<usize>| {
             c.iter().map(|&i| heights[i]).sum::<i64>() + (c.len() as i64 - 1).max(0) * ARRANGE_GAP_Y
         };
         let hs: Vec<i64> = cols.iter().map(col_h).collect();
-        assert_eq!(hs, vec![464, 464, 464], "三条列必须一样高：{hs:?}");
-        assert!(hs.iter().all(|h| *h < 400 + 40 + ARRANGE_GAP_Y + 1), "没有哪一列被塞爆");
+        assert_eq!(hs, vec![464, 464, 464], "LPT 均衡后三条列等高：{hs:?}");
+
+        // 列没满就不换列：小格子全部摞在第一列（「从上到下、满了才换列」）
+        let tight = pack_columns(&[100i64, 100, 100], 3, 1_000);
+        assert_eq!(
+            tight,
+            vec![vec![0usize, 1, 2], vec![], vec![]],
+            "一列装得下就不许摊开：{tight:?}"
+        );
 
         // 空集 / k 超过格子数都不许 panic（空列不占宽度由 `packed_total_width` 负责）
-        assert!(pack_columns(&[], 3).iter().all(|c| c.is_empty()));
-        assert_eq!(pack_columns(&[100, 200], 5).iter().filter(|c| !c.is_empty()).count(), 2);
+        assert!(pack_columns(&[], 3, 500).iter().all(|c| c.is_empty()));
+        // k=5 只是上限：两格一列装得下（100+24+200=324 ≤ 500）就只用 1 列
+        assert_eq!(
+            pack_columns(&[100, 200], 5, 500).iter().filter(|c| !c.is_empty()).count(),
+            1
+        );
     }
 
     /// **带下空间仍然活着**（V68 的能力，V69 换摆放序之后必须还在）。
@@ -9239,8 +9335,10 @@ mod flow_placer_tests {
     /// 让上带真的装不下自然高度（3 列要摞 5 行 ≈ 1066 > 848，只能压扁）⇒ 走分流。
     #[test]
     fn the_lower_band_hosts_boxes_when_the_upper_band_cannot_hold_them_all() {
-        // 上带 = 便签左侧（600 宽，整幅高）；带下那条 = 便签下方（236 × 521，真机量级）
-        let items = vec![20usize; 14];
+        // 上带 = 便签左侧（600 宽，整幅高）；带下那条 = 便签下方（236 × 521，真机量级）。
+        // V95：19 个 4 项小格 —— 上带 3 列各装 6 格后还剩 1 个 ⇒ 溢出 ⇒ 分流到带下
+        // （band_b 236 宽竖放一格绰绰有余；大格样本在顺序填充 + 夹宽代价下无解，见 V95 提交说明）。
+        let items = vec![4usize; 19];
         let band_a = SlotRect {
             x: ARRANGE_MARGIN,
             y: ARRANGE_MARGIN,
