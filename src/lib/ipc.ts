@@ -379,6 +379,17 @@ export const ipc = {
     call<ShellNewTemplate[]>('shell_new_templates'),
 
   /**
+   * 未归类竖条的「排序方式」（V99，自绘菜单「排序方式 ›」）。
+   *
+   * 取值：`''`（默认）/ `name` / `size` / `type` / `mtime`，可带 `-desc` 后缀。
+   * 后端落 `grid_meta.loose_sort`，`grid_loose_list` 每次扫描都按它排 —— 持久化，
+   * 重启仍生效（与原生桌面排序行为一致）。
+   */
+  looseSortGet: (): Promise<string> => call<string>('loose_sort_get'),
+  /** 设置排序方式（同键再点一次切倒序由前端拼 `-desc`），返回归一化后的值 */
+  looseSortSet: (key: string): Promise<string> => call<string>('loose_sort_set', { key }),
+
+  /**
    * 打开一个系统级目标（V97，自绘菜单专用）：
    *
    * - `display`：Windows 设置 → 系统 → 显示（`ms-settings:display`，对齐原生菜单的

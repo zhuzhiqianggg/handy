@@ -23,7 +23,7 @@
 - ★★ **渲染几何 = 引擎几何**（V59/V70）：`height: box.height`、**不叠 `max-height`**（装不下交盒内滚动）；**常量差 1px 就少一行/列**；根画布永远 `overflow-hidden`、菜单必须 `fixed`。拖动链路（V57）：移动永远可用，锁只收编辑。
 - ★★ **菜单不许有两个同名项**（V89）：注入前先摘原生同名（`CNewMenu` 无 view 必 E_FAIL）；摘除**倒序**、判据只认**开头**。
 - ★★ **`run_on_main_thread` 只投递、不等结果**（V89）：弹菜单必配 `mpsc` 等回传（否则 Promise 早 resolve ⇒ 竞速判据必误判）。
-- ★★ **「隐藏改名框」链路已删（V96）**：V92 取消→V93 判据→V94 确认→V95 还前台，七轮不收敛（ShellNew **要求隐藏视图在前台**，而能打字的改名框必然抢前台 ⇒ 互斥）。**别再往回加**：`LVM_CANCELEDITLABEL`/`VK_RETURN`/`EDIT_SEEN_TICK`/`EDIT_CANCEL_STAGE`/`grid_focus_desktop`（守卫已加反向断言）。
+- ★★ **「隐藏改名框」链路已删（V96）**：V92–V95 七轮不收敛——ShellNew 要隐藏视图在前台，改名框必抢前台 ⇒ 互斥。**别再往回加**：`LVM_CANCELEDITLABEL`/`VK_RETURN`/`EDIT_*`/`grid_focus_desktop`（守卫有反向断言）。
 - ★★ **条目改名框必须全选默认名**（V96）：`autoFocus` 只聚焦不选中 ⇒ 打字变**追加**（实测「新建文件夹 (20)123」）。两个 input 都要 `onFocus={e => e.currentTarget.select()}`。
 - **WinEvent `hwnd` 语义不许赌**（V82）：`MENUPOPUPSTART` 给的是菜单窗 `#32768` 自己（判据换 owner + 看压谁，留轮询兜底）。
 - **复刻菜单 = 回退 + 条目菜单**（V58/V90）：`CMF_NORMAL|CMF_EXPLORE`（**不传 `CMF_CANRENAME`**）；`IContextMenu2/3` 消息**必须转发**。**层级**：盒子(auto)<参考线 35<工作台 38<面板 40<菜单 50<预览 95。改模式开关前 grep 调用点。
@@ -36,7 +36,8 @@
   - ★ 摆放序 = `(面积, 内容量, 高, 宽)` 降序（**内容量分量不可省**）。
   - ★★ **V95 分列 = 顺序填充**（用户原话「从右到左 从上到下 满了才换列」；LPT 最矮列废弃）：第一列自上往下塞满才换列；**物理装不下（有列越过 cap）退回 LPT 均衡**（顺序填充尾列爆炸，MIN_BOX_H 夹不动）。评分 `(-k, 自然宽优先, tallest, used_w)`：列数最少赢；**同 k 没夹宽的赢** —— 夹宽让格子变高，纵向判据下会反杀。V94 的 `(tallest, used_w)` 与 V84 `min(横,纵)` 都作废。
   - ★★ **带下分流（V94/V95）**：whole `overflowed||squeezed` 才进拆分；拆分候选 pa/pb 任一溢出跳过；收益「不更差就换」（压扁时底沿恒=上限）。
-  - ★★ **V97 空白右键 = 前端自绘「Win11 同款」菜单**（`bgMenu` + `BgMenuRow`）：新式菜单**只能由 Explorer 自己渲染**（第三方弹出来必是经典样式）⇒ 自绘外壳逐项接真行为：查看›自动整理/显示桌面图标（勾选=contentHidden）、刷新、新建›（`desktop_create_new` 复用 `create_new_item` 同一落盘路径）、显示设置/个性化/终端（`shell_open_system`：explorer.exe 开 ms-settings；终端 wt 退回 powershell）、**显示更多选项 = 经典背景菜单**；Shift 右键直达经典扩展。刻意不做摆设项（排序方式/撤消/下一个背景）。
+  - ★★ **V97 空白右键 = 前端自绘「Win11 同款」菜单**（`bgMenu` + `BgMenuRow`）：新式菜单**只能由 Explorer 自己渲染**（第三方弹出来必是经典样式）⇒ 自绘外壳逐项接真行为：查看›自动整理/显示桌面图标（勾选=contentHidden）、刷新、新建›、显示设置/个性化/终端（`shell_open_system`：explorer.exe 开 ms-settings；终端 wt 退回 powershell）、**显示更多选项 = 经典背景菜单**；Shift 右键直达经典扩展。刻意不做摆设项（撤消/下一个背景）。
+  - ★★ **V98 新建› = ShellNew 全量**：枚举 `HKCR\<ext>\ShellNew`（含 ProgID 兜底、.lnk 跳过），显示名 `SHGFI_TYPENAME`，落地 Data/FileName/Command/NullFile（`create_new_from_shell_new`）；懒加载首次展开才拉。**不存在路径取图标必须 `SHGFI_USEFILEATTRIBUTES`**（`shell_icon_handle` 已加分支）。**根画布 `select-none` 会压没 input 的选中高亮** ⇒ 改名框必须显式 `select-text` + `selection:` 色（V98）。
 - ★★ **V85 落位右锚定 + 列内撑满**：列**从右往左**排（第一列贴便签/工作台侧）；窄格**撑到列宽**并按新宽重算高（只撑宽、**不夹窄**）。`content_plan_in` ④ 用**右沿递减**（摆完一列 `right = x - GAP`）——写成「x = 右沿−总宽」= 块**左**端 ⇒ 左溢。
 - ★ **幂等是算出来的，不许几何去兜**（V69）：摆放序是内容的纯函数 ⇒ 尺寸没变 ⇒ 落位一字不差。
 - ★★ **V70**：内部几何两边逐像素相等（差 1px ⇒ 提前出滚动条 ⇒ 少一列）；高度上限跟 zone_h；**满了不许再建**（`probe_room_for_another_box` 真插真排看 overflowed，出错放行）。
@@ -48,8 +49,8 @@
 - **V75–V80** 桌面日历；V80：`jumpTo` **夹 1900–2100 且带 selected**、写盘走 `patchSettings`（禁 `writeSettings`）。
 - **V81/V82** 菜单期间还桌面 ⇒ **V89 起停用**（`HANDOFF_DISABLED`，`is_active()` 恒 false）。
 - **V83–V85** 几何不持久化+**只算主屏**（`sync_overlay_bounds()`，变则广播 `grid:bounds-changed`；副屏全原生）；落位**右锚定**+**列内撑满**（§3）。
-- **V87/V88** 背景菜单自弹（`CreateViewObject`；坑：`FOLDERID_Desktop`+`BindToObject` 必 `E_INVALIDARG`）；原生「新建」需 `IShellView` ⇒ 自注入；改名后本地先改 `items`/`loose` 再 `refresh`。
-- **V89–V97 桌面右键：八轮迭代，V97 定稿「自绘 Win11 同款菜单」**。V89 抢空白右键⇒菜单残缺；V90/V91 试转发⇒双菜单 + `SetForegroundWindow` 让 `CNewMenu` 找不到 view⇒新建建不出；V92 改**穿透**（handoff 停用⇒不翻白，补偿：目录签名广播）；V93–V95 围着「隐藏改名框」打转；V96 收回自有菜单（穿透在隐藏视图下本就空转）；V97 用户对照截图嫌经典样式丑 ⇒ 自绘（见 §3）。
+- **V87/V88** 背景菜单自弹（`CreateViewObject`；`FOLDERID_Desktop`+`BindToObject` 必 `E_INVALIDARG`）；原生「新建」需 `IShellView` ⇒ 自注入。
+- **V89–V96 桌面右键七轮**：抢右键⇒菜单残缺；转发⇒双菜单 + `CNewMenu` 找不到 view；穿透⇒「隐藏改名框」死结；V96 收回自有菜单（细节见 PROJECT_STATUS / CONVENTIONS）。**V97 定稿自绘**（见 §3）。
 - **V93–V96 新建链路**（V96 收敛）：前端「改名/新建安静期」保留（重排/刷新挂起、重排优先补跑），`grid:desktop-changed` 走增量 `onDesktopChanged`（唯一新增 → `beginItemRename`）；判据/确认/还前台三块已删（见 §2）。守卫 shell-menu 123、变异 89。
 - ★★ **B 方案（用户 10-10 拍板，未做）：重构为「不接管原生桌面」**，挂件保留为桌面浮窗。调研（LucidDesk/DeskBox/openFences/DesktopIconMover）**无一接管桌面**：不自绘，或用 `LVM_SETITEMPOSITION` 遥控原生图标（lParam 装坐标，**跨进程无需注入**）。① 不隐藏 `SysListView32`，关「自动排列/对齐网格」后 SETITEMPOSITION 摆位；② 格子改装饰底板+标题栏、内容区穿透 ⇒ `GridOverlay.tsx` 大瘦身。
 - ⚠️ agent 会话启动不了本 GUI ⇒ 打包 + 装机即止，**不代启动**。

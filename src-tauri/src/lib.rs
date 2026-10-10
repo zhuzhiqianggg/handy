@@ -223,6 +223,9 @@ pub fn run() {
             // V97：自绘桌面菜单的「新建」直接落盘 + 系统入口（显示设置/个性化/终端）
             commands::grid::desktop_create_new,
             commands::grid::shell_open_system,
+            // V99：自绘菜单「排序方式」（未归类竖条持久化排序）
+            commands::grid::loose_sort_get,
+            commands::grid::loose_sort_set,
             // V98：ShellNew「新建」模板完整列表（Excel/DOCX/ZIP 等）
             commands::grid::shell_new_templates,
             commands::grid::grid_reveal_path,

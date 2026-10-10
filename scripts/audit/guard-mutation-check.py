@@ -662,6 +662,31 @@ MUTATIONS: dict[str, _M] = {
     # 另一套守卫，结果是「改了源码守卫仍然全绿」的假通过（自检会直接点名它没判别力）。
     "scripts/regression/test-shell-menu.mjs": [
         (
+            "V99 枚举数据源退回纯注册表全量扫（与原生「新建」列表对不上）",
+            "src-tauri/src/platform/shell_menu.rs",
+            "    let mut exts = read_discardable_shell_new_classes();",
+            "    let mut exts: Vec<String> = Vec::new();",
+            "用户 10-10 对照原生截图报「新建列表缺一半、还混进 CONTACT/库」。原生菜单的"
+            "真实数据源是 Explorer 自己维护的 Discardable\\ShellNew\\Classes 缓存清单，"
+            "纯注册表全量枚举会混入原生不显示的项、也配不上原生的过滤规则",
+        ),
+        (
+            "V99 Win11 内置「文本文档/BMP 图像」被丢（原生有、注册表已无 ShellNew）",
+            "src-tauri/src/platform/shell_menu.rs",
+            '    for builtin in [".bmp", ".txt"] {',
+            "    for builtin in [\".nomatch\"] {",
+            "本机注册表 .txt/.bmp 的 ShellNew 已被清掉但原生菜单照样显示这两项（Win11 "
+            "内置、建空文件）。丢了它们 = 菜单永远比原生少两行",
+        ),
+        (
+            "V99 排序方式不做真（点了没反应，又成摆设项）",
+            "src-tauri/src/commands/grid.rs",
+            "    apply_loose_sort(&mut out, &sort);",
+            "    let _ = &sort;",
+            "用户 10-10 要求菜单跟原生一样，「排序方式」必须真排未归类竖条并持久化，"
+            "否则就是 V97 明确砍掉的「点了没反应的摆设项」",
+        ),
+        (
             "V98 ShellNew 模板落地被绕开（新建子菜单只剩文件夹，Excel 等全消失）",
             "src-tauri/src/commands/grid.rs",
             "crate::platform::shell_menu::create_new_from_shell_new(&kind)",

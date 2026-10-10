@@ -3799,6 +3799,9 @@ pub async fn desktop_create_new(
     {
         let created = if kind == "folder" || kind == "text" {
             crate::platform::shell_menu::create_new_item(&kind)
+        } else if kind == "shortcut" {
+            // V99：自绘菜单「新建 › 快捷方式」—— 空 .lnk（原生是向导，无公开入口代开）
+            crate::platform::shell_menu::create_new_shortcut()
         } else if kind.starts_with('.') && kind.len() > 1 && !kind.contains('\\') {
             crate::platform::shell_menu::create_new_from_shell_new(&kind)
         } else {
@@ -5775,12 +5778,94 @@ fn loose_desktop_items(conn: &Connection) -> Result<Vec<LooseEntry>, String> {
             });
         }
     }
-    out.sort_by(|a, b| {
-        loose_rank(a)
-            .cmp(&loose_rank(b))
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-    });
+    // V99：按用户选的「排序方式」排（默认序 = 系统入口 → 快捷方式 → 文件夹 → 按名）
+    let sort = meta_get_string(conn, META_KEY_LOOSE_SORT).unwrap_or_default();
+    apply_loose_sort(&mut out, &sort);
     Ok(out)
+}
+
+/// `grid_meta` 中「未归类竖条排序方式」的键名（V99，自绘菜单「排序方式」子菜单）。
+///
+/// 取值：`""`（默认 = 系统入口→快捷方式→文件夹→按名）/ `name` / `size` / `type` /
+/// `mtime`，可带 `-desc` 后缀表示倒序。**只影响未归类竖条**（桌面散落文件，最接近
+/// 原生「桌面图标排序」的对应物）；格子内条目是用户手动归类的容器，排序不越界去动它。
+const META_KEY_LOOSE_SORT: &str = "loose_sort";
+
+/// 排序键的合法集合（`loose_sort_set` 的校验白名单）。
+const LOOSE_SORT_KEYS: [&str; 8] = [
+    "name", "name-desc", "size", "size-desc", "type", "type-desc", "mtime", "mtime-desc",
+];
+
+/// 读一个 grid_meta 字符串键（缺键返回 `None`）。
+fn meta_get_string(conn: &Connection, key: &str) -> Option<String> {
+    conn.query_row("SELECT value FROM grid_meta WHERE key = ?1", [key], |row| {
+        row.get::<_, String>(0)
+    })
+    .ok()
+}
+
+/// 按「排序方式」重排竖条条目（V99）。系统入口永远钉在最前（虚拟条目没有文件元数据）。
+fn apply_loose_sort(items: &mut Vec<LooseEntry>, sort: &str) {
+    if sort.is_empty() {
+        // 默认序 = V42 以来的既有口径（系统 → 快捷方式 → 文件夹 → 按名）
+        items.sort_by(|a, b| {
+            loose_rank(a)
+                .cmp(&loose_rank(b))
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        });
+        return;
+    }
+    let (key, desc) = match sort.strip_suffix("-desc") {
+        Some(k) => (k, true),
+        None => (sort, false),
+    };
+    // 系统入口（此电脑/回收站/用户的文件）钉在最前，不参与键排序
+    let system: Vec<LooseEntry> = items
+        .iter()
+        .filter(|e| e.is_system)
+        .cloned()
+        .collect();
+    items.retain(|e| !e.is_system);
+    // 排序键值：size/mtime 现场取文件元数据（取不到 = 0）；type 用扩展名（目录排最前）
+    let key_of = |entry: &LooseEntry| -> (u64, i64, String, String) {
+        let meta = std::fs::metadata(&entry.path).ok();
+        let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+        let mtime = meta
+            .as_ref()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let ext = if entry.is_dir {
+            String::new()
+        } else {
+            std::path::Path::new(&entry.path)
+                .extension()
+                .map(|e| e.to_string_lossy().to_lowercase())
+                .unwrap_or_default()
+        };
+        (size, mtime, ext, entry.name.to_lowercase())
+    };
+    items.sort_by(|a, b| {
+        let ka = key_of(a);
+        let kb = key_of(b);
+        let ord = match key {
+            "size" => ka.0.cmp(&kb.0),
+            "mtime" => ka.1.cmp(&kb.1),
+            "type" => ka.2.cmp(&kb.2),
+            // "name" 及未知取值都回落按名
+            _ => ka.3.cmp(&kb.3),
+        };
+        let ord = ord.then_with(|| ka.3.cmp(&kb.3)); // 同键按名稳定
+        if desc {
+            ord.reverse()
+        } else {
+            ord
+        }
+    });
+    let mut sorted = system;
+    sorted.append(items);
+    *items = sorted;
 }
 
 /// 竖条里的展示次序：系统入口 → 快捷方式 → 文件夹 → 其他文件。
@@ -5827,6 +5912,30 @@ pub async fn grid_loose_list(app: AppHandle) -> Result<LooseArea, String> {
         icon_size: icon,
         items,
     })
+}
+
+/// 当前「排序方式」（V99，自绘菜单「排序方式」子菜单要用它画勾选态）。
+#[tauri::command]
+pub async fn loose_sort_get(app: AppHandle) -> Result<String, String> {
+    let conn = connect(&app)?;
+    Ok(meta_get_string(&conn, META_KEY_LOOSE_SORT).unwrap_or_default())
+}
+
+/// 设置「排序方式」（V99）。合法取值见 [`LOOSE_SORT_KEYS`]；落库后前端拉一次
+/// `grid_loose_list` 即可看到新顺序（持久化 —— 重启后仍生效，与原生桌面排序一致）。
+#[tauri::command]
+pub async fn loose_sort_set(app: AppHandle, key: String) -> Result<String, String> {
+    if !LOOSE_SORT_KEYS.contains(&key.as_str()) {
+        return Err(format!("不支持的排序方式：{key}"));
+    }
+    let conn = connect(&app)?;
+    conn.execute(
+        "INSERT INTO grid_meta (key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![META_KEY_LOOSE_SORT, key],
+    )
+    .map_err(|err| format!("保存排序方式失败：{err}"))?;
+    Ok(key)
 }
 
 /// 一次「整理桌面」对布局做了什么（数值回报给前端，用户能看出工具干了什么）。

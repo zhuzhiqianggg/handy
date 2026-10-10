@@ -71,7 +71,7 @@ use windows::Win32::Foundation::{
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::Registry::{
     RegCloseKey, RegEnumKeyExW, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CLASSES_ROOT,
-    KEY_READ, REG_BINARY, REG_EXPAND_SZ, REG_SZ, REG_VALUE_TYPE,
+    HKEY_CURRENT_USER, KEY_READ, REG_BINARY, REG_EXPAND_SZ, REG_MULTI_SZ, REG_SZ, REG_VALUE_TYPE,
 };
 use windows::Win32::UI::Shell::{
     IContextMenu, IContextMenu2, IContextMenu3, IShellFolder, IShellItem,
@@ -741,19 +741,66 @@ unsafe fn read_shell_new_values(key: HKEY) -> ShellNewValues {
     v
 }
 
-/// `HKCR\<ext>`（或其默认 ProgID 下）的 `ShellNew` 键；两处都没有返回 `None`。
+/// `HKCR\<ext>` 一系（或其顶层 ProgID 下）的 `ShellNew` 键；都找不到返回 `None`。
 ///
-/// Explorer 两处都认：Office 一类写在 `.ext` 下，个别类型写在 ProgID 下。
+/// V99 实测（本机注册表逐键取证）Explorer 认**四种**位置，V98 只查了 ①③，
+/// 于是 WPS 全家（登记在 ②）整列消失——用户报「我各种新文件 excel 等各种都没有了哇」：
+/// ① `HKCR\.ext\ShellNew`（直接挂在扩展名下：.contact / .zip / WPS 的 `.pdfwpsshellnew`）
+/// ② `HKCR\.ext\<ProgID>\ShellNew`（挂在**扩展名键的 ProgID 子键**下：.docx\WPS.Docx.6 …
+///    —— V99 补的就是这处，Office/WPS 的 doc/docx/ppt/pptx/xls/xlsx/rtf 全在这）
+/// ③ `HKCR\<ProgID>\ShellNew`（挂在顶层 ProgID 键下：个别类型）
+/// ④ V99 补充的兜底：扩展名键**任意**子键下的 `ShellNew`（如 .zip\CompressedFolder\ShellNew，
+///    与 ① 并存时 ① 优先）。
 unsafe fn open_shell_new_key(ext: &str) -> Option<HKEY> {
     let hkcr = reg_open_read(HKEY_CLASSES_ROOT, "")?;
     let result = (|| {
         let ext_key = reg_open_read(hkcr, ext)?;
         let direct = reg_open_read(ext_key, "ShellNew");
-        let progid_default = reg_string(ext_key, "");
-        let _ = RegCloseKey(ext_key);
-        if let Some(key) = direct {
-            return Some(key);
+        if direct.is_some() {
+            let _ = RegCloseKey(ext_key);
+            return direct;
         }
+        // ②/④：扩展名键的子键里找 ShellNew（默认 ProgID 优先，其后按键枚举序）
+        let progid_default = reg_string(ext_key, "");
+        let mut subkeys: Vec<String> = Vec::new();
+        if let Some(progid) = &progid_default {
+            subkeys.push(progid.clone());
+        }
+        let mut index = 0u32;
+        loop {
+            let mut buf = [0u16; 128];
+            let mut len = buf.len() as u32;
+            let err = RegEnumKeyExW(
+                ext_key,
+                index,
+                PWSTR(buf.as_mut_ptr()),
+                &mut len,
+                None,
+                PWSTR::null(),
+                None,
+                None,
+            );
+            index += 1;
+            if err == ERROR_NO_MORE_ITEMS {
+                break;
+            }
+            if err != ERROR_SUCCESS {
+                continue;
+            }
+            let sub = String::from_utf16_lossy(&buf[..len as usize]);
+            if !subkeys.contains(&sub) {
+                subkeys.push(sub);
+            }
+        }
+        for sub in &subkeys {
+            // RegOpenKeyExW 接受嵌套路径：`ext\WPS.Docx.6\ShellNew` 一次开到位
+            if let Some(sn) = reg_open_read(ext_key, &format!("{sub}\\ShellNew")) {
+                let _ = RegCloseKey(ext_key);
+                return Some(sn);
+            }
+        }
+        let _ = RegCloseKey(ext_key);
+        // ③：顶层 ProgID 键下的 ShellNew
         let progid = progid_default?;
         let progid_key = reg_open_read(hkcr, &progid)?;
         let sn = reg_open_read(progid_key, "ShellNew");
@@ -796,16 +843,136 @@ fn shell_typename(ext: &str) -> Option<String> {
     }
 }
 
-/// 枚举注册表里所有带 `ShellNew` 的扩展名（= 原生菜单「新建」子菜单的完整列表）。
+/// 枚举「新建」模板列表 ＝ 原生菜单「新建」子菜单的完整列表（V99 重写）。
 ///
-/// `HKCR` 根键本身几万个键名，但 `RegEnumKeyExW` 逐个枚举 + 只对 `.` 开头的开键，
-/// 实测量级毫秒级；命令层直接同步调用即可。
+/// # 数据源（V99 取证结论，V98 的纯注册表枚举和原生对不上）
+///
+/// Explorer 实际按 **`HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\
+/// Discardable\PostSetup\ShellNew` 的 `Classes` 多字符串**渲染现代菜单（本机实测值：
+/// `.doc .docx .lnk .pdfwpsshellnew .ppt .pptx .pptxwpsaicreateshellnew .rtf .xls
+/// .xlsx .zip .library-ms Folder`）—— 这是它自己维护的缓存，已经替我们滤掉了
+/// `.contact` 之类「注册了但原生不显示」的项。清单缺失/为空时退回全量枚举兜底。
+///
+/// 与原生菜单的其余差异规则（全部对照用户截图 1:1 校准）：
+/// - `Folder` / `.lnk`：前端硬编码「文件夹」「快捷方式」两行（快捷方式是向导不是模板）；
+/// - `.library-ms`（库）：在缓存清单里但 Win11 现代菜单不显示 → 过滤；
+/// - **文本文档 / BMP 图像**：本机注册表里 `.txt`/`.bmp` 已无任何 ShellNew（WPS 接管后
+///   被清掉），但原生菜单仍然显示 —— Win11 对这两类是内置项（建的是空文件）→ 硬编码；
+/// - 排序 = 按扩展名字母序（原生菜单的顺序就是这个；V98 的「按类型名去重」会拿先
+///   枚举到的同类名扩展把 `.txt` 顶掉，已废）。
 pub fn list_shell_new_templates() -> Vec<ShellNewTemplate> {
-    let mut out = Vec::new();
+    // ① 拿候选扩展名：优先 Explorer 的 Classes 缓存，缺了退回全量枚举
+    let mut exts = read_discardable_shell_new_classes();
+    if exts.is_empty() {
+        exts = enumerate_hkcr_shell_new_exts();
+    }
+    // ② 与原生一致的过滤
+    exts.retain(|ext| ext != ".lnk" && ext != ".library-ms");
+    // ③ Win11 内置两项：本机注册表没有 ShellNew，原生菜单却有（建空文件）
+    for builtin in [".bmp", ".txt"] {
+        if !exts.iter().any(|e| e.eq_ignore_ascii_case(builtin)) {
+            exts.push(builtin.to_string());
+        }
+    }
+    exts.sort_by_key(|ext| ext.to_lowercase());
+
+    // ④ 逐项解析显示名（SHGFI_TYPENAME，与原生菜单标签同源）
+    let mut out: Vec<ShellNewTemplate> = Vec::new();
     let mut seen_names = std::collections::HashSet::new();
+    for ext in &exts {
+        // 非 Win11 内置的必须有真实 ShellNew 键；空壳键（如 VMware 那批）原生也不显示
+        if ext != ".bmp" && ext != ".txt" {
+            let has_values = unsafe {
+                open_shell_new_key(ext).is_some_and(|key| {
+                    let v = read_shell_new_values(key);
+                    let _ = RegCloseKey(key);
+                    v.null_file || v.data.is_some() || v.file_name.is_some() || v.command.is_some()
+                })
+            };
+            if !has_values {
+                continue;
+            }
+        }
+        let Some(typename) = shell_typename(ext) else {
+            continue;
+        };
+        // 同类型名只留第一个（扩展名已按字母序 ⇒ 与原生「谁显示谁不显示」一致）
+        if !seen_names.insert(typename.clone()) {
+            continue;
+        }
+        out.push(ShellNewTemplate {
+            ext: ext.clone(),
+            name: typename,
+            icon_path: format!("C:\\shellnew-probe{ext}"),
+        });
+    }
+    out
+}
+
+/// 读 Explorer 的 ShellNew 缓存清单（`Discardable\PostSetup\ShellNew\Classes`，
+/// `REG_MULTI_SZ`）。缺失 / 读失败返回空 Vec（调用方退回全量枚举）。
+fn read_discardable_shell_new_classes() -> Vec<String> {
+    use windows::core::PCWSTR;
+    let path = "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Discardable\\PostSetup\\ShellNew";
+    unsafe {
+        let Some(root) = reg_open_read(HKEY_CURRENT_USER, path) else {
+            return Vec::new();
+        };
+        let name: Vec<u16> = "Classes".encode_utf16().chain(std::iter::once(0)).collect();
+        let mut ty = REG_VALUE_TYPE::default();
+        let mut cb = 0u32;
+        let ok = RegQueryValueExW(
+            root,
+            PCWSTR(name.as_ptr()),
+            None,
+            Some(&mut ty),
+            None,
+            Some(&mut cb),
+        );
+        if ok != ERROR_SUCCESS || ty != REG_MULTI_SZ || cb < 2 {
+            let _ = RegCloseKey(root);
+            return Vec::new();
+        }
+        let mut buf = vec![0u8; cb as usize];
+        let ok = RegQueryValueExW(
+            root,
+            PCWSTR(name.as_ptr()),
+            None,
+            None,
+            Some(buf.as_mut_ptr()),
+            Some(&mut cb),
+        );
+        let _ = RegCloseKey(root);
+        if ok != ERROR_SUCCESS {
+            return Vec::new();
+        }
+        // REG_MULTI_SZ：若干 UTF-16LE 字符串，各以 NUL 结尾，末尾双 NUL
+        let units: Vec<u16> = buf
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        let mut out = Vec::new();
+        let mut cur = Vec::new();
+        for u in units {
+            if u == 0 {
+                if cur.is_empty() {
+                    break; // 双 NUL = 列表结束
+                }
+                out.push(String::from_utf16_lossy(&cur));
+                cur.clear();
+            } else {
+                cur.push(u);
+            }
+        }
+        out
+    }
+}
+
+/// 兜底：全量枚举 HKCR 里带 `ShellNew` 的扩展名（缓存清单缺失时用）。
+fn enumerate_hkcr_shell_new_exts() -> Vec<String> {
+    let mut out = Vec::new();
     unsafe {
         let Some(hkcr) = reg_open_read(HKEY_CLASSES_ROOT, "") else {
-            crate::logging::write_line("grid", "ShellNew 枚举失败：打不开 HKCR");
             return out;
         };
         let mut index = 0u32;
@@ -830,40 +997,19 @@ pub fn list_shell_new_templates() -> Vec<ShellNewTemplate> {
                 continue;
             }
             let name = String::from_utf16_lossy(&buf[..len as usize]);
-            // 只认形如 `.docx` 的扩展名键；`.lnk` 的「快捷方式」是向导不是模板，跳过
             if !name.starts_with('.') || name.len() < 2 || name == ".lnk" {
                 continue;
             }
-            let Some(values_key) = open_shell_new_key(&name) else {
-                continue;
-            };
-            let values = read_shell_new_values(values_key);
-            let _ = RegCloseKey(values_key);
-            // 四种取值一个都没有 ⇒ ShellNew 是空壳，Explorer 也不显示
-            if !values.null_file
-                && values.data.is_none()
-                && values.file_name.is_none()
-                && values.command.is_none()
-            {
-                continue;
-            }
-            let Some(typename) = shell_typename(&name) else {
-                continue;
-            };
-            // 同名类型去重（.htm/.html 都是「HTML 文档」时只留先到的）
-            if !seen_names.insert(typename.clone()) {
-                continue;
-            }
-            out.push(ShellNewTemplate {
-                ext: name,
-                name: typename,
-                icon_path: String::new(), // 下面统一填
+            let has_values = open_shell_new_key(&name).is_some_and(|key| {
+                let v = read_shell_new_values(key);
+                let _ = RegCloseKey(key);
+                v.null_file || v.data.is_some() || v.file_name.is_some() || v.command.is_some()
             });
+            if has_values {
+                out.push(name);
+            }
         }
         let _ = RegCloseKey(hkcr);
-    }
-    for t in out.iter_mut() {
-        t.icon_path = format!("C:\\shellnew-probe{}", t.ext);
     }
     out
 }
@@ -924,9 +1070,20 @@ pub fn create_new_from_shell_new(ext: &str) -> Option<CreatedItem> {
             v
         })
     };
-    let Some(values) = values else {
-        crate::logging::write_line("grid", &format!("ShellNew 新建失败：{ext} 没有 ShellNew 键"));
-        return None;
+    // V99：Win11 内置两项（.txt/.bmp）在本机注册表里已无 ShellNew 键，但原生菜单照样
+    // 显示、点了照样建**空文件** —— 与 NullFile 语义一致，兜底放行。
+    let builtin_empty = ext.eq_ignore_ascii_case(".txt") || ext.eq_ignore_ascii_case(".bmp");
+    let values = match values {
+        Some(v)
+            if v.null_file || v.data.is_some() || v.file_name.is_some() || v.command.is_some() =>
+        {
+            v
+        }
+        _ if builtin_empty => ShellNewValues::default(),
+        _ => {
+            crate::logging::write_line("grid", &format!("ShellNew 新建失败：{ext} 没有 ShellNew 键"));
+            return None;
+        }
     };
     let typename = shell_typename(ext)
         .unwrap_or_else(|| ext.trim_start_matches('.').to_ascii_uppercase());
@@ -952,6 +1109,60 @@ pub fn create_new_from_shell_new(ext: &str) -> Option<CreatedItem> {
         return None;
     }
     crate::logging::write_line("grid", &format!("ShellNew 新建成功：{path:?}（{ext}）"));
+    Some(CreatedItem {
+        path: path.to_string_lossy().to_string(),
+        name,
+    })
+}
+
+/// 在桌面目录新建一个**空快捷方式**（V99，自绘菜单「新建 › 快捷方式」）。
+///
+/// 原生这里开的是「创建快捷方式」向导 —— 那是 Explorer 内部的对话框流程，没有公开
+/// 的 COM/RPC 入口可以代开。我们落地一个**没有目标**的空 `.lnk`（IShellLinkW 直接
+/// Save，`ShellExecute` 打开时只会提示目标无效，右键「属性」里可以填目标），随后
+/// 前端照常「增量认领 + 原地改名」——与原生「建完进改名」的行为对齐。
+pub fn create_new_shortcut() -> Option<CreatedItem> {
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows::core::PCWSTR;
+    use windows::Win32::System::Com::{CoCreateInstance, IPersistFile, CLSCTX_INPROC_SERVER};
+    use windows::Win32::UI::Shell::{ShellLink, IShellLinkW};
+
+    let Some(root) = desktop_user_root() else {
+        crate::logging::write_line("grid", "快捷方式新建失败：定位不到桌面用户目录");
+        return None;
+    };
+    let name = unique_new_name(&root, "新建快捷方式", ".lnk");
+    let path = root.join(&name);
+
+    unsafe {
+        // 命令线程多半没初始化过 COM；RPC_E_CHANGED_MODE（已按别的方式初始化）也照样继续
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let link: IShellLinkW = match CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER) {
+            Ok(link) => link,
+            Err(err) => {
+                crate::logging::write_line("grid", &format!("快捷方式新建失败：CoCreateInstance {err}"));
+                return None;
+            }
+        };
+        let persist: IPersistFile = match link.cast() {
+            Ok(p) => p,
+            Err(err) => {
+                crate::logging::write_line("grid", &format!("快捷方式新建失败：cast IPersistFile {err}"));
+                return None;
+            }
+        };
+        let wide: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        if let Err(err) = persist.Save(PCWSTR(wide.as_ptr()), true) {
+            crate::logging::write_line("grid", &format!("快捷方式新建失败：Save {err}"));
+            return None;
+        }
+    }
+    crate::logging::write_line("grid", &format!("快捷方式新建成功：{path:?}"));
     Some(CreatedItem {
         path: path.to_string_lossy().to_string(),
         name,

@@ -252,6 +252,50 @@ ok('Ctrl + 右键才弹 Handy 自己的菜单（Shift 归系统扩展动词）',
     overlaySrc,
   ));
 
+// —— V99：新建列表与原生 1:1（Discardable 缓存 + 内置项）+ 排序方式 + 快捷方式 ——
+ok('V99 枚举以 Explorer 的 Discardable\ShellNew\Classes 缓存为第一数据源',
+  /fn read_discardable_shell_new_classes\(\)/.test(shellMenuSrc) &&
+    /let mut exts = read_discardable_shell_new_classes\(\);/.test(shellMenuSrc));
+ok('V99 缓存缺失退回全量枚举兜底',
+  /fn enumerate_hkcr_shell_new_exts\(\)/.test(shellMenuSrc) &&
+    /enumerate_hkcr_shell_new_exts\(\)/.test(shellMenuSrc));
+ok('V99 open_shell_new_key 认 .ext\\<ProgID>\\ShellNew 位置（WPS 全家登记处）',
+  /format!\("\{sub\}\\\\ShellNew"\)/.test(shellMenuSrc));
+ok('V99 Win11 内置两项：.bmp/.txt 硬编码（本机注册表已无其 ShellNew）',
+  /for builtin in \["\.bmp", "\.txt"\]/.test(shellMenuSrc) &&
+    /let builtin_empty = ext\.eq_ignore_ascii_case\("\.txt"\) \|\| ext\.eq_ignore_ascii_case\("\.bmp"\)/.test(shellMenuSrc));
+ok('V99 .library-ms 过滤（缓存里有但 Win11 现代菜单不显示）',
+  /ext != "\.library-ms"/.test(shellMenuSrc));
+ok('V99 排序按扩展名字母序（废掉按类型名去重顶掉 .txt 的老问题）',
+  /exts\.sort_by_key\(\|ext\| ext\.to_lowercase\(\)\)/.test(shellMenuSrc));
+ok('V99 快捷方式：create_new_shortcut 空 .lnk 落地（IShellLinkW + IPersistFile::Save）',
+  /pub fn create_new_shortcut\(\) -> Option<CreatedItem>/.test(shellMenuSrc) &&
+    /IPersistFile/.test(shellMenuSrc) &&
+    /persist\.Save\(PCWSTR\(wide\.as_ptr\(\)\), true\)/.test(shellMenuSrc));
+ok('V99 desktop_create_new 路由 shortcut',
+  /kind == "shortcut"/.test(rustCmdSrc) &&
+    /shell_menu::create_new_shortcut\(\)/.test(rustCmdSrc));
+ok('V99 loose_sort 持久化键 + 两个命令 + 注册',
+  /const META_KEY_LOOSE_SORT: &str = "loose_sort";/.test(rustCmdSrc) &&
+    /pub async fn loose_sort_get\(/.test(rustCmdSrc) &&
+    /pub async fn loose_sort_set\(/.test(rustCmdSrc) &&
+    /commands::grid::loose_sort_get,/.test(libSrc) &&
+    /commands::grid::loose_sort_set,/.test(libSrc));
+ok('V99 grid_loose_list 按排序偏好重排（默认序保留 V42 口径）',
+  /apply_loose_sort\(&mut out, &sort\)/.test(rustCmdSrc));
+ok('V99 前端「排序方式」子菜单：looseSortSet 后 refreshLoose',
+  /label="排序方式"/.test(overlaySrc) &&
+    /ipc\s*\.\s*looseSortSet\(next\)/.test(overlaySrc) &&
+    /\.then\(\(\) => refreshLoose\(\)\)/.test(overlaySrc));
+ok('V99 ipc.ts 暴露 looseSortGet/looseSortSet',
+  /looseSortGet: \(\): Promise<string>/.test(ipcSrc) &&
+    /looseSortSet: \(key: string\)/.test(ipcSrc));
+ok('V99 前端「新建 ›」含快捷方式行（对齐原生第二项）',
+  /label="快捷方式"/.test(overlaySrc) &&
+    /createNewItemDirect\('shortcut'\)/.test(overlaySrc));
+ok('V99 终端项文案对齐 Win11 原生（在终端预览中打开）',
+  /label="在终端预览中打开"/.test(overlaySrc));
+
 /** V87：条目改名（对齐 Explorer 的 重命名 / F2 / 单击两次） */
 ok('Rust 命令 grid_item_rename 存在', /pub async fn grid_item_rename\(/.test(rustCmdSrc));
 ok('grid_item_rename 已注册', /commands::grid::grid_item_rename,/.test(libSrc));

@@ -1,5 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ArrowDownAZ,
+  ArrowDownWideNarrow,
+  CalendarClock,
   Check,
   ChevronRight,
   Eye,
@@ -17,6 +20,7 @@ import {
   Palette,
   Plus,
   RefreshCw,
+  Shapes,
   Sparkles,
   StickyNote,
   Terminal,
@@ -1034,7 +1038,7 @@ export function GridOverlay(): React.JSX.Element {
   // V97：桌面空白右键的「Win11 同款」自绘菜单。`bgMenu` 是弹出位置（右键落点），
   // `bgMenuSub` 是当前展开的子菜单（查看 / 新建）；`bgMenuRef` 给「点外面关闭」判界。
   const [bgMenu, setBgMenu] = useState<{ x: number; y: number } | null>(null);
-  const [bgMenuSub, setBgMenuSub] = useState<'view' | 'new' | null>(null);
+  const [bgMenuSub, setBgMenuSub] = useState<'view' | 'new' | 'sort' | null>(null);
   const bgMenuRef = useRef<HTMLDivElement | null>(null);
   // V98：「新建」子菜单的 ShellNew 模板（Excel/DOCX/ZIP…）。懒加载：第一次展开
   // 「新建」才拉注册表（毫秒级），拉完缓存；失败就只剩「新建文件夹」，不弹提示。
@@ -1048,6 +1052,15 @@ export function GridOverlay(): React.JSX.Element {
     void ipc
       .shellNewTemplates()
       .then(setNewTemplates)
+      .catch(() => undefined);
+  }, []);
+  // V99：「排序方式」当前值（'' = 默认序）。挂载时拉一次；子菜单里点了就同步。
+  // 后端持久化在 grid_meta.loose_sort，grid_loose_list 每次扫描都按它排。
+  const [looseSort, setLooseSort] = useState('');
+  useEffect(() => {
+    void ipc
+      .looseSortGet()
+      .then(setLooseSort)
       .catch(() => undefined);
   }, []);
   /** 是否正处于「条目被拖着走」的状态（拖出格子 = 移出，落在根画布上要接住 drop） */
@@ -4922,6 +4935,56 @@ export function GridOverlay(): React.JSX.Element {
             )}
           </div>
 
+          {/* 排序方式 ›（V99：与原生菜单同一位置（查看 下面第一项）。作用于未归类竖条
+              （桌面散落文件 = 原生「桌面图标排序」的对应物），持久化在 grid_meta，
+              同键再点一次切倒序） */}
+          <div className="relative" onMouseLeave={() => setBgMenuSub(null)}>
+            <BgMenuRow
+              icon={<ArrowDownWideNarrow className="h-4 w-4" />}
+              label="排序方式"
+              arrow
+              onClick={() => setBgMenuSub(bgMenuSub === 'sort' ? null : 'sort')}
+              onEnter={() => setBgMenuSub('sort')}
+            />
+            {bgMenuSub === 'sort' && (
+              <div
+                className={`${BG_NEW_SUB_CLASS} ${
+                  bgMenu.x > window.innerWidth - 620 ? 'right-full' : 'left-full'
+                }`}
+              >
+                {(
+                  [
+                    ['name', '名称', <ArrowDownAZ key="n" className="h-4 w-4" />],
+                    ['size', '大小', <ArrowDownWideNarrow key="s" className="h-4 w-4" />],
+                    ['type', '项目类型', <Shapes key="t" className="h-4 w-4" />],
+                    ['mtime', '修改日期', <CalendarClock key="m" className="h-4 w-4" />],
+                  ] as const
+                ).map(([key, label, icon]) => {
+                  const active = looseSort === key || looseSort === `${key}-desc`;
+                  const desc = looseSort === `${key}-desc`;
+                  return (
+                    <BgMenuRow
+                      key={key}
+                      icon={icon}
+                      label={desc ? `${label}（倒序）` : label}
+                      right={active ? <Check className="h-4 w-4 text-neutral-300" /> : null}
+                      onClick={() => {
+                        const next = active ? `${key}-desc` : key;
+                        setBgMenu(null);
+                        setBgMenuSub(null);
+                        setLooseSort(next);
+                        void ipc
+                          .looseSortSet(next)
+                          .then(() => refreshLoose())
+                          .catch((error: Error) => showHint(error.message));
+                      }}
+                    />
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
           <BgMenuRow
             icon={<RefreshCw className="h-4 w-4" />}
             label="刷新"
@@ -4962,6 +5025,11 @@ export function GridOverlay(): React.JSX.Element {
                   label="文件夹"
                   onClick={() => createNewItemDirect('folder')}
                 />
+                <BgMenuRow
+                  icon={<Link2 className="h-4 w-4" />}
+                  label="快捷方式"
+                  onClick={() => createNewItemDirect('shortcut')}
+                />
                 {newTemplates.map((template) => (
                   <BgMenuRow
                     key={template.ext}
@@ -4998,7 +5066,7 @@ export function GridOverlay(): React.JSX.Element {
           />
           <BgMenuRow
             icon={<Terminal className="h-4 w-4" />}
-            label="在终端中打开"
+            label="在终端预览中打开"
             onClick={() => {
               setBgMenu(null);
               setBgMenuSub(null);
