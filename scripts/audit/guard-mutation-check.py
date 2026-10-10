@@ -662,6 +662,14 @@ MUTATIONS: dict[str, _M] = {
     # 另一套守卫，结果是「改了源码守卫仍然全绿」的假通过（自检会直接点名它没判别力）。
     "scripts/regression/test-shell-menu.mjs": [
         (
+            "V98 ShellNew 模板落地被绕开（新建子菜单只剩文件夹，Excel 等全消失）",
+            "src-tauri/src/commands/grid.rs",
+            "crate::platform::shell_menu::create_new_from_shell_new(&kind)",
+            "None",
+            "用户 10-10：「我各种新文件 excel 等各种都没有了哇」。desktop_create_new 必须把"
+            "扩展名 kind 交给 create_new_from_shell_new 按注册表 ShellNew 模板落地",
+        ),
+        (
             "V97 空白右键退回经典菜单直弹（自绘 bgMenu 被拆掉）",
             "src/modules/desktop-grid/GridOverlay.tsx",
             "        setBgMenu({ x: event.clientX, y: event.clientY });",

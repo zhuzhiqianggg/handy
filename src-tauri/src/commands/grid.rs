@@ -3775,12 +3775,19 @@ pub async fn shell_desktop_background_menu(
     }
 }
 
-/// 直接在桌面目录新建一个条目，**不经过任何菜单**（V97）。
+/// 直接在桌面目录新建一个条目，**不经过任何菜单**（V97；V98 扩展支持模板）。
 ///
 /// V97 起桌面空白右键改弹**前端自绘的 Win11 同款菜单**，菜单里的「新建」子项直接调
-/// 这里。落盘路径复用 [`crate::platform::shell_menu::create_new_item`] —— 与经典菜单里
-/// 我们注入的「新建」是**同一个函数**：递增命名（`新建文件夹` → `新建文件夹 (2)`）、
-/// 落地真实目录 / 文件、返回 [`CreatedItem`] 供前端「增量认领 + 原地改名」。
+/// 这里。`kind` 两种形态：
+///
+/// - `"folder"` / `"text"`：走 [`crate::platform::shell_menu::create_new_item`]（经典菜单
+///   注入项同一函数，递增命名、落地真实目录 / 文件）；
+/// - `".xlsx"` 这类**扩展名**（V98）：走 [`crate::platform::shell_new_templates`] 的
+///   ShellNew 模板落地（`create_new_from_shell_new`）—— Explorer 的「新建」子菜单
+///   就是注册表 `HKCR\<ext>\ShellNew` 生成的，Data/FileName/Command/NullFile 四种
+///   取值照搬它的语义。
+///
+/// 返回 [`CreatedItem`] 供前端「增量认领 + 原地改名」。
 ///
 /// 这里没有 `TrackPopupMenuEx`，不需要主线程投递，也不需要 mpsc 通道 —— 纯文件系统
 /// 操作，命令线程直接做即可。
@@ -3790,15 +3797,39 @@ pub async fn desktop_create_new(
 ) -> Result<Option<crate::platform::shell_menu::CreatedItem>, String> {
     #[cfg(target_os = "windows")]
     {
-        if kind != "folder" && kind != "text" {
+        let created = if kind == "folder" || kind == "text" {
+            crate::platform::shell_menu::create_new_item(&kind)
+        } else if kind.starts_with('.') && kind.len() > 1 && !kind.contains('\\') {
+            crate::platform::shell_menu::create_new_from_shell_new(&kind)
+        } else {
             return Err(format!("不支持的新建类型：{kind}"));
-        }
-        Ok(crate::platform::shell_menu::create_new_item(&kind))
+        };
+        Ok(created)
     }
     #[cfg(not(target_os = "windows"))]
     {
         let _ = kind;
         Err("当前平台暂未适配桌面新建".to_string())
+    }
+}
+
+/// 枚举注册表里所有带 `ShellNew` 的扩展名（V98）＝ 原生菜单「新建」子菜单的完整列表。
+///
+/// 给自绘菜单的「新建」子菜单用：显示名取 `SHGFI_TYPENAME`（与 Explorer 同源），
+/// 图标由前端按 `icon_path`（只借扩展名）调 `grid_file_icon` 取真实类型图标。
+/// 枚举是纯注册表读取、毫秒级，但为不占 async 运行时仍丢进阻塞线程池。
+#[tauri::command]
+pub async fn shell_new_templates() -> Result<Vec<crate::platform::shell_menu::ShellNewTemplate>, String>
+{
+    #[cfg(target_os = "windows")]
+    {
+        tauri::async_runtime::spawn_blocking(crate::platform::shell_menu::list_shell_new_templates)
+            .await
+            .map_err(|err| format!("ShellNew 模板枚举任务失败：{err}"))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(Vec::new())
     }
 }
 
@@ -6899,7 +6930,7 @@ fn shell_icon_handle(path: &str) -> Option<windows::Win32::UI::WindowsAndMessagi
     use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL;
     use windows::Win32::UI::Shell::{
         SHGetFileInfoW, SHFILEINFOW, SHGFI_ADDOVERLAYS, SHGFI_ICON, SHGFI_LARGEICON,
-        SHGFI_LINKOVERLAY, SHGFI_SYSICONINDEX,
+        SHGFI_LINKOVERLAY, SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES,
     };
 
     let wide: Vec<u16> = std::ffi::OsStr::new(path)
@@ -6915,15 +6946,24 @@ fn shell_icon_handle(path: &str) -> Option<windows::Win32::UI::WindowsAndMessagi
         return virtual_shell_icon(&wide);
     }
 
+    // ⓪½ V98：**不存在的路径**（ShellNew 模板菜单按扩展名取图标）——
+    //    不加 `SHGFI_USEFILEATTRIBUTES` 时 SHGetFileInfoW 落到磁盘必失败；
+    //    加上它就按 `dwFileAttributes`（这里给 NORMAL）+ 扩展名解析，拿到该类型
+    //    注册的真实图标（Excel 绿 X、WPS 图标等，与资源管理器一致）。
+    //    已存在的文件保持原行为（按磁盘事实解析，不加该标志）。
+    let usefileattr = !std::path::Path::new(path).exists();
+
     // ① 系统大图标列表（48×48）
     let mut sfi = SHFILEINFOW::default();
+    let flags = SHGFI_SYSICONINDEX | SHGFI_LINKOVERLAY | SHGFI_ADDOVERLAYS;
+    let flags = if usefileattr { flags | SHGFI_USEFILEATTRIBUTES } else { flags };
     let info_ok = unsafe {
         SHGetFileInfoW(
             PCWSTR(wide.as_ptr()),
             FILE_ATTRIBUTE_NORMAL,
             Some(&mut sfi as *mut SHFILEINFOW as *mut _),
             std::mem::size_of::<SHFILEINFOW>() as u32,
-            SHGFI_SYSICONINDEX | SHGFI_LINKOVERLAY | SHGFI_ADDOVERLAYS,
+            flags,
         )
     };
     if info_ok != 0 {
@@ -6942,13 +6982,15 @@ fn shell_icon_handle(path: &str) -> Option<windows::Win32::UI::WindowsAndMessagi
 
     // ② 退到 32×32 大图标（叠层照旧要）
     let mut fallback = SHFILEINFOW::default();
+    let flags = SHGFI_ICON | SHGFI_LARGEICON | SHGFI_LINKOVERLAY | SHGFI_ADDOVERLAYS;
+    let flags = if usefileattr { flags | SHGFI_USEFILEATTRIBUTES } else { flags };
     let ok = unsafe {
         SHGetFileInfoW(
             PCWSTR(wide.as_ptr()),
             FILE_ATTRIBUTE_NORMAL,
             Some(&mut fallback as *mut SHFILEINFOW as *mut _),
             std::mem::size_of::<SHFILEINFOW>() as u32,
-            SHGFI_ICON | SHGFI_LARGEICON | SHGFI_LINKOVERLAY | SHGFI_ADDOVERLAYS,
+            flags,
         )
     };
     if ok == 0 || fallback.hIcon.is_invalid() {

@@ -65,8 +65,14 @@ use std::mem::size_of;
 use std::path::Path;
 
 use windows::core::{HSTRING, Interface, PCSTR, PWSTR, w};
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Foundation::{
+    ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, HWND, LPARAM, LRESULT, POINT, WPARAM,
+};
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+use windows::Win32::System::Registry::{
+    RegCloseKey, RegEnumKeyExW, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CLASSES_ROOT,
+    KEY_READ, REG_BINARY, REG_EXPAND_SZ, REG_SZ, REG_VALUE_TYPE,
+};
 use windows::Win32::UI::Shell::{
     IContextMenu, IContextMenu2, IContextMenu3, IShellFolder, IShellItem,
     SHCreateItemFromParsingName, SHGetDesktopFolder, BHID_SFUIObject, CMINVOKECOMMANDINFO,
@@ -600,6 +606,352 @@ pub fn create_new_item(kind: &str) -> Option<CreatedItem> {
     }
 
     crate::logging::write_line("grid", &format!("桌面新建成功：{path:?}"));
+    Some(CreatedItem {
+        path: path.to_string_lossy().to_string(),
+        name,
+    })
+}
+
+// ————————————————————————————————————————————————————————————————
+// V98：ShellNew「新建」模板 —— 注册表枚举 + 按模板落地。
+//
+// 原生菜单「新建」子菜单那一长串（DOCX 文档 / XLSX 工作表 / 360压缩 ZIP 文件…）
+// 就是 Explorer 读注册表 `HKCR\<ext>\ShellNew` 生成的。V97 的自绘菜单只硬编码了
+// 文件夹 / 文本文档，用户 10-10 报障「我各种新文件 excel 等各种都没有了哇」——
+// 这里补全：枚举所有带 `ShellNew` 子键的扩展名，菜单显示名用 `SHGFI_TYPENAME`
+// （与 Explorer 同源），落地按 ShellNew 的取值：NullFile / Data / FileName / Command。
+// ————————————————————————————————————————————————————————————————
+
+/// V98：一条「新建」模板（前端菜单行 + 落地参数）。
+#[derive(Clone, serde::Serialize)]
+pub struct ShellNewTemplate {
+    /// 扩展名（含点，如 `.xlsx`）；`desktop_create_new` 靠它重新定位模板。
+    pub ext: String,
+    /// 菜单显示名（`SHGFI_TYPENAME`，与 Explorer 同源，如「XLSX 工作表」）。
+    pub name: String,
+    /// 前端取图标用的路径 —— **只借扩展名**，文件本身不需要存在
+    /// （`shell_icon_handle` 对不存在的路径走 `SHGFI_USEFILEATTRIBUTES` 分支）。
+    pub icon_path: String,
+}
+
+/// `ShellNew` 子键下 Explorer 认的四种取值。
+#[derive(Default)]
+struct ShellNewValues {
+    null_file: bool,
+    data: Option<Vec<u8>>,
+    file_name: Option<String>,
+    command: Option<String>,
+}
+
+/// 打开一个只读注册表键；失败返回 `None`。
+///
+/// # SAFETY
+/// 调用方负责用 `RegCloseKey` 关闭返回的句柄。
+unsafe fn reg_open_read(parent: HKEY, sub: &str) -> Option<HKEY> {
+    use windows::core::PCWSTR;
+    let wide: Vec<u16> = sub.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut key = HKEY::default();
+    let err = RegOpenKeyExW(parent, PCWSTR(wide.as_ptr()), 0, KEY_READ, &mut key);
+    if err != ERROR_SUCCESS {
+        return None;
+    }
+    Some(key)
+}
+
+/// 判断 `parent` 下是否存在名为 `sub` 的子键。
+unsafe fn reg_subkey_exists(parent: HKEY, sub: &str) -> bool {
+    match reg_open_read(parent, sub) {
+        Some(key) => {
+            let _ = RegCloseKey(key);
+            true
+        }
+        None => false,
+    }
+}
+
+/// 读一个 `REG_SZ` / `REG_EXPAND_SZ` 字符串值（不做环境变量展开 —— ShellNew 的
+/// FileName 大多是字面路径；带 `%%` 的交给 `resolve_template_file` 逐个候选目录试）。
+unsafe fn reg_string(key: HKEY, name: &str) -> Option<String> {
+    use windows::core::PCWSTR;
+    let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut ty = REG_VALUE_TYPE::default();
+    let mut cb = 0u32;
+    if RegQueryValueExW(key, PCWSTR(wide.as_ptr()), None, Some(&mut ty), None, Some(&mut cb))
+        != ERROR_SUCCESS
+    {
+        return None;
+    }
+    if ty != REG_SZ && ty != REG_EXPAND_SZ {
+        return None;
+    }
+    let mut buf = vec![0u8; cb.max(2) as usize];
+    if RegQueryValueExW(key, PCWSTR(wide.as_ptr()), None, None, Some(buf.as_mut_ptr()), Some(&mut cb))
+        != ERROR_SUCCESS
+    {
+        return None;
+    }
+    // UTF-16LE → String，遇到 NUL 截断
+    let units: Vec<u16> = buf
+        .chunks_exact(2)
+        .take_while(|c| c[0] != 0 || c[1] != 0)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    let s = String::from_utf16_lossy(&units);
+    if s.trim().is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+/// 读一个 `REG_BINARY` 值。
+unsafe fn reg_binary(key: HKEY, name: &str) -> Option<Vec<u8>> {
+    use windows::core::PCWSTR;
+    let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut ty = REG_VALUE_TYPE::default();
+    let mut cb = 0u32;
+    if RegQueryValueExW(key, PCWSTR(wide.as_ptr()), None, Some(&mut ty), None, Some(&mut cb))
+        != ERROR_SUCCESS
+    {
+        return None;
+    }
+    if ty != REG_BINARY || cb == 0 {
+        return None;
+    }
+    let mut buf = vec![0u8; cb as usize];
+    if RegQueryValueExW(key, PCWSTR(wide.as_ptr()), None, None, Some(buf.as_mut_ptr()), Some(&mut cb))
+        != ERROR_SUCCESS
+    {
+        return None;
+    }
+    Some(buf)
+}
+
+/// 读一个 `ShellNew` 键的四种取值。
+unsafe fn read_shell_new_values(key: HKEY) -> ShellNewValues {
+    use windows::core::PCWSTR;
+    let mut v = ShellNewValues::default();
+    // NullFile 的存在性只看查询是否成功（值内容无所谓，类型也不限）
+    let probe: Vec<u16> = "NullFile".encode_utf16().chain(std::iter::once(0)).collect();
+    v.null_file =
+        RegQueryValueExW(key, PCWSTR(probe.as_ptr()), None, None, None, None) == ERROR_SUCCESS;
+    v.data = reg_binary(key, "Data");
+    v.file_name = reg_string(key, "FileName");
+    v.command = reg_string(key, "Command");
+    v
+}
+
+/// `HKCR\<ext>`（或其默认 ProgID 下）的 `ShellNew` 键；两处都没有返回 `None`。
+///
+/// Explorer 两处都认：Office 一类写在 `.ext` 下，个别类型写在 ProgID 下。
+unsafe fn open_shell_new_key(ext: &str) -> Option<HKEY> {
+    let hkcr = reg_open_read(HKEY_CLASSES_ROOT, "")?;
+    let result = (|| {
+        let ext_key = reg_open_read(hkcr, ext)?;
+        let direct = reg_open_read(ext_key, "ShellNew");
+        let progid_default = reg_string(ext_key, "");
+        let _ = RegCloseKey(ext_key);
+        if let Some(key) = direct {
+            return Some(key);
+        }
+        let progid = progid_default?;
+        let progid_key = reg_open_read(hkcr, &progid)?;
+        let sn = reg_open_read(progid_key, "ShellNew");
+        if sn.is_none() {
+            let _ = RegCloseKey(progid_key);
+        }
+        sn
+    })();
+    let _ = RegCloseKey(hkcr);
+    result
+}
+
+/// 按扩展名取**本地化的类型名**（`SHGFI_TYPENAME | SHGFI_USEFILEATTRIBUTES`）——
+/// 文件不需要存在，与 Explorer 菜单标签同源（「XLSX 工作表」「文本文档」…）。
+fn shell_typename(ext: &str) -> Option<String> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL;
+    use windows::Win32::UI::Shell::{SHGetFileInfoW, SHFILEINFOW, SHGFI_TYPENAME, SHGFI_USEFILEATTRIBUTES};
+    let fake = format!("C:\\shellnew-probe{ext}");
+    let wide: Vec<u16> = fake.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut sfi = SHFILEINFOW::default();
+    let ok = unsafe {
+        SHGetFileInfoW(
+            PCWSTR(wide.as_ptr()),
+            FILE_ATTRIBUTE_NORMAL,
+            Some(&mut sfi as *mut SHFILEINFOW as *mut _),
+            std::mem::size_of::<SHFILEINFOW>() as u32,
+            SHGFI_TYPENAME | SHGFI_USEFILEATTRIBUTES,
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+    let len = sfi.szTypeName.iter().position(|&c| c == 0).unwrap_or(0);
+    let s = String::from_utf16_lossy(&sfi.szTypeName[..len]).trim().to_string();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+/// 枚举注册表里所有带 `ShellNew` 的扩展名（= 原生菜单「新建」子菜单的完整列表）。
+///
+/// `HKCR` 根键本身几万个键名，但 `RegEnumKeyExW` 逐个枚举 + 只对 `.` 开头的开键，
+/// 实测量级毫秒级；命令层直接同步调用即可。
+pub fn list_shell_new_templates() -> Vec<ShellNewTemplate> {
+    let mut out = Vec::new();
+    let mut seen_names = std::collections::HashSet::new();
+    unsafe {
+        let Some(hkcr) = reg_open_read(HKEY_CLASSES_ROOT, "") else {
+            crate::logging::write_line("grid", "ShellNew 枚举失败：打不开 HKCR");
+            return out;
+        };
+        let mut index = 0u32;
+        loop {
+            let mut buf = [0u16; 64];
+            let mut len = buf.len() as u32;
+            let err = RegEnumKeyExW(
+                hkcr,
+                index,
+                PWSTR(buf.as_mut_ptr()),
+                &mut len,
+                None,
+                PWSTR::null(),
+                None,
+                None,
+            );
+            index += 1;
+            if err == ERROR_NO_MORE_ITEMS {
+                break;
+            }
+            if err != ERROR_SUCCESS {
+                continue;
+            }
+            let name = String::from_utf16_lossy(&buf[..len as usize]);
+            // 只认形如 `.docx` 的扩展名键；`.lnk` 的「快捷方式」是向导不是模板，跳过
+            if !name.starts_with('.') || name.len() < 2 || name == ".lnk" {
+                continue;
+            }
+            let Some(values_key) = open_shell_new_key(&name) else {
+                continue;
+            };
+            let values = read_shell_new_values(values_key);
+            let _ = RegCloseKey(values_key);
+            // 四种取值一个都没有 ⇒ ShellNew 是空壳，Explorer 也不显示
+            if !values.null_file
+                && values.data.is_none()
+                && values.file_name.is_none()
+                && values.command.is_none()
+            {
+                continue;
+            }
+            let Some(typename) = shell_typename(&name) else {
+                continue;
+            };
+            // 同名类型去重（.htm/.html 都是「HTML 文档」时只留先到的）
+            if !seen_names.insert(typename.clone()) {
+                continue;
+            }
+            out.push(ShellNewTemplate {
+                ext: name,
+                name: typename,
+                icon_path: String::new(), // 下面统一填
+            });
+        }
+        let _ = RegCloseKey(hkcr);
+    }
+    for t in out.iter_mut() {
+        t.icon_path = format!("C:\\shellnew-probe{}", t.ext);
+    }
+    out
+}
+
+/// 把 ShellNew 的 `FileName` 解析成一个真实存在的模板文件。
+///
+/// Explorer 的搜索顺序：绝对路径直接用；相对文件名依次找
+/// `%SystemRoot%\ShellNew`、`%ALLUSERSPROFILE%\Microsoft\Windows\Templates`、
+/// `%APPDATA%\Microsoft\Windows\Templates`。
+fn resolve_template_file(file_name: &str) -> Option<std::path::PathBuf> {
+    let p = std::path::Path::new(file_name);
+    if p.is_absolute() {
+        return if p.exists() { Some(p.to_path_buf()) } else { None };
+    }
+    let base = p.file_name()?.to_string_lossy().to_string();
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(win) = std::env::var("SystemRoot") {
+        candidates.push(std::path::PathBuf::from(win).join("ShellNew").join(&base));
+    }
+    if let Ok(all) = std::env::var("ALLUSERSPROFILE") {
+        candidates.push(
+            std::path::PathBuf::from(all)
+                .join("Microsoft")
+                .join("Windows")
+                .join("Templates")
+                .join(&base),
+        );
+    }
+    if let Ok(user) = std::env::var("APPDATA") {
+        candidates.push(
+            std::path::PathBuf::from(user)
+                .join("Microsoft")
+                .join("Windows")
+                .join("Templates")
+                .join(&base),
+        );
+    }
+    candidates.into_iter().find(|c| c.exists())
+}
+
+/// 按 ShellNew 模板在桌面目录落地一个新文件（V98）。
+///
+/// 落地优先级与 Explorer 一致：`Data`（二进制模板）→ `FileName`（拷模板文件）→
+/// 空文件（`NullFile` / `Command` / 其它）。`Command` 型在空文件落地后再执行一次
+/// （`%1` 替换为新路径，如 360压缩 的 ZIP 模板），命令失败不影响已落地的空文件。
+///
+/// 命名规则与 [`create_new_item`] 同款：`新建{类型名}` → `新建{类型名} (2)` → …
+/// （「文本文档」→ `新建文本文档.txt`，与原生一致）。
+pub fn create_new_from_shell_new(ext: &str) -> Option<CreatedItem> {
+    let Some(root) = desktop_user_root() else {
+        crate::logging::write_line("grid", "ShellNew 新建失败：定位不到桌面用户目录");
+        return None;
+    };
+    let values = unsafe {
+        open_shell_new_key(ext).map(|key| {
+            let v = read_shell_new_values(key);
+            let _ = RegCloseKey(key);
+            v
+        })
+    };
+    let Some(values) = values else {
+        crate::logging::write_line("grid", &format!("ShellNew 新建失败：{ext} 没有 ShellNew 键"));
+        return None;
+    };
+    let typename = shell_typename(ext)
+        .unwrap_or_else(|| ext.trim_start_matches('.').to_ascii_uppercase());
+    let name = unique_new_name(&root, &format!("新建{typename}"), ext);
+    let path = root.join(&name);
+
+    let ok = if let Some(data) = &values.data {
+        std::fs::write(&path, data).is_ok()
+    } else if let Some(src) = values.file_name.as_deref().and_then(resolve_template_file) {
+        std::fs::copy(&src, &path).is_ok()
+    } else {
+        if std::fs::write(&path, &[] as &[u8]).is_err() {
+            return None;
+        }
+        if let Some(cmd) = &values.command {
+            let replaced = cmd.replace("%1", &path.to_string_lossy());
+            let _ = std::process::Command::new("cmd").args(["/C", &replaced]).spawn();
+        }
+        true
+    };
+    if !ok {
+        crate::logging::write_line("grid", &format!("ShellNew 新建失败：无法创建 {path:?}"));
+        return None;
+    }
+    crate::logging::write_line("grid", &format!("ShellNew 新建成功：{path:?}（{ext}）"));
     Some(CreatedItem {
         path: path.to_string_lossy().to_string(),
         name,

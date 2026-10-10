@@ -19,13 +19,13 @@
 - **外部唤起 = 入队+唤醒**（V60）：冷启动 emit 必丢 ⇒ `PENDING_ACTION` 入队（挂载 + 收到唤醒各取一次，**不采信载荷**）。**HKCU 能力必须有版本标记**（V60）：`install()` **整键重建**（只写不删 ⇒ 死按钮）。**一个跨线程状态只许一个记账人**（V61：两条写路即失同步）。
 - ★★ **显隐唯一真源 `overlay_visible`：谁写谁广播**（V79）：三处写完必须 `emit_visibility`；托盘**不许**再自己发。前端 `contentHidden` 初值 **`true`**（fail-closed），**先注册监听、再查状态**。
 - **「撤掉强制可交互」≠「立刻穿透」**：`let want = interactive || cursor_hit(&win)`（**或**）。
-- **内部拖拽 = 指针拖拽**（V59）：wry 对无 `CF_HDROP` 载荷不写 `*pdwEffect` ⇒ 自算落点（阈值 5px）；**不许为修它关 `drag_drop_enabled`**。
+- **内部拖拽 = 指针拖拽**（V59）：wry 无 `CF_HDROP` 不写 `*pdwEffect` ⇒ 自算落点（5px）；**不许关 `drag_drop_enabled`**。
 - ★★ **渲染几何 = 引擎几何**（V59/V70）：`height: box.height`、**不叠 `max-height`**（装不下交盒内滚动）；**常量差 1px 就少一行/列**；根画布永远 `overflow-hidden`、菜单必须 `fixed`。拖动链路（V57）：移动永远可用，锁只收编辑。
 - ★★ **菜单不许有两个同名项**（V89）：注入前先摘原生同名（`CNewMenu` 无 view 必 E_FAIL）；摘除**倒序**、判据只认**开头**。
-- ★★ **`run_on_main_thread` 只投递、不等结果**（V89）：弹菜单用它 ⇒ Promise 在菜单弹出前就 resolve ⇒ 竞速判据必误判；要结果就配 `mpsc` 等回传。
+- ★★ **`run_on_main_thread` 只投递、不等结果**（V89）：弹菜单必配 `mpsc` 等回传（否则 Promise 早 resolve ⇒ 竞速判据必误判）。
 - ★★ **「隐藏改名框」链路已删（V96）**：V92 取消→V93 判据→V94 确认→V95 还前台，七轮不收敛（ShellNew **要求隐藏视图在前台**，而能打字的改名框必然抢前台 ⇒ 互斥）。**别再往回加**：`LVM_CANCELEDITLABEL`/`VK_RETURN`/`EDIT_SEEN_TICK`/`EDIT_CANCEL_STAGE`/`grid_focus_desktop`（守卫已加反向断言）。
 - ★★ **条目改名框必须全选默认名**（V96）：`autoFocus` 只聚焦不选中 ⇒ 打字变**追加**（实测「新建文件夹 (20)123」）。两个 input 都要 `onFocus={e => e.currentTarget.select()}`。
-- **WinEvent `hwnd` 语义不许赌**（V82）：`EVENT_SYSTEM_MENUPOPUPSTART` 给的是**菜单窗 `#32768` 自己**（判据要换 owner + 看菜单压谁，留轮询兜底）。
+- **WinEvent `hwnd` 语义不许赌**（V82）：`MENUPOPUPSTART` 给的是菜单窗 `#32768` 自己（判据换 owner + 看压谁，留轮询兜底）。
 - **复刻菜单 = 回退 + 条目菜单**（V58/V90）：`CMF_NORMAL|CMF_EXPLORE`（**不传 `CMF_CANRENAME`**）；`IContextMenu2/3` 消息**必须转发**。**层级**：盒子(auto)<参考线 35<工作台 38<面板 40<菜单 50<预览 95。改模式开关前 grep 调用点。
 - ★★ **便签 contentEditable**（V67/V68）：`\n` 写进**光标所在文本节点** + 垫 ZWSP；「跳出」看「上一步是不是我们插的换行」（**不许**看末尾空行）；`applyHighlight` 每 400ms 重写 `innerHTML` ⇒ `reapplyZwsp` **必须在 `restoreCaretIn` 之前**；合成 `KeyboardEvent` 测不出回车。
 - ★★ **压缩列高不许事后夹 `MIN_BOX_H`**（V68）：先缩放再夹会顶出可用区 ⇒ **二分求最大可行缩放比**。
@@ -36,7 +36,7 @@
   - ★ 摆放序 = `(面积, 内容量, 高, 宽)` 降序（**内容量分量不可省**）。
   - ★★ **V95 分列 = 顺序填充**（用户原话「从右到左 从上到下 满了才换列」；LPT 最矮列废弃）：第一列自上往下塞满才换列；**物理装不下（有列越过 cap）退回 LPT 均衡**（顺序填充尾列爆炸，MIN_BOX_H 夹不动）。评分 `(-k, 自然宽优先, tallest, used_w)`：列数最少赢；**同 k 没夹宽的赢** —— 夹宽让格子变高，纵向判据下会反杀。V94 的 `(tallest, used_w)` 与 V84 `min(横,纵)` 都作废。
   - ★★ **带下分流（V94/V95）**：whole `overflowed||squeezed` 才进拆分；拆分候选 pa/pb 任一溢出跳过；收益「不更差就换」（压扁时底沿恒=上限）。
-  - ★★ **V96 空白右键 = 我们自己的菜单**：整窗命中区 + 根画布 `pointerEvents: contentHidden ? 'none' : 'auto'` ⇒ 空白右键进 `show_background_context_menu`（本就是**完整背景菜单**：查看/排序/刷新/粘贴都在，只把必然 E_FAIL 的原生「新建」换成我们注入的 `create_new_item`，可靠）。穿透那条路已废：**图标视图被隐藏时那些原生项本就空转**，却带来「隐藏改名框」死结。
+  - ★★ **V97 空白右键 = 前端自绘「Win11 同款」菜单**（`bgMenu` + `BgMenuRow`）：新式菜单**只能由 Explorer 自己渲染**（第三方弹出来必是经典样式）⇒ 自绘外壳逐项接真行为：查看›自动整理/显示桌面图标（勾选=contentHidden）、刷新、新建›（`desktop_create_new` 复用 `create_new_item` 同一落盘路径）、显示设置/个性化/终端（`shell_open_system`：explorer.exe 开 ms-settings；终端 wt 退回 powershell）、**显示更多选项 = 经典背景菜单**；Shift 右键直达经典扩展。刻意不做摆设项（排序方式/撤消/下一个背景）。
 - ★★ **V85 落位右锚定 + 列内撑满**：列**从右往左**排（第一列贴便签/工作台侧）；窄格**撑到列宽**并按新宽重算高（只撑宽、**不夹窄**）。`content_plan_in` ④ 用**右沿递减**（摆完一列 `right = x - GAP`）——写成「x = 右沿−总宽」= 块**左**端 ⇒ 左溢。
 - ★ **幂等是算出来的，不许几何去兜**（V69）：摆放序是内容的纯函数 ⇒ 尺寸没变 ⇒ 落位一字不差。
 - ★★ **V70**：内部几何两边逐像素相等（差 1px ⇒ 提前出滚动条 ⇒ 少一列）；高度上限跟 zone_h；**满了不许再建**（`probe_room_for_another_box` 真插真排看 overflowed，出错放行）。
@@ -46,11 +46,11 @@
 ## 4. 批次索引（细节见 PROJECT_STATUS §1.x；约定/踩坑见 CONVENTIONS）
 - **V42–V71**：竖条·三面板·Z 序锚定·挂件分列·指针拖拽·工作台·列式填满（**V64/V65 作废**）。
 - **V75–V80** 桌面日历；V80：`jumpTo` **夹 1900–2100 且带 selected**、写盘走 `patchSettings`（禁 `writeSettings`）。
-- **V81/V82** 「菜单期间把桌面还给系统」**V89 起整体停用**（`HANDOFF_DISABLED`，`is_active()` 恒 false）。
+- **V81/V82** 菜单期间还桌面 ⇒ **V89 起停用**（`HANDOFF_DISABLED`，`is_active()` 恒 false）。
 - **V83–V85** 几何不持久化+**只算主屏**（`sync_overlay_bounds()`，变则广播 `grid:bounds-changed`；副屏全原生）；落位**右锚定**+**列内撑满**（§3）。
-- **V87/V88** 空白右键自己弹**背景菜单**（`CreateViewObject`；坑：`FOLDERID_Desktop`+`BindToObject` 必 `E_INVALIDARG`）；原生「新建」E_FAIL = 需 `IShellView` ⇒ 自注入；改名后 UI 不刷新 ⇒ 本地先改 `items`/`loose` 再 `refresh`。
-- **V89–V96 桌面右键：七轮迭代，V96 定稿「自有菜单」**。V89 抢空白右键⇒菜单残缺；V90/V91 试转发⇒双菜单 + `SetForegroundWindow` 让 `CNewMenu` 找不到 view⇒新建建不出；V92 改**穿透**（handoff 停用⇒不翻白，补偿：目录签名广播）；V93–V95 围着「隐藏改名框」打转；**V96：空白右键收回自有菜单**（穿透在隐藏视图下本就空转，见 §2/§3）。
-- **V93–V96 新建链路**（V96 收敛）：**前端「改名/新建安静期」保留**（`relayoutSoon`/`syncDesktop` 挂起；重排与刷新分开记、重排优先补跑），`grid:desktop-changed` 走增量 `onDesktopChanged`（唯一新增项 → `setFocus()` + `beginItemRename`）；**判据/确认/还前台三块已删**（见 §2）。守卫 shell-menu 113、变异 13。
+- **V87/V88** 背景菜单自弹（`CreateViewObject`；坑：`FOLDERID_Desktop`+`BindToObject` 必 `E_INVALIDARG`）；原生「新建」需 `IShellView` ⇒ 自注入；改名后本地先改 `items`/`loose` 再 `refresh`。
+- **V89–V97 桌面右键：八轮迭代，V97 定稿「自绘 Win11 同款菜单」**。V89 抢空白右键⇒菜单残缺；V90/V91 试转发⇒双菜单 + `SetForegroundWindow` 让 `CNewMenu` 找不到 view⇒新建建不出；V92 改**穿透**（handoff 停用⇒不翻白，补偿：目录签名广播）；V93–V95 围着「隐藏改名框」打转；V96 收回自有菜单（穿透在隐藏视图下本就空转）；V97 用户对照截图嫌经典样式丑 ⇒ 自绘（见 §3）。
+- **V93–V96 新建链路**（V96 收敛）：前端「改名/新建安静期」保留（重排/刷新挂起、重排优先补跑），`grid:desktop-changed` 走增量 `onDesktopChanged`（唯一新增 → `beginItemRename`）；判据/确认/还前台三块已删（见 §2）。守卫 shell-menu 123、变异 89。
 - ★★ **B 方案（用户 10-10 拍板，未做）：重构为「不接管原生桌面」**，挂件保留为桌面浮窗。调研（LucidDesk/DeskBox/openFences/DesktopIconMover）**无一接管桌面**：不自绘，或用 `LVM_SETITEMPOSITION` 遥控原生图标（lParam 装坐标，**跨进程无需注入**）。① 不隐藏 `SysListView32`，关「自动排列/对齐网格」后 SETITEMPOSITION 摆位；② 格子改装饰底板+标题栏、内容区穿透 ⇒ `GridOverlay.tsx` 大瘦身。
 - ⚠️ agent 会话启动不了本 GUI ⇒ 打包 + 装机即止，**不代启动**。
 

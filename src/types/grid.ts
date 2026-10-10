@@ -163,6 +163,21 @@ export interface CreatedItem {
   name: string;
 }
 
+/**
+ * ShellNew「新建」模板（V98）＝ 原生菜单「新建」子菜单的一条。
+ *
+ * Rust 从注册表 `HKCR\<ext>\ShellNew` 枚举而来（与 Explorer 同源）；`name` 用
+ * `SHGFI_TYPENAME` 的本地化类型名（「XLSX 工作表」「文本文档」…）。
+ */
+export interface ShellNewTemplate {
+  /** 扩展名（含点，如 `.xlsx`）；新建时原样传回 `desktop_create_new` */
+  ext: string;
+  /** 菜单显示名 */
+  name: string;
+  /** 取真实类型图标用的路径 —— 只借扩展名，文件本身不存在 */
+  icon_path: string;
+}
+
 // —— 一键整理 / 布局备份与还原（V19）——
 
 /** 一键整理结果摘要 */

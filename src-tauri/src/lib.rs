@@ -223,6 +223,8 @@ pub fn run() {
             // V97：自绘桌面菜单的「新建」直接落盘 + 系统入口（显示设置/个性化/终端）
             commands::grid::desktop_create_new,
             commands::grid::shell_open_system,
+            // V98：ShellNew「新建」模板完整列表（Excel/DOCX/ZIP 等）
+            commands::grid::shell_new_templates,
             commands::grid::grid_reveal_path,
             commands::grid::grid_loose_list,
             // —— 接口测试（api-tester，V28）：Rust 直发 HTTP，绕开 webview CORS ——

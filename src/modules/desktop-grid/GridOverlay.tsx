@@ -5,7 +5,6 @@ import {
   Eye,
   EyeOff,
   File,
-  FileText,
   FolderClosed,
   FolderPlus,
   LayoutGrid,
@@ -48,6 +47,7 @@ import type {
   GridRegion,
   LooseArea,
   LooseEntry,
+  ShellNewTemplate,
   TakeoverState,
 } from '@/types/grid';
 import {
@@ -766,6 +766,16 @@ function BgMenuRow({
   );
 }
 
+/**
+ * V98：「新建」子菜单容器类。
+ *
+ * 绝对定位 + `max-h` 定高（与 test-drag-pointer 白名单同口径：不靠 flex 压缩，不需要
+ * `min-h-0`）；模板条目多时在自身内滚，不把整张菜单顶出屏幕。抽成双引号常量既是为了
+ * 让守卫的正则看到干净的完整类名，也为了避免模板字符串里的引号把扫描弄出跨行误配。
+ */
+const BG_NEW_SUB_CLASS =
+  "absolute top-[-5px] max-h-[400px] min-w-[200px] overflow-y-auto rounded-lg border border-white/10 bg-[#2c2c2c]/95 p-1 shadow-[0_12px_40px_rgba(0,0,0,0.55)] backdrop-blur-xl";
+
 export function GridOverlay(): React.JSX.Element {
   // —— 数据态 ——
   const [boxes, setBoxes] = useState<GridBox[]>([]);
@@ -1026,6 +1036,20 @@ export function GridOverlay(): React.JSX.Element {
   const [bgMenu, setBgMenu] = useState<{ x: number; y: number } | null>(null);
   const [bgMenuSub, setBgMenuSub] = useState<'view' | 'new' | null>(null);
   const bgMenuRef = useRef<HTMLDivElement | null>(null);
+  // V98：「新建」子菜单的 ShellNew 模板（Excel/DOCX/ZIP…）。懒加载：第一次展开
+  // 「新建」才拉注册表（毫秒级），拉完缓存；失败就只剩「新建文件夹」，不弹提示。
+  const [newTemplates, setNewTemplates] = useState<ShellNewTemplate[]>([]);
+  const newTemplatesLoadedRef = useRef(false);
+  const loadNewTemplates = useCallback((): void => {
+    if (newTemplatesLoadedRef.current) {
+      return;
+    }
+    newTemplatesLoadedRef.current = true;
+    void ipc
+      .shellNewTemplates()
+      .then(setNewTemplates)
+      .catch(() => undefined);
+  }, []);
   /** 是否正处于「条目被拖着走」的状态（拖出格子 = 移出，落在根画布上要接住 drop） */
   const [itemDragging, setItemDragging] = useState(false);
 
@@ -1601,16 +1625,15 @@ export function GridOverlay(): React.JSX.Element {
   );
 
   /**
-   * **V97：自绘菜单的「新建」——直接落盘，不经过任何 Shell 菜单。**
+   * **V97/V98：自绘菜单的「新建」——直接落盘，不经过任何 Shell 菜单。**
    *
-   * 自绘菜单的「新建文件夹 / 新建文本文档」点中后调这里：后端
-   * `desktop_create_new` 复用 `shell_menu::create_new_item`（与经典菜单注入项同一个
-   * 函数，递增命名、落地真实目录 / 文件），返回 `CreatedItem` 后走与菜单路径相同的
+   * `kind` = `'folder'`（文件夹）或扩展名（`'.xlsx'`，走 ShellNew 模板）。后端
+   * `desktop_create_new` 统一返回 `CreatedItem` 后走与菜单路径相同的
    * 「安静期 + 增量认领 + 原地改名」三步。没有 `TrackPopupMenuEx`，就没有「菜单收起
    * 才 resolve」的时序，也不需要前后快照 diff。
    */
   const createNewItemDirect = useCallback(
-    (kind: 'folder' | 'text'): void => {
+    (kind: string): void => {
       setBgMenu(null);
       setBgMenuSub(null);
       void (async () => {
@@ -4121,8 +4144,11 @@ export function GridOverlay(): React.JSX.Element {
                       }}
                       className={
                         isListView
-                          ? 'min-w-0 flex-1 rounded bg-neutral-900/95 px-1 text-left text-[12px] text-white outline-none ring-1 ring-sky-400/70'
-                          : 'w-full rounded bg-neutral-900/95 px-1 text-center text-[10px] leading-tight text-white outline-none ring-1 ring-sky-400/70'
+                          ? // V98：`select-text` —— 根画布 `select-none` 会把 input 的选中高亮
+                            // 一起压没（用户 10-10：「选中文字没有全选样式」），输入框必须显式
+                            // 恢复文本可选 + 显式选中色，全选才看得见
+                            'min-w-0 flex-1 select-text rounded bg-neutral-900/95 px-1 text-left text-[12px] text-white outline-none ring-1 ring-sky-400/70 selection:bg-sky-500/70 selection:text-white'
+                          : 'w-full select-text rounded bg-neutral-900/95 px-1 text-center text-[10px] leading-tight text-white outline-none ring-1 ring-sky-400/70 selection:bg-sky-500/70 selection:text-white'
                       }
                     />
                   ) : (
@@ -4295,7 +4321,8 @@ export function GridOverlay(): React.JSX.Element {
                       setItemRenameDraft('');
                     }
                   }}
-                  className="w-full rounded bg-neutral-900/95 px-1 text-center text-[11px] leading-tight text-white outline-none ring-1 ring-sky-400/70"
+                  // V98：`select-text` 同上 —— 根画布 select-none 压掉 input 选中高亮，显式恢复
+                  className="w-full select-text rounded bg-neutral-900/95 px-1 text-center text-[11px] leading-tight text-white outline-none ring-1 ring-sky-400/70 selection:bg-sky-500/70 selection:text-white"
                 />
               ) : (
                 <span className="w-full truncate text-center text-[11px] font-medium leading-tight text-white [text-shadow:0_1px_3px_rgba(0,0,0,0.95)]">
@@ -4908,31 +4935,41 @@ export function GridOverlay(): React.JSX.Element {
 
           <div className="my-1 h-px bg-white/[0.08]" />
 
-          {/* 新建 ›（直接落盘：create_new_item，递增命名 + 原地改名） */}
+          {/* 新建 ›（V98：文件夹 + 注册表 ShellNew 模板全量 —— Excel/DOCX/ZIP 等
+              与原生子菜单同源同名同图标；懒加载，第一次展开才拉） */}
           <div className="relative" onMouseLeave={() => setBgMenuSub(null)}>
             <BgMenuRow
               icon={<Plus className="h-4 w-4" />}
               label="新建"
               arrow
-              onClick={() => setBgMenuSub(bgMenuSub === 'new' ? null : 'new')}
-              onEnter={() => setBgMenuSub('new')}
+              onClick={() => {
+                loadNewTemplates();
+                setBgMenuSub(bgMenuSub === 'new' ? null : 'new');
+              }}
+              onEnter={() => {
+                loadNewTemplates();
+                setBgMenuSub('new');
+              }}
             />
             {bgMenuSub === 'new' && (
               <div
-                className={`absolute top-[-5px] min-w-[200px] rounded-lg border border-white/10 bg-[#2c2c2c]/95 p-1 shadow-[0_12px_40px_rgba(0,0,0,0.55)] backdrop-blur-xl ${
+                className={`${BG_NEW_SUB_CLASS} ${
                   bgMenu.x > window.innerWidth - 620 ? 'right-full' : 'left-full'
                 }`}
               >
                 <BgMenuRow
                   icon={<FolderPlus className="h-4 w-4" />}
-                  label="新建文件夹"
+                  label="文件夹"
                   onClick={() => createNewItemDirect('folder')}
                 />
-                <BgMenuRow
-                  icon={<FileText className="h-4 w-4" />}
-                  label="新建文本文档"
-                  onClick={() => createNewItemDirect('text')}
-                />
+                {newTemplates.map((template) => (
+                  <BgMenuRow
+                    key={template.ext}
+                    icon={<FileIcon path={template.icon_path} size={16} />}
+                    label={template.name}
+                    onClick={() => createNewItemDirect(template.ext)}
+                  />
+                ))}
               </div>
             )}
           </div>

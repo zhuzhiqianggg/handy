@@ -216,8 +216,8 @@ ok('桌面/格子空白普通右键改弹自绘 bgMenu（V97）',
     !/openDesktopBackgroundMenu\(event\./.test(overlaySrc));
 
 // —— V97：自绘菜单的「新建」直接落盘（不再绕菜单），系统入口走 shell_open_system ——
-ok('ipc.ts 暴露 shellDesktopCreateNew',
-  /shellDesktopCreateNew: \(kind: 'folder' \| 'text'\)/.test(ipcSrc));
+ok('ipc.ts 暴露 shellDesktopCreateNew（V98 起 kind 兼文件夹与扩展名模板）',
+  /shellDesktopCreateNew: \(kind: string\): Promise<CreatedItem \| null>/.test(ipcSrc));
 ok('Rust 命令 desktop_create_new 存在', /pub async fn desktop_create_new\(/.test(rustCmdSrc));
 ok('desktop_create_new 已注册', /commands::grid::desktop_create_new,/.test(libSrc));
 // 落盘路径必须与经典菜单注入项**同一个函数**——两套命名规则是重点盯防对象
@@ -232,6 +232,19 @@ ok('ipc.ts 暴露 shellOpenSystem',
 // 设置页用 explorer.exe 静默打开（cmd start 会闪控制台框）
 ok('ms-settings 用 explorer.exe 打开（不闪控制台）',
   /Command::new\("explorer"\)\s*\.arg\(uri\)/.test(rustCmdSrc));
+
+// —— V98：ShellNew 模板全量（Excel/DOCX/ZIP…）+ 改名框选中高亮 ——
+ok('ipc.ts 暴露 shellNewTemplates',
+  /shellNewTemplates: \(\): Promise<ShellNewTemplate\[\]>/.test(ipcSrc));
+ok('Rust 命令 shell_new_templates 存在', /pub async fn shell_new_templates\(/.test(rustCmdSrc));
+ok('shell_new_templates 已注册', /commands::grid::shell_new_templates,/.test(libSrc));
+ok('扩展名 kind 交给 create_new_from_shell_new 按 ShellNew 模板落地',
+  /shell_menu::create_new_from_shell_new\(&kind\)/.test(rustCmdSrc) &&
+    /pub fn create_new_from_shell_new\(ext: &str\)/.test(shellMenuSrc));
+ok('不存在路径按扩展名取图标（SHGFI_USEFILEATTRIBUTES 分支）',
+  /let usefileattr = !std::path::Path::new\(path\)\.exists\(\);/.test(rustCmdSrc));
+ok('改名框显式恢复选中高亮（select-text + selection 色，格子/竖条两处）',
+  (overlaySrc.match(/select-text rounded bg-neutral-900\/95/g) ?? []).length >= 2);
 // 允许中间夹注释（`{` 与 `setMenuDesktop` 之间有两行解释），但窗口不能太大，
 // 否则这条断言会退化成「文件里同时出现这两串」的假通过。
 ok('Ctrl + 右键才弹 Handy 自己的菜单（Shift 归系统扩展动词）',

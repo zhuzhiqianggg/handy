@@ -260,6 +260,9 @@ ok('左下「未归类」竖条自己滚（列数撞 4 列上限时，内容天�
     // V63 收纳区滚动容器：绝对定位 + `top-0 bottom-0`（统一网格放不下时在这里滚）。
     // 高度由上下 inset 定死，加 min-h-0 只是个无害的摆设，不如进白名单说清楚。
     '"absolute left-0 top-0 bottom-0 overflow-y-auto overflow-x-hidden"',
+    // V98 自绘菜单「新建」子菜单（BG_NEW_SUB_CLASS 常量）：绝对定位 + `max-h` 定高，
+    // ShellNew 模板条目多时在自身内滚，不把整张菜单顶出屏幕。
+    '"absolute top-[-5px] max-h-[400px] min-w-[200px] overflow-y-auto rounded-lg border border-white/10 bg-[#2c2c2c]/95 p-1 shadow-[0_12px_40px_rgba(0,0,0,0.55)] backdrop-blur-xl"',
   ]);
   const files = [
     ['GridOverlay.tsx', overlayCode],

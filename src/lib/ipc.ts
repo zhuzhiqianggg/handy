@@ -24,6 +24,7 @@ import type {
   LogInfo,
   ReclaimReport,
   CreatedItem,
+  ShellNewTemplate,
 } from '@/types/grid';
 import type {
   VaultItem,
@@ -356,16 +357,26 @@ export const ipc = {
     call<CreatedItem | null>('shell_desktop_background_menu', { extended }),
 
   /**
-   * 直接在桌面目录新建一个条目（V97），不经过任何菜单。
+   * 直接在桌面目录新建一个条目（V97；V98 扩展支持模板），不经过任何菜单。
    *
-   * V97 起桌面空白右键改弹**前端自绘的 Win11 同款菜单**，菜单里的「新建」子项直接调
-   * 这里 —— 后端复用 `shell_menu::create_new_item`（与 V88 以来「新建文件夹 / 新建
-   * 文本文档」完全同一条落盘路径：`新建文件夹` → `新建文件夹 (2)` 递增命名）。
+   * `kind` 两种形态：
+   * - `'folder'` / `'text'`：文件夹 / 文本文档（`create_new_item` 落盘）；
+   * - `'.xlsx'` 这类扩展名：按注册表 `HKCR\<ext>\ShellNew` 模板落地（V98），
+   *   与 Explorer 的「新建」子菜单同一套语义。
    *
    * 返回 `CreatedItem`：前端据此「增量认领 + 原地改名」，和菜单路径的返回值语义一致。
    */
-  shellDesktopCreateNew: (kind: 'folder' | 'text'): Promise<CreatedItem | null> =>
+  shellDesktopCreateNew: (kind: string): Promise<CreatedItem | null> =>
     call<CreatedItem | null>('desktop_create_new', { kind }),
+
+  /**
+   * ShellNew「新建」模板完整列表（V98）。
+   *
+   * 自绘菜单的「新建」子菜单数据源：注册表里所有带 `ShellNew` 的扩展名，
+   * 显示名与图标都和资源管理器同源。结果建议按需拉一次并缓存。
+   */
+  shellNewTemplates: (): Promise<ShellNewTemplate[]> =>
+    call<ShellNewTemplate[]>('shell_new_templates'),
 
   /**
    * 打开一个系统级目标（V97，自绘菜单专用）：
