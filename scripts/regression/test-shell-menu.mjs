@@ -455,15 +455,30 @@ ok('V89：新建成功也写日志（成功不静默，才能区分「没点到�
 //     （用户 10-10 报障一路到「第三次直接建不出来」）。
 // V96 回退：整窗命中区 + 根画布接管态整窗可交互 ⇒ 空白右键进我们自己的菜单
 // （`show_background_context_menu` = 完整背景菜单 + 我们注入的、必成的「新建」）。
+//
+// V102（B 方案 Step 3）在此之上**再加一个穿透条件**：表达式升级为
+//   `contentHidden || iconControl ? 'none' : 'auto'`
+// `iconControl` = B 模式（不接管原生桌面）开关。此时图标归 Explorer，桌面空白处的
+// 右键必须落到 Explorer 自己那张原生菜单上（查看 / 排序方式 / 刷新 / 新建，全是原生的）。
+//
+// ★ 判据必须是**或**：写成 `contentHidden && iconControl` 则 B 模式下根画布仍是
+//   `auto` ⇒ 空白右键被我们吃掉 ⇒ 原生菜单永远弹不出来（就是 V92 要解决的那个问题）。
+//   这一条只能靠源码断言守（编译通过、类型正确、跑起来才炸）。
 ok('V96：根画布接管态整窗可交互（空白右键归 Handy 自己的菜单）',
-  /pointerEvents: contentHidden \? 'none' : 'auto',/.test(overlaySrc));
+  /pointerEvents: contentHidden \|\| iconControl \? 'none' : 'auto',/.test(overlaySrc));
+ok('V102：B 模式下根画布整层穿透（空白右键交给 Explorer 原生菜单，两个条件是「或」不是「与」）',
+  !/pointerEvents: contentHidden && iconControl/.test(overlaySrc) &&
+    /pointerEvents: contentHidden \|\| iconControl \? 'none' : 'auto',/.test(overlaySrc));
 ok('V96：**恢复**上报「整窗」命中区（否则 Rust 命中轮询把整窗切回穿透、空白右键点不到）',
   /width: window\.innerWidth \* scaleFactor/.test(overlaySrc));
 ok('V96：整窗命中区只在内容可见时上报（内容收起时交回桌面）',
   /const regions: GridRegion\[\] = \[\];[\s\S]{0,160}?if \(!contentHidden\) \{/.test(overlaySrc));
-ok('V96：命中区依赖数组仍是 [regionsKey, scaleFactor, contentHidden]（不含 takeover）',
-  !/\}, \[regionsKey, scaleFactor, contentHidden, takeover\]\);/.test(overlaySrc) &&
-    /\}, \[regionsKey, scaleFactor, contentHidden\]\);/.test(overlaySrc));
+// V102：依赖数组多了一个 `iconControl`（B 模式切换后命中区整批变了，必须重报）。
+// 但**仍然不许**出现 `takeover` —— 接管态从来不是命中区的输入（V96 定的），
+// 加进去会让「接管自检把网格切回穿透」这条老病复发。
+ok('V96：命中区依赖数组含 contentHidden / iconControl，但不含 takeover',
+  /\}, \[regionsKey, scaleFactor, contentHidden, iconControl\]\);/.test(overlaySrc) &&
+    !/\}, \[regionsKey, scaleFactor, contentHidden[^\]]*takeover[^\]]*\]\);/.test(overlaySrc));
 ok('V89：handoff 整体停用（HANDOFF_DISABLED）',
   /const HANDOFF_DISABLED: bool = true;/.test(handoffSrc));
 ok('V89：begin_handoff 看到停用标志就让路',

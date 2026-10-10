@@ -781,8 +781,8 @@ MUTATIONS: dict[str, _M] = {
         (
             "V96 根画布又改回「只拖拽时可交互」（空白右键穿透给 Explorer ⇒ 新建又压在 ShellNew 上）",
             "src/modules/desktop-grid/GridOverlay.tsx",
-            "        pointerEvents: contentHidden ? 'none' : 'auto',",
-            "        pointerEvents: itemDragging ? 'auto' : 'none',",
+            "        pointerEvents: contentHidden || iconControl ? 'none' : 'auto',",
+            "        pointerEvents: contentHidden || itemDragging ? 'none' : 'auto',",
             "空白右键一穿透，就又回到「隔空操作被我们隐藏的图标视图」那条路 —— V92/V93/V94/V95 "
             "修了七轮都不收敛（用户 10-10：第一次成、第二次时好时坏、第三次直接建不出来）",
         ),
@@ -827,6 +827,132 @@ MUTATIONS: dict[str, _M] = {
             "退回 syncDesktop() ⇒ gridDesktopSync() + 整层 refresh()：用户点「新建文件夹」看到的"
             "不是「名字上有了光标」，而是「整张桌面自己刷了一下、格子全跳一遍」——"
             "正是用户 10-10 说的「跟正常的桌面行为不一样」",
+        ),
+    ],
+
+    # V102 新增：B 方案（不接管原生桌面）这一组归 test-icon-control.mjs 管。
+    # 这一组挑的都是**「编译通过、类型正确、跑起来才炸」**或**「跑起来也不炸、只是
+    # 图标悄悄跑偏」**的退化方式 —— 后者才是 B 方案最危险的失效形态（用户只说得出
+    # 「看着不对」，说不出哪里不对）。
+    "scripts/regression/test-icon-control.mjs": [
+        (
+            "B 模式下仍然隐藏原生图标（等于又回到「自己扮 Explorer」）",
+            "src-tauri/src/commands/grid.rs",
+            "    if hidden && icon_control_runtime(app) {\n        return false;\n    }\n",
+            "    if hidden && false {\n        return false;\n    }\n",
+            "B 方案的根就是「图标归 Explorer」。这一拦没了 ⇒ 图标被我们藏起来，而我们的"
+            "摆位是发给 Explorer 的（它画的图标却不可见）⇒ 桌面空白，只有我们画的装饰底板；"
+            "「接管桌面」那六十批的 Z 序 / Win+D / 自愈 / ShellNew 全套坑原样搬回来",
+        ),
+        (
+            "LVS_AUTOARRANGE 位值写错成 0x0001（那是 LVS_REPORT）",
+            "src-tauri/src/platform/desktop_icons.rs",
+            "pub const LVS_AUTOARRANGE: u32 = 0x0100;",
+            "pub const LVS_AUTOARRANGE: u32 = 0x0001;",
+            "照着错的位判「自动排列」，永远读到「关着」（或永远读到「开着」）⇒ 该关的时候"
+            "没关，`LVM_SETITEMPOSITION` 发出去被 Explorer 立刻拉回，表现为「点了开关没反应」。"
+            "取证探针第一版就栽在这里，结论**整个反了**（见 desktop-icons-pos-probe.py 抬头）",
+        ),
+        (
+            "发消息退回裸 SendMessage（Explorer 一忙就把我们一起冻住）",
+            "src-tauri/src/platform/desktop_icons.rs",
+            "            SendMessageTimeoutW(\n",
+            "            SendMessageW(\n",
+            "裸 SendMessage 同步等 Explorer 的 UI 线程、且**没有超时**：它正在建文件 / 正在重画"
+            "图标时，我们（以及整个应用）陪着一起卡；Explorer 真挂了就是永久冻死。"
+            "跨进程发消息必须带 SMTO_ABORTIFHUNG + 超时",
+        ),
+        (
+            "flags_cleared 顺手多清一位（不可逆地改掉用户桌面偏好）",
+            "src-tauri/src/platform/desktop_icons.rs",
+            "    flags & !(FLAG_AUTOARRANGE | FLAG_SNAPTOGRID)",
+            "    flags & !(FLAG_AUTOARRANGE | FLAG_SNAPTOGRID | 0x0000_0002)",
+            "备份只有一份：多清的位在用户关掉 B 模式时还原不回去 —— 用户根本不知道是我们干的。"
+            "「只动自己那两位」必须由单测 + 守卫同时锁死",
+        ),
+        (
+            "位置快照每次开启都重存（原始布局被我们摆过的那一版覆盖）",
+            "src-tauri/src/commands/grid_icons.rs",
+            "            if meta_get(&conn, META_POS_BACKUP).is_none() {",
+            "            if true {",
+            "用户「开 → 关 → 开」之后，快照里存的已经不是原始布局、而是**我们摆过的那一版**"
+            "⇒「还原图标布局」变成「还原成 Handy 摆的样子」，原始布局永久丢失。"
+            "快照只在 `is_none()` 时写，正是为了这个",
+        ),
+        (
+            "关闭时硬编码还原成「开着自动排列」（不还原备份原值）",
+            "src-tauri/src/commands/grid_icons.rs",
+            "                di::set_autoarrange(list, di::flags_autoarrange_on(flags));",
+            "                di::set_autoarrange(list, true);",
+            "用户本来就没开自动排列（用第三方桌面工具前关过）⇒ 我们退出时反而**替他打开**了。"
+            "决策 3 定的就是「原值还原」，不是「还原成默认值」",
+        ),
+        (
+            "底板内容原点写死数字（图标与框线错位）",
+            "src-tauri/src/commands/grid.rs",
+            "        origin_dy: BOX_HEADER_H + BOX_BORDER_H + GRID_PAD_Y,",
+            "        origin_dy: 47,",
+            "写死数字就与前端脱钩：只要标题栏高 / 边距 / 内边距任一改动，图标就会整体压到"
+            "框线上或飘出格子（V59「渲染几何 = 引擎几何」的同一类错，只不过这次错在 B 模式）",
+        ),
+        (
+            "B 模式下前端继续画图标（每个图标出现两份）",
+            "src/modules/desktop-grid/GridOverlay.tsx",
+            "              {!iconControl && boxItems.map((item) => {",
+            "              {boxItems.map((item) => {",
+            "原生图标就在下面，我们再画一份 ⇒ 用户看到「重影」：上面那份点不动、下面那份"
+            "才对 —— 表现为「图标点一下没反应，要点两下」",
+        ),
+        (
+            "B 模式下格子内容区不穿透（原生图标的双击 / 右键 / 拖拽全废）",
+            "src/modules/desktop-grid/GridOverlay.tsx",
+            "                  pointerEvents: iconControl ? 'none' : undefined,",
+            "                  pointerEvents: undefined,",
+            "内容区不吃点击就是「看得见、点不着」：用户双击图标没反应、右键出的是我们的菜单"
+            "而不是原生的。B 方案的全部价值（原生行为一字不改）都建立在穿透上",
+        ),
+        (
+            "摆位不再挂在重排之后（按新格子算坐标、按旧底板放图标）",
+            "src/modules/desktop-grid/GridOverlay.tsx",
+            "        .then(() => (iconControl ? ipc.desktopIconLayoutApply() : Promise.resolve(null)))",
+            "        .then(() => null)",
+            "少了这一脚，拖动格子之后底板挪了、图标还停在旧位置 —— 直到下一次偶然的重排才"
+            "跟上。表现为「拖完格子图标乱飞一下又回到原位」",
+        ),
+        (
+            "还原入口摆到快照判断之外（没快照也显示）",
+            "src/modules/desktop-grid/GridManagerView.tsx",
+            "      {iconControl.snapshot > 0 && (",
+            "      {true && (",
+            "没存过快照也摆一个「还原图标布局」按钮，点下去 Rust 报「没有可还原的快照」——"
+            "用户视角就是「按钮是个摆设」，正是 V97 明确砍掉的那类项（宁缺毋滥）",
+        ),
+        (
+            "B 模式下仍然上报「整窗」命中区（原生图标看得见、点不动）",
+            "src/modules/desktop-grid/GridOverlay.tsx",
+            "      if (!iconControl) {\n        regions.push({\n          x: 0,\n          y: 0,",
+            "      if (true) {\n        regions.push({\n          x: 0,\n          y: 0,",
+            "「根画布 pointerEvents:none」只解决窗口**内部**的转发；真正决定「这个点归谁」的是"
+            "Rust 那条 25ms 命中轮询（`let want = interactive || cursor_hit(&win)`）。整窗命中区"
+            "还在 ⇒ 窗口一直吃点击 ⇒ 原生图标双击没反应、右键出的是我们的菜单 —— "
+            "B 方案唯一要保住的东西（原生行为一字不改）就没了",
+        ),
+        (
+            "B 模式下仍把整块格子报成命中区（内容区吃掉了原生图标）",
+            "src/modules/desktop-grid/GridOverlay.tsx",
+            "            height: (BOX_HEADER_H + BOX_BORDER_H) * scaleFactor,",
+            "            height: box.height * scaleFactor,",
+            "内容区被报成命中区 ⇒ 光标一进格子（也就是一进图标那一整片区域）窗口就恢复吃点击"
+            "⇒ 格子里所有原生图标全部点不着 —— 而「格子里的图标点不着」正是用户会第一眼"
+            "看到、却最难归因的那种坏",
+        ),
+        (
+            "B 模式镜像出现第二条写路（grid.rs 里再写一次）",
+            "src-tauri/src/commands/grid.rs",
+            "fn icon_control_runtime(app: &AppHandle) -> bool {\n",
+            "fn icon_control_runtime(app: &AppHandle) -> bool {\n    set_icon_control_runtime(false);\n",
+            "V61 教训：一个跨线程状态两条写路就会互相覆盖（当时表现为「右键好使、左键不好使」）。"
+            "两条路各自读到的库值可能不同 ⇒「开关点了没反应」或「重启后开关自己变回来」",
         ),
     ],
 }

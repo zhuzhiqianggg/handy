@@ -18,6 +18,7 @@ import type {
   LayoutSnapshotMeta,
   OverlayStatus,
   TakeoverState,
+  IconControlStatus,
   CleanupReport,
   IconMetrics,
   LegacyRootInfo,
@@ -464,6 +465,24 @@ export const ipc = {
     call<boolean>('grid_desktop_icons_set', { hidden }),
   /** 系统桌面图标当前是否可见 */
   gridDesktopIconsGet: (): Promise<boolean> => call<boolean>('grid_desktop_icons_get'),
+
+  // —— B 方案：不接管原生桌面（图标遥控）——
+  //
+  // 默认关。开启后：不再隐藏 `SysListView32`，改为把图标**遥控**摆进各格子的网格。
+  // 它会写桌面图标位置与 `FFlags`（自动排列开关），所以做成**显式开关**而不是默认行为。
+
+  /** 读 B 模式状态（是否开启 / 是否已关自动排列 / 间距 / 快照条数） */
+  desktopIconControlGet: (): Promise<IconControlStatus> =>
+    call<IconControlStatus>('desktop_icon_control_get'),
+  /** 开 / 关 B 模式（开启会快照位置 + 备份 FFlags + 关自动排列 + 立即摆一次） */
+  desktopIconControlSet: (enabled: boolean): Promise<IconControlStatus> =>
+    call<IconControlStatus>('desktop_icon_control_set', { enabled }),
+  /** 按当前格子布局重新摆一次图标（B 模式未开启会报错，不会动桌面） */
+  desktopIconLayoutApply: (): Promise<IconControlStatus> =>
+    call<IconControlStatus>('desktop_icon_layout_apply'),
+  /** 还原到「开启 B 模式之前」的图标布局 */
+  desktopIconLayoutRestore: (): Promise<IconControlStatus> =>
+    call<IconControlStatus>('desktop_icon_layout_restore'),
 
   // —— 工作台顶部贴条（常驻桌面顶部的今日概览）——
 

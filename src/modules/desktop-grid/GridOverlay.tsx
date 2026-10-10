@@ -1125,6 +1125,41 @@ export function GridOverlay(): React.JSX.Element {
   /** 是否正处于「条目被拖着走」的状态（拖出格子 = 移出，落在根画布上要接住 drop） */
   const [itemDragging, setItemDragging] = useState(false);
 
+  /**
+   * **B 模式**（不接管原生桌面）是否开启 —— 见 `docs/04-review/PLAN-B-PHASED.md`。
+   *
+   * 开启后这一层退化成**纯装饰**：
+   *   - 不再画文件 / 文件夹图标（原生图标就在下面，再画一份就是重复内容）；
+   *   - 格子标题栏以外的区域**不吃点击**（让原生图标的双击 / 右键 / 拖拽全部可用）；
+   *   - 「未归类」竖条不渲染（原生图标本来就看得见，竖条纯冗余）。
+   * 默认 `false` = 完全保持 V101 的行为。
+   */
+  const [iconControl, setIconControl] = useState(false);
+
+  // B 模式状态：挂载读一次 + 2 秒轮询对齐（用户在管理页切换后这里要跟上）。
+  //
+  // 用轮询而不是事件：管理页是**另一个窗口**，跨窗口没有通用事件总线（V21 起就是
+  // 这个口径，`grid-overlay-status` 也是轮询）。查询本身只读一行 `grid_meta`，开销可忽略。
+  useEffect(() => {
+    let alive = true;
+    const sync = (): void => {
+      void ipc
+        .desktopIconControlGet()
+        .then((status) => {
+          if (alive) {
+            setIconControl(status.enabled);
+          }
+        })
+        .catch(() => undefined);
+    };
+    sync();
+    const timer = window.setInterval(sync, 2000);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
+  }, []);
+
   // V51：格子视图模式——'grid'（图标网格）或 'list'（列表）。每格子可独立切换，
   // 未设的默认 'grid'。用户 09-19：「格子里面显示方式可以切换图标和列表两种方式」
   const [boxViewModes, setBoxViewModes] = useState<Record<number, 'grid' | 'list'>>(() => {
@@ -1380,9 +1415,12 @@ export function GridOverlay(): React.JSX.Element {
       void ipc
         .gridRelayout()
         .then(() => refresh())
+        // B 模式：格子几何变了，把原生图标按新网格**重摆一次** —— 否则底板挪了、
+        // 图标还停在旧位置。未开启 B 模式时这条命令会直接报错，被 catch 吞掉，零副作用。
+        .then(() => (iconControl ? ipc.desktopIconLayoutApply() : Promise.resolve(null)))
         .catch(() => undefined);
     }, RELAYOUT_DEBOUNCE_MS);
-  }, [holdQuiet, isQuiet, refresh]);
+  }, [holdQuiet, isQuiet, refresh, iconControl]);
 
   /** 上一次「未归类」竖条快照：路径序 + 矩形宽（对账时 diff 出新文件 / 宽度变化） */
   const looseSnapRef = useRef<{ paths: string[]; width: number }>({ paths: [], width: 0 });
@@ -2105,7 +2143,7 @@ export function GridOverlay(): React.JSX.Element {
     sidePanel === null ? '' : `${sidePanel.tab}:${sidePanel.entry?.id ?? ''}`
   }|pw=${panelWide ? 'full' : 'half'}|menu=${[menuBox, menuItem, menuLoose, menuDock]
     .map((m) => (m === null ? '0' : '1'))
-    .join('')}|tb=${toolbarOpen ? '1' : '0'}`;
+    .join('')}|tb=${toolbarOpen ? '1' : '0'}|ic=${iconControl ? '1' : '0'}`;
 
   /**
    * 是否有右键菜单开着。
@@ -2134,13 +2172,42 @@ export function GridOverlay(): React.JSX.Element {
       // 换成了我们自己的。而「穿透给 Explorer」在图标视图被我们隐藏的前提下，那几个原生
       // 项本来就作用在看不见的视图上、等于空转，却顺带引入了「隐藏改名框」这条修了七轮
       // 都不收敛的链路（V87–V95）。
-      regions.push({
-        x: 0,
-        y: 0,
-        width: window.innerWidth * scaleFactor,
-        height: window.innerHeight * scaleFactor,
-      });
+      // ★ V102（B 模式）：这一条**必须让路** —— `iconControl` 时整窗命中区绝不能报。
+      //
+      // 「根画布 pointerEvents:none」只解决**窗口内部**的转发：点击落在我们窗口上、
+      // 穿过 DOM 之后仍然停在我们这层窗，到不了 Explorer。真正决定「这个点归谁」的是
+      // Rust 那条 25ms 命中轮询：`let want = interactive || cursor_hit(&win)` ——
+      // 只要光标命中我们上报的任一矩形，就 `set_ignore_cursor_events(false)`（窗口吃点击）。
+      //
+      // 所以 B 模式下只要还报整窗，就等于「整张桌面还是我们的」：原生图标看得见、
+      // 点不动（双击没反应、右键出的是我们的菜单）。这正是 B 方案唯一要保住的东西。
+      if (!iconControl) {
+        regions.push({
+          x: 0,
+          y: 0,
+          width: window.innerWidth * scaleFactor,
+          height: window.innerHeight * scaleFactor,
+        });
+      }
       for (const box of visibleBoxes) {
+        if (iconControl) {
+          // B 模式：每个格子**只报标题栏那一条**。
+          //
+          // 标题栏是格子唯一「属于我们」的部分（拖动 / 右键 / 改名都在它上面，V57）；
+          // 内容区必须整片交还桌面 —— 原生图标就画在那里，多报 1px 就有一个像素点的
+          // 图标点不着。`BOX_BORDER_H` 一并算进来是因为标题栏下方那条 2px 边框是它的
+          // 视觉下沿（不算的话，贴着边框点的「按住拖格子」会漏到桌面去）。
+          //
+          // 不去单独报四周那圈 2px 边框：那会在桌面正中铺出一圈极细的「吃点击的线」，
+          // 用户根本瞄不到，却正好压在图标网格的缝上 —— 收益为零、风险非零。
+          regions.push({
+            x: box.posX * scaleFactor,
+            y: box.posY * scaleFactor,
+            width: box.width * scaleFactor,
+            height: (BOX_HEADER_H + BOX_BORDER_H) * scaleFactor,
+          });
+          continue;
+        }
         regions.push({
           x: box.posX * scaleFactor,
           y: box.posY * scaleFactor,
@@ -2181,13 +2248,15 @@ export function GridOverlay(): React.JSX.Element {
       });
     }
     void ipc.gridOverlayUpdateRegions(regions).catch(() => undefined);
-    // regionsKey 已覆盖 boxes / 菜单几何变化；contentHidden 翻转时要重算命中区（只留工具栏）。
+    // regionsKey 已覆盖 boxes / 菜单几何变化；contentHidden 翻转时要重算命中区（只留工具栏）；
+    // V102 起 `iconControl` 也进键 —— 模式切换后命中区整批变了（整窗 → 只剩标题栏），
+    // 不重报的话「切到 B 模式后整张桌面还是点不着」（要等下一次几何变化才偶然自愈）。
     //
     // V96：**又上报「整窗」命中区了**（V92 曾删掉）。那时删它是因为「空白右键该给 Explorer」，
     // 但那条路最终证明不成立（见 `openDesktopBackgroundMenu` 的注释）—— 空白右键必须回到我们
     // 自己的菜单，否则「新建」永远压在 Explorer 的 ShellNew 上、时好时坏。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [regionsKey, scaleFactor, contentHidden]);
+  }, [regionsKey, scaleFactor, contentHidden, iconControl]);
 
   /**
    * 右键菜单开着期间**强制整窗可交互**（V47）。
@@ -3809,7 +3878,12 @@ export function GridOverlay(): React.JSX.Element {
         // 菜单本体仍是完整 Shell 背景菜单，只是把必然 E_FAIL 的原生「新建」换成了我们的。
         //
         // 内容收起（V44.3）时才交回桌面 —— 那时整层都不该吃事件。
-        pointerEvents: contentHidden ? 'none' : 'auto',
+        //
+        // ★ B 模式（不接管原生桌面）：**根画布同样整层穿透** —— 桌面空白处的右键要落到
+        // Explorer 自己那张原生菜单上（查看 / 排序方式 / 刷新 / 新建，全是原生的）。
+        // 只有格子的标题栏保留 `auto`，让「拖动格子 / 右键格子」还能用。
+        // 见 `docs/04-review/PLAN-B-PHASED.md` Step 3。
+        pointerEvents: contentHidden || iconControl ? 'none' : 'auto',
       }}
       onContextMenu={(event) => {
         // V97：**桌面空白右键在这里分发** —— 根画布整窗可交互（见上方 `pointerEvents`），
@@ -4005,7 +4079,15 @@ export function GridOverlay(): React.JSX.Element {
                 setMenuBox({ id: box.id, x: event.clientX, y: event.clientY });
               }}
               className="flex h-9 shrink-0 cursor-move items-center gap-1.5 px-3 active:cursor-grabbing bg-gradient-to-b from-white/[0.04] to-transparent border-b border-white/[0.06]"
-              title="拖拽移动 · 双击重命名标题"
+              /* B 模式（V102）：**标题栏是格子唯一还能收东西的地方** —— 内容区已经整片
+                 交还桌面（原生图标就画在那儿），所以「拖文件进格子」的落点只剩这条 37px。
+                 不说清楚的话，用户按老习惯往格子中间拖，文件会被 Explorer 当成「丢到桌面
+                 空白处」（原位不动、只登记失败），看起来像「拖进去没反应」。 */
+              title={
+                iconControl
+                  ? '把文件拖到这条标题栏上 = 登记进这个格子（格子里的图标是原生图标，直接双击就能打开）· 拖拽移动 · 双击重命名标题'
+                  : '拖拽移动 · 双击重命名标题'
+              }
             >
               {renamingId === box.id ? (
                 <input
@@ -4155,14 +4237,19 @@ export function GridOverlay(): React.JSX.Element {
                 className={getBoxViewMode(box.id) === 'list'
                   ? "flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto px-2 py-1.5 grid-scroll"
                   : "grid min-h-0 flex-1 content-start gap-1.5 overflow-y-auto px-2.5 py-2 grid-scroll"}
-                style={getBoxViewMode(box.id) === 'grid'
-                  ? {
-                      gridTemplateColumns: `repeat(auto-fill, minmax(${iconSize + 32}px, 1fr))`,
-                      gridAutoRows: `${iconSize + 36}px`,
-                    }
-                  : undefined}
+                // B 模式：内容区**不吃点击** —— 原生图标就在下面，双击 / 右键 / 拖拽
+                // 全部交还 Explorer（见 `docs/04-review/PLAN-B-PHASED.md` Step 3）。
+                style={{
+                  pointerEvents: iconControl ? 'none' : undefined,
+                  ...(getBoxViewMode(box.id) === 'grid'
+                    ? {
+                        gridTemplateColumns: `repeat(auto-fill, minmax(${iconSize + 32}px, 1fr))`,
+                        gridAutoRows: `${iconSize + 36}px`,
+                      }
+                    : {}),
+                }}
               >
-              {addingBoxId === box.id ? (
+              {!iconControl && addingBoxId === box.id ? (
                 <div className="col-span-full flex items-center gap-1">
                   <input
                     autoFocus
@@ -4182,7 +4269,7 @@ export function GridOverlay(): React.JSX.Element {
                   />
                 </div>
               ) : null}
-              {boxItems.map((item) => {
+              {!iconControl && boxItems.map((item) => {
                 const isListView = getBoxViewMode(box.id) === 'list';
                 return (
                 <div
@@ -4281,7 +4368,7 @@ export function GridOverlay(): React.JSX.Element {
                 </div>
                 );
               })}
-              {boxItems.length === 0 && (
+              {!iconControl && boxItems.length === 0 && (
                 <p className="col-span-full py-4 text-center text-[11px] leading-relaxed text-neutral-400/60">
                   拖文件到这里
                 </p>
@@ -4328,7 +4415,7 @@ export function GridOverlay(): React.JSX.Element {
           等宽网格「先自上而下、再往右一列」铺开 —— 前后端差一列就会盖住分类格。
 
           只在接管模式下渲染：接管关着时桌面本来就看得见这些图标，再画一份就是两份。 */}
-      {!contentHidden && takeover?.enabled === true && loose !== null && loose.columns > 0 && (
+      {!contentHidden && takeover?.enabled === true && !iconControl && loose !== null && loose.columns > 0 && (
         <div
           ref={looseRef}
           style={{

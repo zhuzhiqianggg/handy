@@ -269,6 +269,33 @@ export interface TakeoverState {
   iconsVisible: boolean;
 }
 
+/**
+ * B 方案（不接管原生桌面）状态 —— `desktop_icon_control_*` 返回。
+ *
+ * 与 [`TakeoverState`] 是**两条互斥的路线**：那是「藏掉原生图标、自己画」，
+ * 这是「原生图标照旧，只遥控它的位置」。详见 `docs/04-review/PLAN-B-PHASED.md`。
+ */
+export interface IconControlStatus {
+  /** B 模式是否开启 */
+  enabled: boolean;
+  /** 是否已关掉桌面「自动排列」（遥控的**前提**；没关掉的话摆位会被立刻拉回） */
+  autoarrangeOff: boolean;
+  /** 当前 `FFlags`（十进制，便于和备份对照） */
+  fflags: number | null;
+  /** 开启前备份的 `FFlags`（关闭时按它还原） */
+  fflagsBackup: number | null;
+  /** 桌面图标总数 */
+  iconCount: number;
+  /** 本轮成功摆位的图标数 */
+  placed: number;
+  /** 本轮没匹配上桌面图标的登记条目数（显示名对不上，通常是个别条目） */
+  unmatched: number;
+  /** Explorer 的图标间距 `[宽, 高]`，格子里的图标网格按它排 */
+  spacing: [number, number];
+  /** 位置快照条数（> 0 表示「还原到接管前」可用） */
+  snapshot: number;
+}
+
 /** 布局快照里的单条引用 */
 export interface LayoutItem {
   filePath: string;

@@ -44,6 +44,8 @@ const SUITES = [
   'test-shell-menu.mjs',
   // V59：内部拖拽必须是指针拖拽（HTML5 拖放在挂件窗里被 wry 判死）+ 盒子高度必须绑引擎值
   'test-drag-pointer.mjs',
+  // V102：B 方案（不接管原生桌面）—— 图标不被我们藏 / 底板与图标共用一份几何 / 不写文件
+  'test-icon-control.mjs',
 ];
 
 let failed = 0;
