@@ -32,8 +32,9 @@
 **第1列 未归类竖条 → 第2/3列 归纳格子 → 第4列 便签 → 第5列 工作台**。收纳区右界 = `workstation_rect().x - ARRANGE_GAP_X`。
 - **V69 按内容定尺寸**：尺寸只看条目数；常量 `CELL_EXTRA_W=32`、`BOX_CELL_EXTRA_H=36`（勿混竖条 30）、`BOX_HEADER_H=37`、`GRID_SCROLLBAR_W=4`、`BOX_FIT_SLACK=2`、`MIN_BOX_W=160/120`、`AUTO_MAX_W=520`、`AUTO_MAX_COLS=5`；摆放序 = `(面积, 内容量, 高, 宽)` 降序（**内容量分量不可省**）。
   - ★★ **V95 分列 = 顺序填充**（用户「从右到左 从上到下 满了才换列」；LPT 最矮列废弃）：第一列塞满才换列；**物理装不下退回 LPT 均衡**。评分 `(-k, 自然宽优先, tallest, used_w)`：列数最少赢；**同 k 没夹宽的赢**。V94 `(tallest, used_w)` 与 V84 `min(横,纵)` 都作废。带下分流：whole `overflowed||squeezed` 才拆分，收益「不更差就换」。
-  - ★★ **V97 空白右键 = 前端自绘「Win11 同款」菜单**（`bgMenu` + `BgMenuRow`）：新式菜单**只能由 Explorer 自己渲染** ⇒ 自绘外壳逐项接真行为：查看›自动整理/显示桌面图标（勾选=contentHidden）、**排序方式›（V99）**、刷新、新建›（§3 V98/V99）、显示设置/个性化/终端（`shell_open_system`：explorer.exe 开 ms-settings；终端 wt 退回 powershell）、**显示更多选项 = 经典背景菜单**；Shift 右键直达经典扩展、Ctrl 右键 = Handy 菜单。
-  - ★★ **V98/V99 新建› = 与原生 1:1**（用户对照截图逐项校准）：数据源**不是**注册表枚举，而是 Explorer 的 **`HKCU\...\Explorer\Discardable\PostSetup\ShellNew` 的 `Classes` 多字符串缓存**（缺失才退回全量枚举）。ShellNew 认**四种位置**：`.ext\ShellNew` / `.ext\<ProgID>\ShellNew`（← WPS 全家）/ 顶层 `<ProgID>\ShellNew` / ext 任意子键；**空壳键（无值）原生也不显示**。`.txt`/`.bmp` 注册表已无 ShellNew 但原生仍显示 = **Win11 内置（建空文件）→ 硬编码**。过滤 `.lnk`/`.library-ms`；**按扩展名字母序**；**不许按类型名去重**（会拿同类名把 `.txt` 顶掉）。显示名 `SHGFI_TYPENAME`；**不存在路径取图标必须 `SHGFI_USEFILEATTRIBUTES`**；**根画布 `select-none` 会压没 input 选中高亮** ⇒ 改名框显式 `select-text`。快捷方式 = 空 .lnk（原生向导无公开入口）。
+  - ★★ **V101 带下拆分平局裁决 = 升序遍历 + `<=`**（真机事故：便签 5→2 后六格全体甩到便签底下 y=364、上带整片留空）：降序 + `<=` 会让最后检查的 m=0 赢走所有平局。**平局时 band_a 装得更多者胜**（m 越大越优先；m=0 全塞带下只有严格更低才能赢）。
+  - ★ **V97–V99 空白右键 = 前端自绘**（`bgMenu`+`BgMenuRow`）：新式菜单**只能由 Explorer 渲染** ⇒ 自绘外壳逐项接真行为（查看/排序方式/刷新/新建›/显示设置/个性化/终端）；**显示更多选项 = 经典背景菜单**；Shift 直达经典、Ctrl = Handy 菜单。**均将于 B 方案整体删除**。
+  - ★ **V98/V99 新建› = 与原生 1:1**：数据源**不是**注册表，而是 Explorer **`Discardable\PostSetup\ShellNew` 的 `Classes` 缓存**；ShellNew 四位置：`.ext\ShellNew` / `.ext\<ProgID>\ShellNew`（← WPS）/ 顶层 `<ProgID>\ShellNew` / ext 任意子键；**空壳键原生不显示**；`.txt`/`.bmp` = Win11 内置 → 硬编码；过滤 `.lnk`/`.library-ms`；按扩展名字母序；**不许按类型名去重**（会顶掉 `.txt`）。显示名 `SHGFI_TYPENAME`；不存在路径取图标必须 `SHGFI_USEFILEATTRIBUTES`；**根画布 `select-none` 压 input 选中高亮** ⇒ 改名框 `select-text`。
 - ★★ **V85 落位右锚定 + 列内撑满**：列**从右往左**排（第一列贴便签/工作台侧）；窄格**撑到列宽**并按新宽重算高（只撑宽、**不夹窄**）。`content_plan_in` ④ 用**右沿递减**（摆完一列 `right = x - GAP`）——写成「x = 右沿−总宽」= 块**左**端 ⇒ 左溢。
 - ★ **幂等是算出来的，不许几何去兜**（V69）：摆放序是内容的纯函数 ⇒ 尺寸没变 ⇒ 落位一字不差。
 - ★★ **V70**：内部几何两边逐像素相等（差 1px ⇒ 提前出滚动条 ⇒ 少一列）；高度上限跟 zone_h；**满了不许再建**（`probe_room_for_another_box` 真插真排看 overflowed，出错放行）。
@@ -44,11 +45,11 @@
 - **V42–V71**：竖条·三面板·Z 序锚定·挂件分列·指针拖拽·工作台·列式填满（**V64/V65 作废**）。
 - **V75–V80** 桌面日历；V80：`jumpTo` 夹 1900–2100 且带 selected、写盘走 `patchSettings`（禁 `writeSettings`）。
 - **V87/V88** 背景菜单自弹（`CreateViewObject`；`FOLDERID_Desktop`+`BindToObject` 必 `E_INVALIDARG`）；原生「新建」需 `IShellView` ⇒ 自注入。
-- **V89–V96 桌面右键七轮**：抢右键⇒菜单残缺；转发⇒双菜单；穿透⇒「隐藏改名框」死结；V96 收回自有菜单。**V97 定稿自绘**（见 §3）。**V81/V82 还桌面已停用；V83–V85 几何不持久化+只算主屏（变则广播 `grid:bounds-changed`，副屏全原生）**。
-- **V100 经典菜单补齐**：顶组 查看/排序方式/刷新 是 DefView 视图层（`CreateViewObject` 拿不到）⇒ 亲手注入 + `MenuOutcome::Action` → `grid:menu-action` 事件 → 前端执行；「新建」扩成 快捷方式+ShellNew 全量（0x9100+ 寻址 ≤64）。**自绘菜单贴边 = 渲染后实测 `clampDelta` + translate 拉回**（估算夹取作废——300px 估高裁掉真菜单）。守卫 shell-menu 150、变异 94。
+- **V81–V100**：桌面右键九轮，V97 定稿自绘（§3；B 方案将整体删）。V81/V82 还桌面已停用；V83–V85 几何不持久化+只算主屏（变则广播 `grid:bounds-changed`，副屏全原生）；V100 经典菜单顶组属 DefView 视图层（`CreateViewObject` 拿不到）须亲手注入。守卫 shell-menu 150、变异 94。
+- **V101 格子乱排修复**：见 §3 V101 行；cargo 86、回归 21/21。
 - **V93–V96 新建链路**（V96 收敛）：前端「改名/新建安静期」保留（重排/刷新挂起、重排优先补跑），`grid:desktop-changed` 走增量 `onDesktopChanged`（唯一新增 → `beginItemRename`）；判据/确认/还前台三块已删（见 §2）。
-- **V99**（用户「菜单一不一样」）：新建列表对齐原生（§3）+ **排序方式做真**（`grid_meta.loose_sort`：重排未归类竖条并持久化，系统入口钉最前，同键再点 = 倒序，`loose_sort_get/set`）+ 快捷方式（空 .lnk）。**撤消 删除 / 下一个桌面背景 刻意缺**（Explorer 内部撤销栈与幻灯片引擎，无公开接口）—— 用户若再点名，先讲清做不成真。
-- ★★ **B 方案（用户 10-10 拍板，未做）：重构为「不接管原生桌面」**。调研（LucidDesk/DeskBox 等）无一接管：不自绘或 `LVM_SETITEMPOSITION` 遥控原生图标（跨进程无需注入）。① 不隐藏 `SysListView32`；② 格子改装饰底板、内容区穿透 ⇒ `GridOverlay.tsx` 大瘦身。
+- **V99**：新建列表对齐原生（§3）+ **排序方式做真**（`grid_meta.loose_sort` 持久化，系统入口钉最前，同键再点 = 倒序）+ 快捷方式（空 .lnk）。**撤消删除 / 下一桌面背景 无公开接口**。
+- ★★ **B 方案（10-10 拍板；复评 + 实施方案已出）**：`docs/04-review/REVIEW-2026-10-10.md` + `PLAN-B-PHASED.md`。根因=**「接管桌面」这条路线本身在持续生产 bug**（V42–V101 共 60 批几乎全耗在这一个模块；grid.rs 11,422 行/Rust 60%、GridOverlay 5,228 行/30 effect）。方案 6 步（预备→遥控模块→接入+FFlags→前端装饰化→切断接管→拆模块清债），**每步一 commit 可独立回滚**。**待用户拍板 4 条**：① 是否遥控图标位置（A2-full 分组摆放 / A2-lite 只画框）② 退出是否还原图标布局 ③ FFlags 原值还原 ④ 确认放弃撤消删除/下一背景。⚠️ A2-full 会**写用户桌面图标布局**（推翻 V37「一个字节不动」的一半），必须显式同意。
 - ⚠️ agent 会话启动不了本 GUI ⇒ 打包 + 装机即止，**不代启动**。
 
 ## 5. 协作与操作约定
