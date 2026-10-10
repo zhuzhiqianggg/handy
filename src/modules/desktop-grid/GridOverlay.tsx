@@ -1159,6 +1159,47 @@ export function GridOverlay(): React.JSX.Element {
     setItems(Object.fromEntries(entries));
   }, []);
 
+  // —— V93：「改名 / 新建」安静期 ——
+  //
+  // 用户 10-10：「我创建文件夹后桌面自己刷新了，跟正常的桌面行为不一样，我创建后应该
+  // 聚焦到命名上，现在刷新，重命名都没有了」。
+  //
+  // 病根不在「刷新」本身，而在**刷新的时机**：新建 → 目录签名变化 → 广播 → `fetchLoose`
+  // （竖条多一项可能变宽）→ `relayoutSoon()` 120ms 后 `refresh()` —— 这一串正好落在
+  // 「改名框刚打开、还 autoFocus 着」的那一瞬间，整层 DOM 重建 ⇒ 用户名字还没打完框就没了。
+  //
+  // 所以给「正在改名」和「刚检测到新建」这两段时间加一道闸：期间的**重排 / 对账一律挂起**，
+  // 只记一个 pending；安静期结束（改名提交 / 取消，或宽限期到）再补跑一次。
+  // 晚一点重排用户无感；冲掉他正在输入的名字，他会骂人。
+  const renamingRef = useRef(false);
+  const pendingRefreshRef = useRef(false);
+  const pendingRelayoutRef = useRef(false);
+  const quietUntilRef = useRef(0);
+  const quietTimerRef = useRef<number | null>(null);
+  /** 由下面的 effect 装上的「唤醒安静期检查」函数（第一帧之前是空操作） */
+  const quietKickRef = useRef<() => void>(() => undefined);
+
+  /** 现在该安静吗（正在改名，或还处在刚检测到新建的宽限期内） */
+  const isQuiet = useCallback(
+    (): boolean => renamingRef.current || Date.now() < quietUntilRef.current,
+    [],
+  );
+
+  /**
+   * 进入（或延长）安静期。
+   *
+   * **它本身不排任何待办** —— 被挂起的那个动作由调用方自己记（`pendingRelayoutRef`
+   * 记「重排」，`pendingRefreshRef` 记「刷新」）。这两者不能混：重排被丢掉只补一次
+   * `refresh()` 的话，新占的竖条宽度就再也没人重算过了。
+   */
+  const holdQuiet = useCallback((ms: number): void => {
+    const until = Date.now() + ms;
+    if (quietUntilRef.current < until) {
+      quietUntilRef.current = until;
+    }
+    quietKickRef.current();
+  }, []);
+
   /**
    * **内容一变就让引擎重算整张桌面**（V66）。
    *
@@ -1170,10 +1211,17 @@ export function GridOverlay(): React.JSX.Element {
    *
    * 防抖 120ms：连续拖几个文件 / 连点新建时，一次重排就够（`grid_relayout` 是幂等的，
    * 重复调用不会让摆好的格子抖动）。
+   *
+   * V93：安静期内不排（挂起，见上面的 refs 说明）。
    */
   const relayoutTimer = useRef<number | null>(null);
   const relayoutSoon = useCallback((): void => {
     if (!isTauri()) {
+      return;
+    }
+    if (isQuiet()) {
+      holdQuiet(RELAYOUT_DEBOUNCE_MS + 600);
+      pendingRelayoutRef.current = true;
       return;
     }
     if (relayoutTimer.current !== null) {
@@ -1186,7 +1234,7 @@ export function GridOverlay(): React.JSX.Element {
         .then(() => refresh())
         .catch(() => undefined);
     }, RELAYOUT_DEBOUNCE_MS);
-  }, [refresh]);
+  }, [holdQuiet, isQuiet, refresh]);
 
   /** 上一次「未归类」竖条快照：路径序 + 矩形宽（对账时 diff 出新文件 / 宽度变化） */
   const looseSnapRef = useRef<{ paths: string[]; width: number }>({ paths: [], width: 0 });
@@ -1283,6 +1331,60 @@ export function GridOverlay(): React.JSX.Element {
     // 快捷方式的显示名里带 `.lnk`，那是 Shell 加的、用户没看见，改名时也不该看到
     setItemRenameDraft(displayName.replace(/\.lnk$/i, ''));
   }, []);
+
+  // V93：安静期的执行器。改名框一消失就立刻尝试补跑挂起的那次动作；
+  // 改名还开着就每 400ms 看一眼（用户打字时间可长可短，不能用固定 timeout 赌）。
+  //
+  // 补跑顺序有讲究：**先重排后刷新，且重排优先** —— 重排本身就带 `refresh()`，
+  // 两个都挂起时只补重排就够（否则白刷一遍 DOM）。
+  useEffect(() => {
+    const tick = (): void => {
+      quietTimerRef.current = null;
+      if (renamingRef.current || Date.now() < quietUntilRef.current) {
+        quietTimerRef.current = window.setTimeout(tick, 400);
+        return;
+      }
+      const needRelayout = pendingRelayoutRef.current;
+      const needRefresh = pendingRefreshRef.current;
+      pendingRelayoutRef.current = false;
+      pendingRefreshRef.current = false;
+      if (needRelayout) {
+        void ipc
+          .gridRelayout()
+          .then(() => {
+            void refresh().catch(() => undefined);
+            refreshLoose();
+          })
+          .catch(() => undefined);
+      } else if (needRefresh) {
+        void refresh()
+          .then(() => refreshLoose())
+          .catch(() => undefined);
+      }
+    };
+    quietKickRef.current = (): void => {
+      if (quietTimerRef.current !== null) {
+        return; // 已有定时器在跑，它会自己续
+      }
+      quietTimerRef.current = window.setTimeout(tick, 250);
+    };
+    return () => {
+      quietKickRef.current = () => undefined;
+      if (quietTimerRef.current !== null) {
+        window.clearTimeout(quietTimerRef.current);
+        quietTimerRef.current = null;
+      }
+    };
+  }, [refresh, refreshLoose]);
+
+  // V93：把「正在改名」同步到 ref（下面重排 / 对账的闸要用它，不能依赖 render 时序）。
+  // 改名结束（Enter / 失焦 / Esc）时踢一脚，让挂起的那次刷新补跑。
+  useEffect(() => {
+    renamingRef.current = renamingItemPath !== null;
+    if (renamingItemPath === null) {
+      quietKickRef.current();
+    }
+  }, [renamingItemPath]);
 
   const commitItemRename = useCallback((): void => {
     const path = renamingItemPath;
@@ -1405,6 +1507,10 @@ export function GridOverlay(): React.JSX.Element {
       //     （单纯新建绝不整层 refresh，那才是用户抱怨的「卡 + 整体刷新」）；
       //   · 复刻菜单回退路径 → 回 `CreatedItem`：直接知道建了什么，省掉对账。
       void (async () => {
+        // V93：先进安静期 —— 下面 `fetchLoose` 会让竖条变宽、排一次 `relayoutSoon()`，
+        // 而它 120ms 后就 `refresh()`，正好把紧跟着打开的改名框冲掉（就是用户 10-10 报的
+        // 「重命名都没有了」）。
+        holdQuiet(3000);
         // 先记快照：菜单期间可能有轮询先把新文件收进快照，靠「前 / 后 diff」才不会漏判。
         const before = new Set(looseSnapRef.current.paths);
         let created: { path: string; name: string } | null = null;
@@ -1424,8 +1530,10 @@ export function GridOverlay(): React.JSX.Element {
         const added = after.filter((p) => !before.has(p));
         const removed = [...before].filter((p) => !after.includes(p));
         // 有删除 / 改名才需要重建格子；单纯新建只进竖条 —— 不触发整层重排。
+        // V93：而且此刻正在安静期里，`refresh()` 要**挂起**（否则紧接着打开的改名框
+        // 会被它整层卸载），交给安静期结束后的补跑。
         if (removed.length > 0) {
-          await refresh().catch(() => undefined);
+          pendingRefreshRef.current = true;
         }
         const only = added.length === 1 ? added[0] : undefined;
         if (only !== undefined) {
@@ -1433,7 +1541,7 @@ export function GridOverlay(): React.JSX.Element {
         }
       })();
     },
-    [beginItemRename, fetchLoose, refresh, showHint],
+    [beginItemRename, fetchLoose, holdQuiet, showHint],
   );
 
   /** F2 改名当前选中的条目（Explorer 的键盘习惯） */
@@ -1494,6 +1602,12 @@ export function GridOverlay(): React.JSX.Element {
 
   /** 对账一次并按需刷新（有变化才重渲染，避免无谓的 DOM 抖动） */
   const syncDesktop = useCallback(async (): Promise<void> => {
+    // V93：改名 / 新建安静期内一律挂起 —— 这里的 `refresh()` 会把改名框整层卸载。
+    if (isQuiet()) {
+      holdQuiet(1500);
+      pendingRefreshRef.current = true;
+      return;
+    }
     const report = await ipc.gridDesktopSync();
     if (report.itemsAdded > 0 || report.pruned > 0) {
       await refresh();
@@ -1501,7 +1615,47 @@ export function GridOverlay(): React.JSX.Element {
     // 「未归类」竖条跟着桌面根目录走（很便宜，一次扫描）；
     // 新文件要播报 + 让竖条新占的宽把格子挤开（V84，见 fetchLoose 的注释）
     await fetchLoose(true);
-  }, [fetchLoose, refresh]);
+  }, [fetchLoose, holdQuiet, isQuiet, refresh]);
+
+  /**
+   * V92/V93：桌面目录变了（原生「新建」落地的文件，我们收不到别的通知）。
+   *
+   * 和 `syncDesktop` 的区别 —— 这条**只做增量**：
+   *   ① 不调 `gridDesktopSync()`（那条会把新文件登记进格子并整层 `refresh()`）；
+   *   ② 新条目只进「未归类」竖条（`fetchLoose` 本身就是增量的）；
+   *   ③ **唯一新增的一项** = 用户刚刚建的那一个 ⇒ 立刻把我们的改名框开在它上面
+   *      —— 对齐 Explorer「新建后焦点就落在名字上」的习惯（用户 10-10 的原话：
+   *      「我创建后应该聚焦到命名上」）。
+   *
+   * 先 `holdQuiet` 再拉列表：`fetchLoose` 里可能因为竖条变宽而排一次 `relayoutSoon()`，
+   * 那个 120ms 后就会 `refresh()`，正好把下面刚 autoFocus 的改名框冲掉。
+   */
+  const onDesktopChanged = useCallback(async (): Promise<void> => {
+    holdQuiet(3000);
+    const before = new Set(looseSnapRef.current.paths);
+    await fetchLoose(false).catch(() => undefined);
+    const after = looseSnapRef.current.paths;
+    const added = after.filter((p) => !before.has(p));
+    const removed = [...before].filter((p) => !after.includes(p));
+    if (removed.length > 0) {
+      // 删除 / 改名：格子内容可能失效，交给安静期结束后的那次补跑去重建（不抢当前输入）
+      pendingRefreshRef.current = true;
+      return;
+    }
+    if (added.length !== 1 || renamingRef.current) {
+      // 一次建了多个 / 已经在改名：不抢焦点（用户可能正打在兴头上）
+      return;
+    }
+    const target = added[0] as string;
+    // 抢回前台：被我们隐藏的那个 Explorer 改名框会 `SetFocus`，不抢回来键盘打不进我们的框。
+    try {
+      const { getCurrentWindow } = await import('@tauri-apps/api/window');
+      await getCurrentWindow().setFocus();
+    } catch {
+      /* 拿不到前台不影响改名框渲染，用户点一下照样能打字 */
+    }
+    beginItemRename(target, target.split(/[\\/]/).pop() ?? target);
+  }, [beginItemRename, fetchLoose, holdQuiet]);
 
   useEffect(() => {
     if (!isTauri()) {
@@ -3212,17 +3366,18 @@ export function GridOverlay(): React.JSX.Element {
     };
   }, [takeDesktopAction]);
 
-  // V81：桌面右键弹的是**系统原生菜单**，Rust 在菜单期间会把桌面暂时还给系统
-  // （否则「新建文件夹」建好了也看不见、改名编辑框在隐藏的视图里点不到）。
-  // 菜单收起、Rust 收回桌面后广播 `grid:desktop-changed` —— 这里立刻重扫一次：
-  // 新建出来的文件必须马上出现在「未归类」竖条里，否则用户只会认为「建了没生效」。
+  // V92/V93：桌面目录内容变了（原生「新建」落地的文件我们收不到别的通知）。
+  //
+  // **不再调 `syncDesktop()`** —— 那条会 `gridDesktopSync()` + 整层 `refresh()`，
+  // 正是用户 10-10 说的「我创建文件夹后桌面自己刷新了，重命名都没有了」。
+  // 现在走 `onDesktopChanged`：只增量把新条目送进竖条，并**就地打开改名框**。
   useEffect(() => {
     let unlisten: (() => void) | null = null;
     void (async () => {
       try {
         const { getCurrentWindow } = await import('@tauri-apps/api/window');
         unlisten = await getCurrentWindow().listen('grid:desktop-changed', () => {
-          void syncDesktop();
+          void onDesktopChanged();
         });
       } catch {
         /* 监听失败不影响其余功能：周期对账照旧会跑 */
@@ -3231,7 +3386,7 @@ export function GridOverlay(): React.JSX.Element {
     return () => {
       unlisten?.();
     };
-  }, [syncDesktop]);
+  }, [onDesktopChanged]);
 
   /** 手动对账一次（清掉文件已不存在的失效登记，顺带刷新未归类竖条） */
   const syncNow = useCallback((): void => {

@@ -23,7 +23,7 @@
 - ★★ **渲染几何 = 引擎几何**（V59/V70）：`height: box.height`、**不叠 `max-height`**；装不下交盒内滚动。**常量差 1px 就少一行/列**。根画布永远 `overflow-hidden`（V59.1），菜单必须 `fixed`。拖动链路（V57）：移动永远可用，锁只收编辑；`onUp` 判「真动过」才落库。
 - ★★ **菜单不许有两个同名项**（V89）：注入前先摘原生同名（`CNewMenu` 无 view 必 E_FAIL）；摘除**倒序**、判据只认**开头**。
 - ★★ **`run_on_main_thread` 只投递、不等结果**（V89）：弹菜单用它 ⇒ Promise 在菜单弹出前就 resolve ⇒ 前端「超时/竞速」判据必误判。要结果就配 `std::sync::mpsc` 等回传。
-- ★★ **必须取消 Explorer 的隐藏改名框**（V92）：原生「新建」在**隐藏的** listview 上拉起改名框 —— 看不见 + **抢键盘** ⇒ 轮询复用 `desktop_handoff::label_editing()`（已改 pub）检测到就 `PostMessage(LVM_CANCELEDITLABEL)`。**这道门不能省**，否则每拍往 explorer 发消息。
+- ★★ **隐藏改名框：判据必须是 `LVM_GETEDITCONTROL`**（V93；V92 那条是错的）：`SysListView32` 的 `Edit` 子窗**常驻** ⇒ `FindWindowEx("Edit")` 恒真 ⇒ 接到 25ms 轮询上就**每 50ms** 给 Explorer 投一条 `LVM_CANCELEDITLABEL`（实测 138 条）⇒ 打断 ShellNew（「第一次成第二次败」）+ 桌面自己重绘。取消要**一次性 + 有限升级（400/800ms）+ 只在接管态**。
 - ★★ **WinEvent 的 `hwnd` 语义不许赌**（V82）：`EVENT_SYSTEM_MENUPOPUPSTART` 实测给的是**菜单窗 `#32768` 自己** ⇒ 判据要**换 owner + 看菜单压谁**，并留轮询兜底。
 - **复刻菜单只剩回退 + 条目菜单**（V58/V90）：`CMF_NORMAL|CMF_EXPLORE`（**不传 `CMF_CANRENAME`**）；`IContextMenu2/3` 消息**必须转发**。**层级**：盒子(auto)<参考线 35<工作台 38<面板 40<菜单 50<预览 95。改模式开关前 grep 调用点（V52）。
 - ★★ **便签 contentEditable**（V67/V68）：`\n` 写进**光标所在文本节点** + 垫 ZWSP；「跳出」看「上一步是不是我们插的换行」（**不许**看末尾空行）；`applyHighlight` 每 400ms 重写 `innerHTML` ⇒ `reapplyZwsp` **必须在 `restoreCaretIn` 之前**；合成 `KeyboardEvent` 测不出回车。
@@ -47,7 +47,8 @@
 - **V83–V85** 几何不持久化+**只算主屏**（`sync_overlay_bounds()`，变则广播 `grid:bounds-changed`；副屏全原生）；新建慢=收回竞速；落位**右锚定**+**列内撑满**（§3）。
 - **V87/V88** 空白右键自己弹**背景菜单**（`CreateViewObject`；坑：`FOLDERID_Desktop`+`BindToObject` 必 `E_INVALIDARG`）；原生「新建」E_FAIL = `CNewMenu` 需 `IShellView` ⇒ 自注入「新建」；改名后 UI 不刷新 ⇒ 本地先改 `items`/`loose` 再 `refresh`。
 - **V89–V92 桌面右键：五次迭代，最终结论「不代理」**。V89 抢空白右键⇒菜单残缺；V90 转发 `WM_CONTEXTMENU`+耗时判据⇒双菜单；V91 换「观测屏幕」判据⇒仍因转发前 `SetForegroundWindow(我们的窗)` 让 `CNewMenu` 找不到 view⇒**新建彻底建不出**（10-10 取证：十几次右键 0 文件）。V92：**空白右键穿透给 Explorer**（根画布 `pointerEvents` 仅拖拽时 `'auto'`），它那张菜单天然带查看/排序/刷新+ShellNew 新建（都不经过 `IContextMenu`，复刻不出来）；handoff 停用⇒不翻白；删转发 206 行。补偿：目录签名广播 `grid:desktop-changed` 让新文件进竖条。
-- ★★ **B 方案（用户 10-10 拍板）：重构为「不接管原生桌面」**，挂件（便签/日历/工作台）保留为桌面浮窗。开源调研（LucidDesk/DeskBox/openFences/DesktopIconMover）**无一接管桌面**：不自绘，或用 `LVM_SETITEMPOSITION` 遥控原生图标位置（lParam 直接装坐标，**跨进程无需注入**）。后续：① 不隐藏 `SysListView32`，关「自动排列/对齐网格」后 SETITEMPOSITION 摆位；② 格子改装饰底板+标题栏、内容区穿透 ⇒ `GridOverlay.tsx`(4586行) 大瘦身。
+- **V93 新建链路三条修复**（用户 10-10）：① `label_editing` 改 `LVM_GETEDITCONTROL`；② 取消一次性 + 有限升级 + 只限接管态；③ 前端加「**改名/新建安静期**」（`relayoutSoon`/`syncDesktop` 挂起；重排与刷新**分开记、重排优先补跑**），`grid:desktop-changed` 改走增量 `onDesktopChanged`（唯一新增项 → `setFocus()` + `beginItemRename`）。守卫 shell-menu 115。
+- ★★ **B 方案（用户 10-10 拍板）：重构为「不接管原生桌面」**，挂件保留为桌面浮窗。开源调研（LucidDesk/DeskBox/openFences/DesktopIconMover）**无一接管桌面**：不自绘，或用 `LVM_SETITEMPOSITION` 遥控原生图标（lParam 装坐标，**跨进程无需注入**）。后续：① 不隐藏 `SysListView32`，关「自动排列/对齐网格」后 SETITEMPOSITION 摆位；② 格子改装饰底板+标题栏、内容区穿透 ⇒ `GridOverlay.tsx` 大瘦身。
 - ⚠️ agent 会话启动不了本 GUI ⇒ 打包 + 装机即止，**不代启动**。
 
 ## 5. 协作与操作约定
@@ -57,7 +58,7 @@
   ★★ **只置 `desktop_icons_hidden`，别动另两键**（V79）：前者是**事实**，后两者是**偏好/上次显隐意图** —— 一律清零 = 悄悄替用户关掉接管 ⇒ 下次启动「格子 + 原生图标」两份内容。
 - ★ `taskkill` 用**单斜杠** `/IM handy.exe /F` + `MSYS_NO_PATHCONV=1`（`//IM` 报无效参数而**进程照样活着**）。
 - ★ 跑打包脚本前必须 `export PATH="/usr/bin:/bin:/mingw64/bin:$PATH"`：否则跑去调 `wsl.exe` ⇒ 被安全策略硬拦（前兆 `dirname: command not found`）。
-- ★★ **NSIS `/S` 起不来时**（V90/V91）：挂别的命令 / 先跑 `uninstall.exe /S` 会整体 SIGTERM；**V91 连单独跑两次也不生效** ⇒ 兜底：项目无 `bundle.resources`（dist 已嵌 exe）⇒ `cp -f 构建exe 已装exe` **等价**，`cmp -l` **0 字节** = 生效。
+- ★★ **NSIS `/S` 会被 SIGTERM 打断**（V90/V91，连单独跑两次也不生效）⇒ 兜底：无 `bundle.resources`（dist 已嵌 exe）⇒ `cp -f 构建exe 已装exe` **等价**，`cmp -l` 0 字节 = 生效。
 - ★★ 被 `2>/dev/null` 包住的探针，不许用「空输出」当结论 ⇒ 一律 `tasklist | grep -qi handy`。
 - 高频坑（详见 CONVENTIONS）：同文件多处 Edit **串行**；`npm.cmd` 被拦 → `node node_modules/<cli>/<entry>.js`；**打包中改源码 ⇒ 产物半新半旧，必须重打**。
 

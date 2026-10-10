@@ -285,8 +285,12 @@ ok('V89：前端改读命令返回值（created !== null 才算新建）',
   ));
 ok('V89：命中新建后 beginItemRename（进原地改名，对齐 Explorer 新建体验）',
   /beginItemRename\(created\.path, created\.name\)/.test(overlaySrc));
-ok('V89：没新建（普通菜单项）才走全量 refresh',
-  /await refresh\(\)\.catch\(\(\) => undefined\);[\s\S]{0,120}?\}/.test(overlaySrc));
+// V93：原来这条断言的是「菜单收起后 `await refresh()`」。V93 把它换成**挂起**
+// （`pendingRefreshRef`）—— 因为那时正处在「改名 / 新建」安静期里，立刻 `refresh()`
+// 会把刚打开、还 autoFocus 着的改名框整层卸载（用户 10-10：「重命名都没有了」）。
+ok('V89/V93：没新建（有删除 / 改名）时也只挂起 refresh，不在安静期里立刻整层重建',
+  /pendingRefreshRef\.current = true;/.test(overlaySrc) &&
+    !/if \(removed\.length > 0\) \{\s*await refresh\(\)/.test(overlaySrc));
 // V88 那套「事件 + 30ms 竞速」已彻底删除：它会在菜单还没弹出时就判「没新建」触发整层刷新。
 ok('V89：**不再**有 30ms 竞速（竞速本身就是「整体刷新」的来源）',
   !/setTimeout\(resolve, 30\)/.test(overlaySrc) && !/finalizeNonCreated/.test(overlaySrc));
@@ -435,15 +439,51 @@ ok('V92：签名只读目录项元数据（read_dir，不读内容、不递归�
   /std::fs::read_dir\(&dir\)/.test(rustCmdSrc));
 // 原生「新建」会在**被我们隐藏的** listview 上拉起原位改名框：用户看不见，它还会
 // SetFocus 抢键盘（我们自己的改名输入框就打不进字了）。检测到必须取消。
+//
+// V93 修的两条（用户 10-10 的三条报障全出自这里，日志实测 10:24:26–10:26:28 打了 138 条
+// 「取消了 Explorer 在隐藏桌面视图上的原位改名框」）：
+//   ① 判据必须是 `LVM_GETEDITCONTROL`。V92 用的「`FindWindowExW(.., "Edit", ..)` 找得到
+//      就算在编辑」**几乎恒为真**（`SysListView32` 的 `Edit` 子窗是常驻的）⇒ 每 50ms 无脑
+//      投一条取消消息 ⇒ 正好打断 Explorer 的 ShellNew ⇒「第一次成、第二次败、过一会又成」。
+//   ② 一次编辑只动一次（`EDIT_CANCEL_STAGE` 闩锁 + 400/800ms 有限升级），绝不重复刷屏。
 ok('V92：检测到隐藏改名框就用 LVM_CANCELEDITLABEL 取消',
   /const LVM_CANCELEDITLABEL: u32 = 0x1000 \+ 0x77;/.test(rustCmdSrc) &&
-    /PostMessageW\(list, LVM_CANCELEDITLABEL, WPARAM\(0\), LPARAM\(0\)\)/.test(rustCmdSrc));
-ok('V92：只在**真有**改名框时才发消息（复用 label_editing，平时零开销）',
-  /crate::platform::desktop_handoff::label_editing\(\)/.test(rustCmdSrc));
-ok('V92：label_editing 已对外可见（grid 轮询要复用它）',
+    /LVM_CANCELEDITLABEL,/.test(rustCmdSrc));
+ok('V93：改名框判据换成 LVM_GETEDITCONTROL（0x1000 + 0x18）',
+  /const LVM_GETEDITCONTROL: u32 = 0x1000 \+ 0x18;/.test(handoffSrc));
+ok('V93：label_edit_control 返回编辑框句柄（供有限升级用，不再只有 bool）',
+  /pub fn label_edit_control\(\) -> Option<HWND>/.test(handoffSrc) &&
+    /crate::platform::desktop_handoff::label_edit_control\(\)/.test(rustCmdSrc));
+ok('V93：label_editing 仍对外可见（desktop_handoff 内部要用）',
   /pub fn label_editing\(\) -> bool/.test(handoffSrc));
+ok('V93：一次编辑只动一次 —— EDIT_CANCEL_STAGE 闩锁 + 400/800ms 有限升级',
+  /static EDIT_CANCEL_STAGE: AtomicU8 = AtomicU8::new\(0\);/.test(rustCmdSrc) &&
+    /let stage = EDIT_CANCEL_STAGE\.load\(Ordering::Relaxed\);/.test(rustCmdSrc) &&
+    /if stage == 0 \{/.test(rustCmdSrc) &&
+    /\} else if stage == 1 && waited_ms >= 400 \{/.test(rustCmdSrc));
+ok('V93：不在接管态绝不碰改名框（那是用户自己在用的重命名）',
+  /if !ICONS_TAKEN\.load\(Ordering::Relaxed\) \{/.test(rustCmdSrc));
 ok('V92：取消用 PostMessage（投递即走，Explorer 忙也不会卡住轮询线程）',
   /use windows::Win32::UI::WindowsAndMessaging::PostMessageW;/.test(rustCmdSrc));
+
+// —— V93：前端的「改名 / 新建」安静期（用户 10-10：「我创建后应该聚焦到命名上，
+//    现在刷新，重命名都没有了」）——
+// 病根是刷新**时机**：新建 → 广播 → fetchLoose（竖条变宽）→ relayoutSoon 120ms 后
+// refresh() —— 正好落在「改名框刚 autoFocus」那一瞬，整层 DOM 重建 ⇒ 名字打一半就没了。
+ok('V93：前端有改名 / 新建「安静期」（期间挂起重排与整层刷新）',
+  /const renamingRef = useRef\(false\);/.test(overlaySrc) &&
+    /const isQuiet = useCallback/.test(overlaySrc) &&
+    /const holdQuiet = useCallback/.test(overlaySrc));
+ok('V93：relayoutSoon 与 syncDesktop 都被安静期挡住',
+  /if \(isQuiet\(\)\) \{\s*holdQuiet\(RELAYOUT_DEBOUNCE_MS \+ 600\);/.test(overlaySrc) &&
+    /if \(isQuiet\(\)\) \{\s*holdQuiet\(1500\);/.test(overlaySrc));
+ok('V93：grid:desktop-changed 走增量 onDesktopChanged（不再整层 syncDesktop）',
+  /listen\('grid:desktop-changed', \(\) => \{\s*void onDesktopChanged\(\)/.test(overlaySrc));
+ok('V93：唯一新增项立刻就地改名（对齐 Explorer「新建后焦点落在名字上」）',
+  /if \(added\.length !== 1 \|\| renamingRef\.current\)/.test(overlaySrc) &&
+    /beginItemRename\(target, target\.split/.test(overlaySrc));
+ok('V93：安静期内的挂起刷新一定会被补跑（改名结束就踢一脚）',
+  /quietKickRef\.current\(\);[\s\S]{0,40}\}, \[renamingItemPath\]\)/.test(overlaySrc));
 
 /* ================================================================== *
  * 结果

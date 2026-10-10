@@ -97,8 +97,8 @@ use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVE
 // 事件常量（`EVENT_SYSTEM_MENUPOPUP*` / `WINEVENT_*`）出自 winuser.h，
 // windows-rs 把它们收在 `WindowsAndMessaging`，**不在** `Accessibility`。
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowExW, FindWindowW, GetAncestor, GetClassNameW, GetForegroundWindow, GetMessageW,
-    GetWindow, GetWindowRect, GetWindowThreadProcessId, ShowWindow, WindowFromPoint,
+    FindWindowW, GetAncestor, GetClassNameW, GetForegroundWindow, GetMessageW,
+    GetWindow, GetWindowRect, GetWindowThreadProcessId, SendMessageW, ShowWindow, WindowFromPoint,
     EVENT_SYSTEM_MENUPOPUPEND, EVENT_SYSTEM_MENUPOPUPSTART, GA_PARENT, GA_ROOT, GW_OWNER, MSG,
     SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
 };
@@ -448,28 +448,52 @@ fn menu_open() -> bool {
     }
 }
 
-/// 桌面视图上正在原位改名吗（列表视图的改名编辑框是它的 `Edit` 子窗）。
+/// 桌面视图上**正在**原位改名吗；是的话返回那个编辑框的 `HWND`。
 ///
-/// 必须在收回前判这个：原生「新建」是**菜单关闭之后**才进改名的，
-/// 收到 `MENUPOPUPEND` 就收回，会把刚弹出的编辑框一起藏掉。
+/// # V93：判据换成 `LVM_GETEDITCONTROL`（V81 那条判据是错的）
 ///
-/// V92 起也供 `grid` 的轮询线程复用：桌面空白右键**穿透**给 Explorer 之后，
-/// 原生「新建」会在**被我们隐藏的** `SysListView32` 上拉起这个框 ——
-/// 看不见、还会抢键盘，检测到就必须取消（改成交给我们自己的改名框）。
-pub fn label_editing() -> bool {
-    let Some(list) = desktop_icon_view() else {
-        return false;
-    };
+/// V81 起这里用的是 `FindWindowExW(list, .., "Edit", ..)`，注释写的是「改名编辑框是它的
+/// `Edit` 子窗」。**这条判据几乎恒为真**：`SysListView32` 的 `Edit` 子控件是**常驻**的
+/// （控件创建时就建好，之后一直存在）—— 只要桌面图标视图活着就能找到它，跟「正在改名」
+/// 没有关系。
+///
+/// V92 把这个判据接到 25ms 轮询上之后，用户 10-10 报的三条就是这个后果（日志实测：
+/// 10:24:26–10:26:28 之间打了 **138 条**「取消了 Explorer 在隐藏桌面视图上的原位改名框」）：
+///
+/// | 刷屏造成的现象 | 用户原话 |
+/// | --- | --- |
+/// | 每 50ms 打断一次 Explorer 的 `CNewMenu`（ShellNew）流程 | 「第一次我创建成功，但是第二次创建就失败了，过了一会又第一、二次成功，第三次不成功」 |
+/// | 频繁投递消息让 Explorer 重绘桌面 | 「我创建文件夹后桌面自己刷新了」 |
+/// | 我们把它取消了，却没人接上改名 | 「现在刷新，重命名都没有了」 |
+///
+/// 正确的判据是 `LVM_GETEDITCONTROL`：官方语义是**仅当列表视图正处于标签编辑态**时返回
+/// 编辑框句柄，否则返回 `NULL`。它不会因为「控件存在」而误报。
+///
+/// 返回句柄而不是 `bool`，是为了让调用方能**有限升级**（先给列表视图
+/// `LVM_CANCELEDITLABEL`，不行再把 `Esc` / `WM_CANCELMODE` 投给编辑框本身），
+/// 而不是只会无脑重复同一条消息。
+pub fn label_edit_control() -> Option<HWND> {
+    let list = desktop_icon_view()?;
+    // LVM_GETEDITCONTROL = LVM_FIRST(0x1000) + 0x18
+    const LVM_GETEDITCONTROL: u32 = 0x1000 + 0x18;
     unsafe {
-        FindWindowExW(
-            list,
-            HWND(std::ptr::null_mut()),
-            PCWSTR(wide("Edit").as_ptr()),
-            PCWSTR::null(),
-        )
-        .map(|h| !h.0.is_null())
-        .unwrap_or(false)
+        // windows-rs 0.58：`SendMessageW` 的 wparam/lparam 直接传值（不是 `Option<..>`），
+        // 返回的 `LRESULT` 内层是 `isize`，`HWND` 内层是 `*mut c_void` —— 要显式转。
+        let ret = SendMessageW(list, LVM_GETEDITCONTROL, WPARAM(0), LPARAM(0));
+        if ret.0 == 0 {
+            None
+        } else {
+            Some(HWND(ret.0 as *mut core::ffi::c_void))
+        }
     }
+}
+
+/// 桌面视图上正在原位改名吗（[`label_edit_control`] 的布尔视图）。
+///
+/// 必须在收回桌面之前判这个：原生「新建」是**菜单关闭之后**才进改名的，
+/// 收到 `MENUPOPUPEND` 就收回，会把刚弹出的编辑框一起藏掉。
+pub fn label_editing() -> bool {
+    label_edit_control().is_some()
 }
 
 /// 这个菜单是不是**桌面**的（不是资源管理器窗口里的）。

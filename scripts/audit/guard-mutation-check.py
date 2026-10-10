@@ -771,20 +771,47 @@ MUTATIONS: dict[str, _M] = {
             "没了它，用户点「新建文件夹」看到的就是「什么都没发生」",
         ),
         (
-            "V92 不取消 Explorer 在隐藏视图上的原位改名框（看不见 + 抢键盘）",
-            "src-tauri/src/commands/grid.rs",
-            "                            let _ = PostMessageW(list, LVM_CANCELEDITLABEL, WPARAM(0), LPARAM(0));",
-            "                            let _ = PostMessageW(list, WM_NULL, WPARAM(0), LPARAM(0));",
-            "那个框用户看不见（宿主被我们 SW_HIDE 了），还会 SetFocus 抢走键盘 —— "
-            "我们自己 overlay 的改名输入框就再也打不进字",
+            "V93 改名框判据用错消息（LVM_GETEDITCONTROL 被换掉）",
+            "src-tauri/src/platform/desktop_handoff.rs",
+            "    const LVM_GETEDITCONTROL: u32 = 0x1000 + 0x18;",
+            "    const LVM_GETEDITCONTROL: u32 = 0x1000 + 0x77;",
+            "用 LVM_CANCELEDITLABEL（0x1077）当「读」消息使，语义完全错位、返回值无意义 —— "
+            "判据一旦不可信，就会退回 V92 那条「找得到 Edit 子窗就算在编辑」的老病："
+            "每 50ms 无脑投一条取消消息，把 Explorer 的 ShellNew 打断成「第一次成、第二次败」",
         ),
         (
-            "V92 取消改名框不再看 label_editing（每拍无条件 spam 消息）",
+            "V93 一次编辑只动一次」的闩锁被拆（回到每 50ms 刷屏）",
             "src-tauri/src/commands/grid.rs",
-            "                    && crate::platform::desktop_handoff::label_editing()",
-            "                    && true",
-            "去掉这个门 ⇒ 轮询线程每 2 拍就往 explorer.exe 的 listview 发一条消息，"
-            "既刷日志又无谓打扰系统进程；平时没有改名框时本该零开销",
+            "                                if stage == 0 {",
+            "                                if true {",
+            "`if true` ⇒ 每 2 拍（50ms）无条件重发 LVM_CANCELEDITLABEL。这正是用户 10-10 报的"
+            "三条的病根：日志实测 138 条刷屏把 Explorer 的 ShellNew 打断成「第一次创建成功、"
+            "第二次就失败、过一会又好了」，还让桌面一直重绘（「我创建文件夹后桌面自己刷新了」）",
+        ),
+        (
+            "V93 取消改名框不再限接管态（会掐掉用户自己的重命名）",
+            "src-tauri/src/commands/grid.rs",
+            "                    if !ICONS_TAKEN.load(Ordering::Relaxed) {",
+            "                    if true {",
+            "没接管时桌面上的原位改名框是**用户自己在用**的系统行为（F2 / 两次单击改名）—— "
+            "去掉这道门，用户在自己的桌面上改个名会被我们每 50ms 取消一次",
+        ),
+        (
+            "V93 前端安静期拆掉（新建后整层刷新冲掉刚打开的改名框）",
+            "src/modules/desktop-grid/GridOverlay.tsx",
+            "    if (isQuiet()) {\n      holdQuiet(1500);\n      pendingRefreshRef.current = true;\n      return;\n    }",
+            "    if (false) {\n      holdQuiet(1500);\n      pendingRefreshRef.current = true;\n      return;\n    }",
+            "安静期一拆，15 秒对账 / 新建触发的 refresh() 就会把刚 autoFocus 的改名框整层卸载 —— "
+            "用户 10-10 原话：「我创建后应该聚焦到命名上，现在刷新，重命名都没有了」",
+        ),
+        (
+            "V93 桌面变化退回整层 syncDesktop（新建 = 整张桌面刷一下）",
+            "src/modules/desktop-grid/GridOverlay.tsx",
+            "          void onDesktopChanged();",
+            "          void syncDesktop();",
+            "退回 syncDesktop() ⇒ gridDesktopSync() + 整层 refresh()：用户点「新建文件夹」看到的"
+            "不是「名字上有了光标」，而是「整张桌面自己刷了一下、格子全跳一遍」——"
+            "正是用户 10-10 说的「跟正常的桌面行为不一样」",
         ),
     ],
 }

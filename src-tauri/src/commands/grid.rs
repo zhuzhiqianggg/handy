@@ -1672,6 +1672,17 @@ pub(crate) fn desktop_icon_view() -> Option<HWND> {
 /// V92：上一次看到的桌面目录签名（条目数, 最新 mtime 秒）。见 [`desktop_dir_signature`]。
 static DESKTOP_DIR_SIG: std::sync::Mutex<(usize, u64)> = std::sync::Mutex::new((0, 0));
 
+/// V93：第一次看到「隐藏桌面视图上正在原位改名」时的拍号（0 = 现在不在编辑态）。
+///
+/// 与 [`EDIT_CANCEL_STAGE`] 一起构成「一次编辑只动一次」的闩锁。V92 当年没有这两个东西，
+/// 于是每 50ms 往隐藏的 `SysListView32` 重复投一条 `LVM_CANCELEDITLABEL` —— 日志实测 138 条，
+/// 直接打断了 Explorer 的 ShellNew 流程。详见那段代码上的注释。
+static EDIT_SEEN_TICK: AtomicU64 = AtomicU64::new(0);
+
+/// V93：本轮取消做到第几步（0=没动 / 1=已发 `LVM_CANCELEDITLABEL` /
+/// 2=已补 `Esc` / 3=已补 `WM_CANCELMODE`，收手）。
+static EDIT_CANCEL_STAGE: AtomicU8 = AtomicU8::new(0);
+
 /// V92：桌面目录的**廉价签名** —— `(条目数, 最新修改时间)`。
 ///
 /// # 为什么需要它
@@ -2783,39 +2794,113 @@ fn ensure_poller(app: AppHandle) {
                         ICONS_WERE_VISIBLE.store(false, Ordering::Relaxed);
                     }
                 }
-                // —— V92：取消 Explorer 在**被我们隐藏的** listview 上拉起的原位改名框 ——
+                // —— V92/V93：取消 Explorer 在**被我们隐藏的** listview 上拉起的原位改名框 ——
                 //
-                // 桌面空白右键现在**穿透**给 Explorer（V92），那张菜单的「新建」是真原生的：
+                // 桌面空白右键**穿透**给 Explorer（V92），那张菜单的「新建」是真原生的：
                 // 文件会真的建出来，随后 `CNewMenu` 会让我们 `SW_HIDE` 掉的那个
                 // `SysListView32` 进入原位改名。那个框有两个坏处：
                 //   ① **看不见**（宿主被我们藏了）⇒ 用户以为「新建没反应」；
                 //   ② 会 `SetFocus` **抢键盘** ⇒ 我们自己 overlay 的改名框打不进字。
                 //
                 // 所以检测到就取消它，改交给前端对账后弹**我们自己的**改名框。
-                // 只在**真的有 `Edit` 子窗**时才发消息（平时零开销、不会打扰任何东西）。
+                //
+                // # V93 修了两处（用户 10-10 的三条报障全出自这一段）
+                //
+                // ① **判据换成 `LVM_GETEDITCONTROL`**（见 `desktop_handoff::label_edit_control`
+                //    的文档）：V92 用的「`FindWindowExW(.., "Edit", ..)` 找得到就行」几乎
+                //    **恒为真**（`SysListView32` 的 `Edit` 子窗是常驻的），于是每 50ms 无脑
+                //    往隐藏视图投一条取消消息 —— 日志实测 138 条。就是这条刷屏把 Explorer 的
+                //    ShellNew 流程打断成「第一次成、第二次败、过一会又成」。
+                // ② **一次编辑只动一次，且有限升级**：先 `LVM_CANCELEDITLABEL`；400ms 还没
+                //    退出就把 `Esc` 投给编辑框本身；800ms 还不行就 `WM_CANCELMODE`，然后收手
+                //    并留一条日志。**绝不再每 50ms 重复同一条消息**。
                 // 用 `PostMessage`：投递完就走，不会因为 Explorer 忙而卡住轮询线程。
-                if icon_watch_ticks % 2 == 0
-                    && ICONS_TAKEN.load(Ordering::Relaxed)
-                    && crate::platform::desktop_handoff::label_editing()
-                {
-                    const LVM_CANCELEDITLABEL: u32 = 0x1000 + 0x77;
-                    use windows::Win32::Foundation::{LPARAM, WPARAM};
-                    use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
-                    if let Some(list) = desktop_icon_view() {
-                        unsafe {
-                            let _ = PostMessageW(list, LVM_CANCELEDITLABEL, WPARAM(0), LPARAM(0));
+                if icon_watch_ticks % 2 == 0 {
+                    // ⚠️ 只在**接管态**才动：没接管时桌面上那个原位改名框是用户自己在用的，
+                    // 去取消它就是「我的手把我自己的重命名打断了」。
+                    if !ICONS_TAKEN.load(Ordering::Relaxed) {
+                        EDIT_SEEN_TICK.store(0, Ordering::Relaxed);
+                        EDIT_CANCEL_STAGE.store(0, Ordering::Relaxed);
+                    } else {
+                        match crate::platform::desktop_handoff::label_edit_control() {
+                            None => {
+                                // 不在编辑态：复位闩锁，下一次新建重新开始计数
+                                EDIT_SEEN_TICK.store(0, Ordering::Relaxed);
+                                EDIT_CANCEL_STAGE.store(0, Ordering::Relaxed);
+                            }
+                            Some(edit_hwnd) => {
+                                let prev = EDIT_SEEN_TICK.load(Ordering::Relaxed);
+                                let seen = if prev == 0 {
+                                    EDIT_SEEN_TICK.store(icon_watch_ticks, Ordering::Relaxed);
+                                    icon_watch_ticks
+                                } else {
+                                    prev
+                                };
+                                // 本分支每 2 拍进一次 ⇒ 1 拍 = POLL_INTERVAL_MS × 2
+                                let waited_ms =
+                                    icon_watch_ticks.saturating_sub(seen) * (POLL_INTERVAL_MS * 2);
+                                use windows::Win32::Foundation::{LPARAM, WPARAM};
+                                use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
+                                let stage = EDIT_CANCEL_STAGE.load(Ordering::Relaxed);
+                                if stage == 0 {
+                                    const LVM_CANCELEDITLABEL: u32 = 0x1000 + 0x77;
+                                    if let Some(list) = desktop_icon_view() {
+                                        unsafe {
+                                            let _ = PostMessageW(
+                                                list,
+                                                LVM_CANCELEDITLABEL,
+                                                WPARAM(0),
+                                                LPARAM(0),
+                                            );
+                                        }
+                                    }
+                                    EDIT_CANCEL_STAGE.store(1, Ordering::Relaxed);
+                                    crate::logging::write_line(
+                                        "grid",
+                                        "取消了 Explorer 在隐藏桌面视图上的原位改名框（改名交回我们自己的输入框）",
+                                    );
+                                } else if stage == 1 && waited_ms >= 400 {
+                                    // 列表视图没理会 —— 直接把 Esc 投给编辑框本身
+                                    const WM_KEYDOWN: u32 = 0x0100;
+                                    const VK_ESCAPE: usize = 0x1B;
+                                    unsafe {
+                                        let _ = PostMessageW(
+                                            edit_hwnd,
+                                            WM_KEYDOWN,
+                                            WPARAM(VK_ESCAPE),
+                                            LPARAM(0),
+                                        );
+                                    }
+                                    EDIT_CANCEL_STAGE.store(2, Ordering::Relaxed);
+                                } else if stage == 2 && waited_ms >= 800 {
+                                    const WM_CANCELMODE: u32 = 0x001F;
+                                    unsafe {
+                                        let _ = PostMessageW(
+                                            edit_hwnd,
+                                            WM_CANCELMODE,
+                                            WPARAM(0),
+                                            LPARAM(0),
+                                        );
+                                    }
+                                    EDIT_CANCEL_STAGE.store(3, Ordering::Relaxed);
+                                    crate::logging::write_line(
+                                        "grid",
+                                        "隐藏桌面视图上的原位改名框 800ms 仍未退出（已尽力，不再重试）",
+                                    );
+                                }
+                            }
                         }
-                        crate::logging::write_line(
-                            "grid",
-                            "取消了 Explorer 在隐藏桌面视图上的原位改名框（改名交回我们自己的输入框）",
-                        );
                     }
                 }
                 // —— V92：桌面目录内容变了 ⇒ 广播，让前端把新文件收进未归类竖条 ——
                 //
                 // 动机见 [`desktop_dir_signature`]：穿透之后原生「新建」落地的文件我们收不到
-                // 任何通知，只能靠这个签名发现。`% 8` ≈ 每 2s 一次，跟得上人手的操作节奏。
-                if icon_watch_ticks % 8 == 0 {
+                // 任何通知，只能靠这个签名发现。
+                //
+                // V93 由 `% 8` 收紧到 `% 4`（≈100ms）：新建之后要**尽快**把改名框送到用户
+                // 面前，200ms 的粒度会让「点了新建 → 能打字」这一段明显慢半拍。读的只是目录
+                // 元数据（百来项），这个频率的开销可以忽略。
+                if icon_watch_ticks % 4 == 0 {
                     let sig = desktop_dir_signature();
                     let changed = match DESKTOP_DIR_SIG.lock() {
                         Ok(mut last) => {
