@@ -16,6 +16,10 @@ pub mod shell_menu;
 /// 桌面背景右键菜单入口（V45，借鉴腾讯桌面整理）：HKCU 注册表，无需管理员权限。
 pub mod desktop_menu;
 
+/// 桌面图标「遥控」（B 方案）：只算坐标 + 把坐标发给 Explorer，**不接管渲染**。
+/// 见 `docs/04-review/PLAN-B-PHASED.md`。
+pub mod desktop_icons;
+
 /// 系统菜单期间把桌面「暂时还给系统」（V81）：旁听菜单弹出 / 收起，不改鼠标路由。
 #[cfg(target_os = "windows")]
 pub mod desktop_handoff;

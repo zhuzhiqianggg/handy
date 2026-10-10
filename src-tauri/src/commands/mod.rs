@@ -6,6 +6,7 @@ pub mod app;
 pub mod backup;
 pub mod bar;
 pub mod grid;
+pub mod grid_icons;
 pub mod http;
 pub mod misc;
 pub mod notes;

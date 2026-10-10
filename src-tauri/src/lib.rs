@@ -237,6 +237,12 @@ pub fn run() {
             commands::grid::grid_attach_set,
             commands::grid::grid_desktop_icons_set,
             commands::grid::grid_desktop_icons_get,
+
+            // B 方案（不接管原生桌面）：图标遥控。默认关，开启后才动桌面图标位置。
+            commands::grid_icons::desktop_icon_control_get,
+            commands::grid_icons::desktop_icon_control_set,
+            commands::grid_icons::desktop_icon_layout_apply,
+            commands::grid_icons::desktop_icon_layout_restore,
             // V38：桌面接管偏好（整理后隐藏原生图标，由格子代管桌面呈现）
             commands::grid::grid_takeover_set,
             commands::grid::grid_takeover_get,

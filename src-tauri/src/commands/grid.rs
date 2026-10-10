@@ -2441,6 +2441,36 @@ pub fn restore_desktop_icons(app: &AppHandle) {
     grid_log("应用退出 / 收起：已把系统桌面图标还给系统");
 }
 
+// —— B 模式（不接管原生桌面）的内存镜像 ——
+//
+// 轮询线程每 25ms 跑一拍，绝不能每次都开一个 SQLite 连接，所以把「B 模式是否开启」
+// 镜像成一个原子。三态：`255` = 还没从库里读过（懒加载一次），`1` / `0` = 已知。
+// 写库的地方（`grid_icons::desktop_icon_control_set`）必须同步调 [`set_icon_control_runtime`]，
+// 免得出现「库里开了、内存里还没开」的窗口期。
+
+/// [`icon_control_runtime`] 的「未知」哨兵。
+const ICON_CONTROL_UNKNOWN: u8 = 255;
+
+/// B 模式开关的内存镜像（见上方说明）。
+static ICON_CONTROL_ON: AtomicU8 = AtomicU8::new(ICON_CONTROL_UNKNOWN);
+
+/// 写库的路径同时更新镜像（唯一入口，避免两处记账不一致）。
+pub(crate) fn set_icon_control_runtime(on: bool) {
+    ICON_CONTROL_ON.store(u8::from(on), Ordering::Relaxed);
+}
+
+/// B 模式是否开着（首次调用时从 `grid_meta` 懒加载一次）。
+fn icon_control_runtime(app: &AppHandle) -> bool {
+    match ICON_CONTROL_ON.load(Ordering::Relaxed) {
+        ICON_CONTROL_UNKNOWN => {
+            let on = connect(app).ok().and_then(|c| b_icon_arg(&c)).is_some();
+            set_icon_control_runtime(on);
+            on
+        }
+        value => value == 1,
+    }
+}
+
 /// 启动时自愈：上次是被强杀 / 崩溃（图标还藏着），这里恢复并清标记。
 /// V55：双重检查 —— 标记为 hidden **或** 图标实际不可见时都恢复。
 /// taskkill /F 不会触发 ExitRequested，标记可能来不及清，但图标确实被隐藏了。
@@ -2955,6 +2985,12 @@ const OVERLAY_AWAY_GRACE_SECS: u64 = 30;
 ///
 /// 返回「此刻图标是否确实被我们藏起来了」（V38 起把结果透给调用方，让 UI 能说实话）。
 fn takeover_icons(app: &AppHandle, hidden: bool) -> bool {
+    // ★★ B 模式（不接管原生桌面）：图标归 Explorer 管，**绝不隐藏**。
+    // 见 `docs/04-review/PLAN-B-PHASED.md` Step 4 —— 「谁拥有图标」是这条路线的根，
+    // 藏起来 = 又回到「自己扮 Explorer」那一整套 Z 序 / Win+D / 自愈的坑里。
+    if hidden && icon_control_runtime(app) {
+        return false;
+    }
     let applied = matches!(desktop_icons_apply(hidden), Ok(true));
     match (hidden, applied) {
         (true, true) => {
@@ -3012,6 +3048,12 @@ fn release_icons_if_taken(app: &AppHandle) {
 /// 所以这里补上对称的另一半：只要偏好还是「接管」，就周期性确认图标确实被藏住了，
 /// 没藏住就重新藏。与 Z 序自检同节奏（[`REASSERT_INTERVAL_MS`]）、同样带保险丝。
 fn reassert_takeover(app: &AppHandle) {
+    // ★★ B 模式：桌面图标本来就不该被藏，这条自检整个不适用
+    // （否则会每 3 秒把用户的原生图标藏一次 —— 正是 V45 那类「桌面全空」事故）。
+    if icon_control_runtime(app) {
+        TAKEOVER_FIXES.store(0, Ordering::Relaxed);
+        return;
+    }
     // V81：桌面被借给系统期间（菜单开着），「原生图标露着」是我们主动造成的，
     // 不是被系统恢复 —— 这里若照常纠正，就会把菜单期间新建的文件再一次藏进暗处。
     if handoff_active() {
@@ -4253,6 +4295,79 @@ fn box_height_at(items: usize, w: i64, icon: i64, max_h: i64) -> i64 {
 fn auto_box_size(items: usize, icon: i64, max_h: i64) -> (i64, i64) {
     let w = desired_box_width(items, icon);
     (w, box_height_at(items, w, icon, max_h))
+}
+
+// ————————————————————————————————————————————————————————————————
+// B 模式（不接管原生桌面）几何 —— 见 `docs/04-review/PLAN-B-PHASED.md`
+//
+// 这一段存在的理由只有一条：**让「底板画到哪」与「原生图标摆到哪」共用同一份数**。
+// 分开算过一次就会知道，两边差 1px 都会表现为「图标压到框线上」。
+// ————————————————————————————————————————————————————————————————
+
+/// B 模式的「图标基准」：布局引擎拿它当 `icon` 参数，于是
+/// `cell_h = icon + BOX_CELL_EXTRA_H` **恰好等于 Explorer 的图标纵向间距**
+/// （`LVM_GETITEMSPACING` 的高位），而 `cell_w = icon + CELL_EXTRA_W` 只会更宽、不会更窄。
+///
+/// 为什么不用 `spacing_x` 反推宽度：引擎的宽/高用的是**同一个** `icon` 参数，
+/// 两个常数（[`CELL_EXTRA_W`] / [`BOX_CELL_EXTRA_H`]）又不相等，无法同时精确匹配。
+/// 取「高度精确 + 宽度只多不少」是唯一不会让图标互相重叠的解。
+pub(crate) fn b_icon_arg_for_spacing(spacing_y: i32) -> i64 {
+    (i64::from(spacing_y) - BOX_CELL_EXTRA_H).max(16)
+}
+
+/// 从 `grid_meta` 读 B 模式图标基准（未开启 / 没测到间距时返回 `None` = 保持原行为）。
+pub(crate) fn b_icon_arg(conn: &Connection) -> Option<i64> {
+    let read = |key: &str| -> Option<String> {
+        conn.query_row(
+            "SELECT value FROM grid_meta WHERE key = ?1",
+            params![key],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+    };
+    if read("icon_control").as_deref() != Some("1") {
+        return None;
+    }
+    read("icon_spacing_y")
+        .and_then(|v| v.parse::<i32>().ok())
+        .map(b_icon_arg_for_spacing)
+}
+
+/// 格子内容区的图标网格（B 模式）。字段与 [`crate::commands::grid_icons`] 的摆位共用。
+pub(crate) struct BFrame {
+    /// 每行几个图标
+    pub cols: i64,
+    /// 图标单元格宽（= `arg + CELL_EXTRA_W`，只比 Explorer 间距宽、不窄）
+    pub cell_w: i64,
+    /// 图标单元格高（= Explorer 纵向间距）
+    pub cell_h: i64,
+    /// 内容原点相对格子左上角的偏移
+    pub origin_dx: i64,
+    pub origin_dy: i64,
+}
+
+/// B 模式的内容区几何 —— 前端「装饰底板」与 Rust「图标摆位」都读这一份。
+pub(crate) fn b_content_frame(box_w: i64, _box_h: i64, arg: i64, spacing_y: i32) -> BFrame {
+    BFrame {
+        cols: item_columns_at(box_w, arg).max(1),
+        cell_w: arg.clamp(16, 256) + CELL_EXTRA_W,
+        cell_h: i64::from(spacing_y).max(CELL_EXTRA_H),
+        origin_dx: BOX_BORDER_H + GRID_PAD_X,
+        origin_dy: BOX_HEADER_H + BOX_BORDER_H + GRID_PAD_Y,
+    }
+}
+
+/// 窗口**客户区原点**的屏幕坐标（图标坐标是相对列表框客户区的）。
+#[cfg(target_os = "windows")]
+pub(crate) fn window_client_origin(hwnd: HWND) -> (i32, i32) {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Gdi::ClientToScreen;
+    let mut pt = POINT { x: 0, y: 0 };
+    // SAFETY: hwnd 是有效的桌面列表框句柄；只做一次坐标换算，无副作用。
+    unsafe {
+        let _ = ClientToScreen(hwnd, &mut pt);
+    }
+    (pt.x, pt.y)
 }
 
 /// 一个矩形（逻辑像素）—— 排布时的占位 / 禁区。
@@ -6072,6 +6187,9 @@ fn layout_all_boxes(
             0
         }
     };
+    // B 模式（不接管原生桌面）：改用 Explorer 的图标间距当单元格高，
+    // 这样底板高度与原生图标网格逐行对得上（见 [`b_icon_arg`]）。
+    let icon = b_icon_arg(conn).unwrap_or(icon);
     layout_all_boxes_with(conn, work_w, work_h, icon, loose_count, mode)
 }
 
