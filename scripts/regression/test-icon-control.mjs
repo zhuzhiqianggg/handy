@@ -318,6 +318,27 @@ ok('名字匹配同时登记「带扩展名」与「不带扩展名」（显示�
 ok('对不上的条目只计数、不算失败（`unmatched` 透给 UI 说实话）',
   /unmatched \+= 1;\s*continue;/.test(giSrc) && /unmatched/.test(typesSrc));
 
+// —— V102.2「整理失效」事故（2026-10-11）：摆位不能只靠前端 relayoutSoon 那条链 ——
+// 启动装配关掉自动排列后没人摆图标 + 一键整理/重排/重置都不摆 ⇒ 底板与图标两张皮。
+// Rust 端必须有 `apply_after_relayout` 这条腿，且三个重排命令 + 启动装配都要挂上。
+{
+  ok('Rust 端有独立摆位入口 apply_after_relayout（不依赖前端发 IPC）',
+    /pub fn apply_after_relayout\(app: &AppHandle\)/.test(giSrc),
+    '前端那条链会静默吞错（`.catch(() => undefined)`），且启动 / 一键整理根本不走它');
+  const rustHooks = cmdSrc.split('crate::commands::grid_icons::apply_after_relayout(&app)').length - 1;
+  ok('三个重排命令都挂了 Rust 端摆位（auto_arrange / relayout / layout_reset）',
+    rustHooks === 3,
+    `实际挂了 ${rustHooks} 处，缺任何一处 = 那条路径上底板重排了、图标原地不动`);
+  ok('启动装配的最后一步就是摆位（不摆 = 图标停在自动排列时代的密集网格）',
+    /restore_desktop_icons\(app\);[\s\S]{0,400}?apply_after_relayout\(app\);/.test(giSrc));
+  ok('摆位失败打日志（不许再静默 —— 静默 = 用户报障时零取证）',
+    /图标摆位失败/.test(giSrc));
+  ok('整理完成 toast 不再走「iconsHidden 三元」（旧 false 分支会把误导文案顶给用户）',
+    !/showHint\(\s*report\.iconsHidden/.test(overlaySrc) &&
+      !/建议手动切换为接管/.test(overlaySrc.replace(/\/\/[^\n]*/g, '')),
+    'iconsHidden 恒 false ⇒ 旧三元每次整理都把「本机不支持自动隐藏图标」这句误导顶给用户');
+}
+
 /* ================================================================== *
  * ⑦ 命令注册与前端接线
  * ================================================================== */

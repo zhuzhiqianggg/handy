@@ -3315,11 +3315,10 @@ export function GridOverlay(): React.JSX.Element {
           );
           return;
         }
-        showHint(
-          report.iconsHidden
-            ? `整理完成：${parts.join('、')}；桌面图标已交由格子接管`
-            : `整理完成：${parts.join('、')}；本机不支持自动隐藏图标，建议手动切换为接管`,
-        );
+        // B 方案（Step 4）起图标永远由 Explorer 绘制并摆进格子，「接管/隐藏」不存在了；
+        // 旧文案「本机不支持自动隐藏图标，建议手动切换为接管」会在这条恒 false 分支上
+        // 每次整理都误导用户（2026-10-11 截图顶部那条 toast 就是它）。
+        showHint(`整理完成：${parts.join('、')}`);
       })
       .catch((error: Error) => {
         reportOperation('整理桌面', error);

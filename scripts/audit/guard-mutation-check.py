@@ -1092,6 +1092,39 @@ MUTATIONS: dict[str, _M] = {
             "（V79：谁写谁广播，前端 fail-closed 依赖它）、`icon_pos_backup` 是「还原图标布局」"
             "的凭据、`fflags_backup` 是自动排列的原值 —— 顺手清掉其中之一，功能就静默少一块",
         ),
+        # —— V102.2「整理失效」（2026-10-11）：摆位必须有 Rust 端这条腿 ——
+        (
+            "一键整理又不含摆位（底板重排了、图标原地不动）",
+            "src-tauri/src/commands/grid.rs",
+            "    crate::commands::grid_icons::apply_after_relayout(&app);\n    Ok(report)",
+            "    Ok(report)",
+            "2026-10-11 事故本体：摆位只靠前端 relayoutSoon 那条链，一键整理跑完格子重排、"
+            "图标却停在自动排列时代的密集网格位置 —— 用户看到的就是「整理失效」，且零报错",
+        ),
+        (
+            "增量重排又不含摆位（便签一加、图标就跟格子对不齐）",
+            "src-tauri/src/commands/grid.rs",
+            "        \"重排（不扫描·增量）：挪动 {} 个 / 按内容调整 {} 个尺寸 / 挂件归位 {} 个 / 空间不足 {} 个\",\n"
+            "        outcome.moved, outcome.resized, outcome.anchored, outcome.overflowed\n"
+            "    ));\n"
+            "    crate::commands::grid_icons::apply_after_relayout(&app);",
+            "        \"重排（不扫描·增量）：挪动 {} 个 / 按内容调整 {} 个尺寸 / 挂件归位 {} 个 / 空间不足 {} 个\",\n"
+            "        outcome.moved, outcome.resized, outcome.anchored, outcome.overflowed\n"
+            "    ));",
+            "grid_relayout 是挂件 / 新格子 / 拖动后最常走的重排路 —— 少这一脚，"
+            "每次增量重排都让底板与图标错开一点，攒几次就「看着不对却说不出哪次开始错的」",
+        ),
+        (
+            "启动装配的最后一脚摆位被拿掉（开机后图标停回密集网格）",
+            "src-tauri/src/commands/grid_icons.rs",
+            "    // ⑤ 启动即摆位：自动排列已经关掉，图标停在关掉那一刻的密集网格位置 ——\n"
+            "    //    不在这里摆一次，格子底板和图标就一直是两张皮，直到用户碰巧触发一次重排\n"
+            "    //    （2026-10-11「整理失效」事故的另一半根因）。\n"
+            "    apply_after_relayout(app);",
+            "    let _ = app;",
+            "关掉自动排列不会重新摆放图标 —— 它们停在关掉那一刻的位置。启动不摆位 ⇒ "
+            "从启动到第一次重排之间，桌面永远是「空格子底板 + 密集网格图标」两张皮",
+        ),
     ],
 }
 

@@ -327,6 +327,11 @@ pub fn ensure_native_layout(app: &AppHandle) {
     // 保险：万一历史版本把图标藏了（接管态残留），这里立刻还给系统 ——
     // B 方案下图标必须由 Explorer 画，否则「遥控」没有对象。
     crate::commands::grid::restore_desktop_icons(app);
+
+    // ⑤ 启动即摆位：自动排列已经关掉，图标停在关掉那一刻的密集网格位置 ——
+    //    不在这里摆一次，格子底板和图标就一直是两张皮，直到用户碰巧触发一次重排
+    //    （2026-10-11「整理失效」事故的另一半根因）。
+    apply_after_relayout(app);
 }
 
 /// 重新摆位（改了格子 / 条目之后调）。返回本轮摆位计数。
@@ -335,6 +340,40 @@ pub async fn desktop_icon_layout_apply(app: AppHandle) -> Result<IconControlStat
     let conn = connect(&app)?;
     let (placed, unmatched) = apply_layout(&conn, &app)?;
     Ok(status_of(&conn, placed, unmatched))
+}
+
+/// **Rust 端摆位入口**：任何「格子几何变了」的 Rust 命令（一键整理 / 重排 / 重置）
+/// 在改完 DB 之后调它，把原生图标按新格子重摆一次。
+///
+/// # 为什么必须有这条（2026-10-11「整理失效」事故）
+///
+/// V102 里摆位只有一条路：前端 `relayoutSoon` → `gridRelayout` →
+/// `.then(() => ipc.desktopIconLayoutApply())`。于是**启动装配关掉自动排列之后**
+/// 图标停在关掉那一刻的密集网格位置（没人摆它们），用户点「一键整理」格子底板重排了、
+/// 图标却原地不动 —— 表现就是「整理失效」。
+///
+/// 教训：**「底板画到哪」与「图标摆到哪」必须由同一段逻辑保证**，不能指望前端记得
+/// 再发一条 IPC（前端不发 = 图标不摆 = 没有任何报错）。前端那条 `.then()` 保留作
+/// 双保险，但真正的保证在这里。
+///
+/// 失败打日志（`grid` 通道）不 panic —— 摆不上图标格子底板还在，下一轮重排会再试。
+pub fn apply_after_relayout(app: &AppHandle) {
+    let Ok(conn) = connect(app) else {
+        return;
+    };
+    match apply_layout(&conn, app) {
+        Ok((placed, unmatched)) => {
+            if placed > 0 || unmatched > 0 {
+                crate::logging::write_line(
+                    "grid",
+                    &format!(
+                        "图标摆位：成功 {placed} 个 / 未匹配 {unmatched} 个（未匹配 = 格子里的条目在桌面图标视图里找不到同名项）"
+                    ),
+                );
+            }
+        }
+        Err(err) => crate::logging::write_line("grid", &format!("图标摆位失败：{err}")),
+    }
 }
 
 /// **一键把桌面还给系统**：还原图标位置 **+** 还原「自动排列 / 对齐网格」偏好。
