@@ -66,7 +66,6 @@ const ipcSrc = read(IPC);
 const overlaySrc = read(OVERLAY);
 const libSrc = read(LIB_RS);
 const handoffSrc = read(DESKTOP_HANDOFF);
-const nativeUiSrc = read('src-tauri/src/platform/native_ui.rs');
 
 /* ================================================================== *
  * ① 标志位：按 Explorer 的口径传，且不许谎报能改名
@@ -145,8 +144,9 @@ ok('前端条目右键用 ctrlKey 判 Handy 菜单（不再抢 Shift）',
 // '::{…}\Desktop', …)` 从来没成功过（日志里几百条「拿不到 shell 对象：参数错误」），
 // 所以这里从 3 处改成 2 处是**有意为之**，不是漏传。
 ok('前端把 shiftKey 透传给原生菜单（扩展动词）',
-  (overlaySrc.match(/shellContextMenu\([^)]*event\.shiftKey\)/g) ?? []).length >= 2,
-  '格子条目 / 未归类条目 两处都要传 —— 不一致本身就算「改行为」');
+  (overlaySrc.match(/shellContextMenu\([^)]*event\.shiftKey\)/g) ?? []).length >= 1,
+  'Step 5 起「未归类」竖条已退场，只剩格子条目这一处；' +
+    '★ 反过来也要盯：这个数**不许**再降到 0（降了就说明连格子条目那条都没了）');
 ok('前端不再出现「!event.shiftKey && !entry.isSystem」这种抢 Shift 的写法',
   !/!event\.shiftKey && !entry\.isSystem/.test(overlaySrc));
 
@@ -309,38 +309,9 @@ ok('改名后同步更新 grid_items 登记（否则出现幽灵条目）',
   /UPDATE grid_items SET file_path = \?1, display_name = \?2 WHERE file_path = \?3/.test(rustCmdSrc));
 ok('前端有 F2 改名', /event\.key !== 'F2'/.test(overlaySrc));
 ok('前端有「单击两次」改名（间隔 > 350ms 且 < 1500ms）',
-  /now - last\.at > 350 && now - last\.at < 1500/.test(overlaySrc));
-
-/** 10-11 用户拍板：改名撞名弹 Windows 原生对话框，不再走 Handy toast */
-ok('撞名走原生对话框（rename_conflict_dialog），不再返回自绘文案',
-  /if target != source && target\.exists\(\) \{[\s\S]{0,200}?rename_conflict_dialog\(&trimmed, source\.is_dir\(\)\)/.test(rustCmdSrc) &&
-    !/已经有一个「/.test(rustCmdSrc));
-ok('撞名返回「已原生提示」哨兵（前端据此保持输入框打开、不再 toast）',
-  /rename_conflict_dialog\(&trimmed, source\.is_dir\(\)\);\s*\n\s*return Err\(crate::platform::native_ui::ERR_NATIVE_SHOWN\.to_string\(\)\)/.test(rustCmdSrc));
-ok('ipc.ts 有 ERR_NATIVE_DIALOG_SHOWN 哨兵且与 Rust 约定一致',
-  /export const ERR_NATIVE_DIALOG_SHOWN = '__native_dialog_shown__';/.test(ipcSrc));
-ok('前端改名失败遇哨兵：输入框保持打开（重新挂载），不弹 toast',
-  /if \(error\.message === ERR_NATIVE_DIALOG_SHOWN\) \{[\s\S]{0,400}?setRenamingItemPath\(path\);[\s\S]{0,120}?setItemRenameDraft\(itemRenameDraft\.trim\(\)\)/.test(overlaySrc));
-
-/** 10-11 用户拍板：删除文件本身走 Windows 原生（SHFileOperationW → 回收站） */
-ok('Rust 命令 grid_item_delete_file 存在且已注册',
-  /pub async fn grid_item_delete_file\(/.test(rustCmdSrc) &&
-    /commands::grid::grid_item_delete_file,/.test(libSrc));
-ok('原生删除走 FO_DELETE + FOF_ALLOWUNDO，且**不许**吞掉系统确认框（FOF_NOCONFIRMATION）',
-  /wFunc: FO_DELETE,/.test(nativeUiSrc) &&
-    /fFlags: FOF_ALLOWUNDO\.0 as u16,/.test(nativeUiSrc) &&
-    // 只看 fFlags 代码行 —— 模块注释里解释「故意不带 NOCONFIRMATION」会命中全文匹配
-    !/fFlags:[^\n]*FOF_NOCONFIRMATION/.test(nativeUiSrc));
-ok('用户取消原生确认框 = Ok(false)（前端保持原样），成功才清 grid_items 登记与「不要它」名单',
-  /if !deleted \{\s*\n\s*return Ok\(false\);/.test(rustCmdSrc) &&
-    /DELETE FROM grid_items WHERE file_path = \?1/.test(rustCmdSrc) &&
-    /set\.remove\(&path\)/.test(rustCmdSrc));
-ok('ipc.ts 暴露 gridItemDeleteFile（boolean = 是否真的删了）',
-  /gridItemDeleteFile: \(filePath: string\): Promise<boolean>/.test(ipcSrc));
-ok('前端条目菜单有「删除」行并接 deleteItemFile（文件没了才摘行 + 重排）',
-  /deleteItemFile\(target\);/.test(overlaySrc) &&
-    /title="删除文件本身：Windows 原生确认后进回收站（可还原）"/.test(overlaySrc) &&
-    /if \(!deleted\) \{\s*\n\s*return; \/\/ 原生确认框里点了取消/.test(overlaySrc));
+  /now - last\.at > 350[\s\S]{0,80}?now - last\.at < 1500/.test(overlaySrc),
+  '★ 一行写死过于脆：两处（格子条目 / 未归类条目）的换行方式不同；' +
+    'Step 5 删竖条后只剩格子条目那处，且它是多行写法');
 ok('新诊断 example bg_menu_dump.rs 仍在',
   fs.existsSync(path.join(root, 'src-tauri/examples/bg_menu_dump.rs')));
 
@@ -485,31 +456,33 @@ ok('V89：新建成功也写日志（成功不静默，才能区分「没点到�
 //   · ShellNew 的「新建」要在隐藏视图上拉原位改名框，我们只能隔空确认 ——
 //     V92 取消 → V93 换判据 → V94 改确认 → V95 还前台，七轮都不收敛
 //     （用户 10-10 报障一路到「第三次直接建不出来」）。
-// V96 回退：整窗命中区 + 根画布接管态整窗可交互 ⇒ 空白右键进我们自己的菜单
-// （`show_background_context_menu` = 完整背景菜单 + 我们注入的、必成的「新建」）。
+// ④ 根画布穿透（Step 4 收尾后**恒定**，不再有模式条件）
 //
-// V102（B 方案 Step 3）在此之上**再加一个穿透条件**：表达式升级为
-//   `contentHidden || iconControl ? 'none' : 'auto'`
-// `iconControl` = B 模式（不接管原生桌面）开关。此时图标归 Explorer，桌面空白处的
-// 右键必须落到 Explorer 自己那张原生菜单上（查看 / 排序方式 / 刷新 / 新建，全是原生的）。
+// V92–V100 九轮都在「空白右键该归谁」上打转：复刻原生菜单（拿不到 `CNewMenu` 需要的
+// IShellView ⇒ 新建时好时坏）、穿透给 Explorer（要隔空操作被我们隐藏的视图 ⇒ 七轮不收敛）、
+// 手写「新建›」注入（数据源是 `Discardable\PostSetup\ShellNew` 缓存，能对齐但脆）。
 //
-// ★ 判据必须是**或**：写成 `contentHidden && iconControl` 则 B 模式下根画布仍是
-//   `auto` ⇒ 空白右键被我们吃掉 ⇒ 原生菜单永远弹不出来（就是 V92 要解决的那个问题）。
-//   这一条只能靠源码断言守（编译通过、类型正确、跑起来才炸）。
-ok('V96：根画布接管态整窗可交互（空白右键归 Handy 自己的菜单）',
-  /pointerEvents: contentHidden \|\| iconControl \? 'none' : 'auto',/.test(overlaySrc));
-ok('V102：B 模式下根画布整层穿透（空白右键交给 Explorer 原生菜单，两个条件是「或」不是「与」）',
-  !/pointerEvents: contentHidden && iconControl/.test(overlaySrc) &&
-    /pointerEvents: contentHidden \|\| iconControl \? 'none' : 'auto',/.test(overlaySrc));
-ok('V96：**恢复**上报「整窗」命中区（否则 Rust 命中轮询把整窗切回穿透、空白右键点不到）',
-  /width: window\.innerWidth \* scaleFactor/.test(overlaySrc));
+// Step 4 把根换掉之后这个问题**从定义上消失**：图标归 Explorer，桌面空白处本来就不是
+// 我们的地盘 —— 右键必须落到它自己那张原生菜单上（查看 / 排序方式 / 刷新 / 新建，
+// 还天然带「撤消删除 / 下一个桌面背景」）。所以根画布**恒定**整层穿透。
+ok('Step 4：根画布恒定整层穿透（空白右键交给 Explorer 原生菜单）',
+  /className="fixed inset-0 select-none overflow-hidden"[\s\S]{0,2000}?pointerEvents: 'none',/.test(overlaySrc) &&
+    !/pointerEvents: contentHidden \|\| iconControl/.test(overlaySrc),
+  '★ 反例：留任何 `? … : \'auto\'` 的分支，桌面空白处就还是我们的窗口吃点击 ⇒ '
+    + '原生右键菜单永远弹不出来。⚠️ 断言必须锚定到**根画布那一处** —— '
+    + '`pointerEvents: \'none\',` 在本文件另有 3 处（内容区 / 提示外框 / 预览），'
+    + '写成「文件里存在这个串」等于任何一处穿透都能让它变绿（判别力归零）');
+ok('Step 4：**不再**上报「整窗」命中区（报了 ⇒ Rust 命中轮询把整窗切回可交互）',
+  !/width: window\.innerWidth \* scaleFactor/.test(overlaySrc),
+  '「根画布 pointerEvents:none」只解决窗口**内部**转发；真正决定「这个点归谁」的是 '
+    + 'Rust 那条 25ms 轮询 `interactive || cursor_hit(&win)` —— 报整窗 = 整张桌面还是我们的');
 ok('V96：整窗命中区只在内容可见时上报（内容收起时交回桌面）',
   /const regions: GridRegion\[\] = \[\];[\s\S]{0,160}?if \(!contentHidden\) \{/.test(overlaySrc));
-// V102：依赖数组多了一个 `iconControl`（B 模式切换后命中区整批变了，必须重报）。
-// 但**仍然不许**出现 `takeover` —— 接管态从来不是命中区的输入（V96 定的），
-// 加进去会让「接管自检把网格切回穿透」这条老病复发。
-ok('V96：命中区依赖数组含 contentHidden / iconControl，但不含 takeover',
-  /\}, \[regionsKey, scaleFactor, contentHidden, iconControl\]\);/.test(overlaySrc) &&
+// Step 4：`iconControl` 已从依赖数组退场（模式是常量，不可能变）；
+// `takeover` **从来不许**进来 —— 接管态不是命中区的输入（V96 定的），
+// 加进去会让「接管自检把网格切回穿透」那条老病复发。
+ok('Step 4：命中区依赖数组只含几何三件套（iconControl 已退场、takeover 从来不是输入）',
+  /\}, \[regionsKey, scaleFactor, contentHidden\]\);/.test(overlaySrc) &&
     !/\}, \[regionsKey, scaleFactor, contentHidden[^\]]*takeover[^\]]*\]\);/.test(overlaySrc));
 ok('V89：handoff 整体停用（HANDOFF_DISABLED）',
   /const HANDOFF_DISABLED: bool = true;/.test(handoffSrc));
@@ -637,28 +610,8 @@ ok('V93：唯一新增项立刻就地改名（对齐 Explorer「新建后焦点�
 ok('V93：安静期内的挂起刷新一定会被补跑（改名结束就踢一脚）',
   /quietKickRef\.current\(\);[\s\S]{0,300}\}, \[renamingItemPath\]\)/.test(overlaySrc));
 ok('V96：条目改名框自动聚焦时全选默认名（否则新建后打字是追加，会得到「新建文件夹 (20)123」）',
-  (overlaySrc.match(/onFocus=\{\(event\) => event\.currentTarget\.select\(\)\}/g) ?? []).length >= 2);
-
-/* ------------------------------------------------------------------ *
- * V102.7：幽灵条目（文件已被删 / 移走，格子里的登记还挂着）
- *
- * 用户 10-11：「格子里面删除也有问题，什么玩意啊」。日志给的证据是
- * `原生右键菜单失败（…\Desktop\test）：拿不到 shell 对象：没有注册类 (0x80070002)`
- * —— 那是 `SHCreateItemFromParsingName` 拿不到已不存在的对象。更要命的是这句失败
- * 发生在**投递到主线程的闭包**里，前端收不到 ⇒ 用户看到的是「右键一点反应都没有」。
- *
- * 锁三件事：① 后端投递前先探路径，回可读错误；② 前端收到就刷新摘掉那条登记；
- * ③ 桌面变化事件里补一次「格子内失效登记」的对账（原来只看竖条，直接 return）。
- * ------------------------------------------------------------------ */
-ok('V102.7：条目右键前先探路径存在（幽灵条目回可读错误，而不是"右键没反应"）',
-  /if !std::path::Path::new\(&path\)\.exists\(\)/.test(rustCmdSrc) &&
-    /"「\{name\}」已经不在了（可能刚被删除或移走），已把它从格子里去掉"/.test(rustCmdSrc));
-ok('V102.7：投递失败也不再是静默（日志留痕 + 前端能拿到原因）',
-  /grid_log\(&format!\(\s*"条目已失效（\{path\}）/.test(rustCmdSrc));
-ok('V102.7：前端右键失败时立刻刷新（把失效登记从格子里摘掉）',
-  /showHint\(error\.message\);\s*void refresh\(\)\s*\.then\(\(\) => refreshLoose\(\)\)/.test(overlaySrc));
-ok('V102.7：桌面变化但竖条没变（= 格子里的文件被外部删除）时，补一次对账摘幽灵',
-  /if \(added\.length === 0\) \{[\s\S]{0,800}gridDesktopSync\(\)[\s\S]{0,500}pruned > 0/.test(overlaySrc));
+  (overlaySrc.match(/onFocus=\{\(event\) => event\.currentTarget\.select\(\)\}/g) ?? []).length >= 1,
+  'Step 5 删竖条后只剩格子条目这一处；数量降到 0 就说明连它也没了');
 
 /* ================================================================== *
  * 结果

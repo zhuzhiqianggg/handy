@@ -8,15 +8,20 @@
 //! | --- | --- | --- |
 //! | V25–V32 | 引用登记，但**不接管桌面呈现** | 桌面与格子各显示一份，用户：「并不是整理收纳，而是复制了一份而已」 |
 //! | V33–V36 | 真实收纳：`fs::rename` 进 `桌面/Handy整理/<格名>/` | 用户明确否决：「是桌面整理，不是让你把桌面上的东西都给我移动到一个目录下面去，这个完全是错误的」 |
-//! | **V37 起** | **呈现层**：只登记引用 + 由格子接管桌面呈现 | 现行方案 |
+//! | **V37–V101** | **呈现层**：只登记引用 + **隐藏原生图标**、由格子层自绘 | 自绘永远差一层（删除失效 / 改名不像原生 / 右键残缺），用户 10-10 否决 |
+//! | **V102 起** | **呈现层 + 不接管**：图标仍归 Explorer，格子当装饰底板 + 遥控摆位 | 现行方案（见下方第 2 条） |
 //!
 //! 现行三条硬规矩：
 //!   1. **一个字节都不挪**：拖入 / 移出 / 换格子 / 一键整理，全部只改 `grid_items`
 //!      的一行登记，文件永远留在桌面原位（对标腾讯桌面整理）；
-//!   2. **桌面图标交给格子代管**（V38）：既然格子里的条目就是桌面文件的引用，
-//!      原生图标与之并存就是「桌面又两个相同的内容」（用户原话）。所以「接管」
-//!      = 隐藏 `SysListView32`，桌面上只留格子一份；偏好记在
-//!      [`META_KEY_TAKEOVER`]，收起挂件 / 退出应用立刻把图标还给系统；
+//!   2. **桌面图标归 Explorer，格子只当底板**（★★ B 方案，Step 4 起是唯一模式）：
+//!      **不隐藏 `SysListView32`**，原生图标一直看得见；格子画在它们下面的网格里，
+//!      再用 `LVM_SETITEMPOSITION` 把图标**摆到格子挡位上**（见
+//!      [`crate::commands::grid_icons`]）。于是选中 / 多选 / 框选 / Delete /
+//!      Shift+Delete / 右键菜单 / 属性 / 第三方 Shell 扩展**全是原生的** ——
+//!      「原始桌面所有的功能完全一样」这条要求只有这一条路能满足。
+//!      ⚠️ V38–V101 的「隐藏图标、由格子层自绘」已被否决并拆除：自绘永远差一层
+//!      （删除失效、改名 toast 不像原生、右键残缺），用户 10-10 明确要求回到不接管；
 //!   3. **格子建了就在**（V38）：空格子也常驻显示。曾经按「空不占位」滤掉过，
 //!      用户反馈是「动不动就不见了，我找不到不见的规律到底是什么」。
 //!
@@ -692,7 +697,7 @@ fn probe_room_for_another_box(
     conn: &Connection,
     work_w: i64,
     work_h: i64,
-    icon: i64,
+    cell: Cell,
     loose_count: usize,
     insert: impl FnOnce(&Connection) -> rusqlite::Result<()>,
 ) -> Option<String> {
@@ -703,7 +708,7 @@ fn probe_room_for_another_box(
         return None;
     }
     let outcome = match insert(conn) {
-        Ok(()) => layout_all_boxes_with(conn, work_w, work_h, icon, loose_count, LayoutMode::Fill),
+        Ok(()) => layout_all_boxes_with(conn, work_w, work_h, cell, loose_count, LayoutMode::Fill),
         Err(_) => Err("试探插入失败".to_string()),
     };
     let _ = conn.execute_batch(&format!("ROLLBACK TO {SP}; RELEASE {SP};"));
@@ -805,7 +810,7 @@ pub async fn grid_box_upsert(
                     &conn,
                     work_w,
                     work_h,
-                    layout_icon_size(),
+                    b_cell(&conn).unwrap_or_else(|| Cell::from_icon(layout_icon_size())),
                     loose_count,
                     |probe| {
                         probe.execute(
@@ -1130,40 +1135,6 @@ pub async fn grid_item_delete(
     Ok(())
 }
 
-/// 删除文件本身 —— **走 Windows 原生链路**（用户 10-11 拍板：「删除行为应该使用
-/// Windows 原生的」）。
-///
-/// `SHFileOperationW(FO_DELETE, FOF_ALLOWUNDO)` 与 Explorer 完全同源：系统开了
-/// 「显示删除确认对话框」就由 Windows 弹确认框，删掉的进回收站（可还原）。
-/// 返回 `Ok(false)` = 用户在原生对话框里取消，什么都没发生。
-///
-/// 成功后必须清 `grid_items` 登记（文件已不在，留着就是幽灵条目），并把路径从
-/// 「不要它」名单摘掉 —— 回收站还原文件后还能再拖回格子。
-#[tauri::command]
-pub async fn grid_item_delete_file(app: AppHandle, path: String) -> Result<bool, String> {
-    let source = Path::new(&path);
-    if !source.exists() {
-        return Err("文件已不在原位置了".to_string());
-    }
-    let deleted = crate::platform::native_ui::delete_to_recycle_bin(source)?;
-    if !deleted {
-        return Ok(false);
-    }
-    let conn = connect(&app)?;
-    conn.execute("DELETE FROM grid_items WHERE file_path = ?1", params![path])
-        .map_err(|err| format!("清理条目登记失败：{err}"))?;
-    let mut set = read_dismissed(&conn)?;
-    if set.remove(&path) {
-        let _ = write_dismissed(&conn, &set);
-    }
-    let short = source
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .unwrap_or_else(|| path.clone());
-    grid_log(&format!("删除「{short}」：已进回收站（Windows 原生链路），登记已清理"));
-    Ok(true)
-}
-
 /// 把一个条目挪到另一个格子 —— **只改归属，文件原位不动**（V37 起）。
 #[tauri::command]
 pub async fn grid_item_move(
@@ -1261,10 +1232,7 @@ pub async fn grid_item_rename(
     };
     let target = parent.join(&trimmed);
     if target != source && target.exists() {
-        // 用户 10-11 拍板：「名称重复提示应该是 Windows 的提示」——弹原生对话框
-        // （Explorer 同款文案），返回哨兵让前端保持输入框打开；不再走 Handy toast。
-        crate::platform::native_ui::rename_conflict_dialog(&trimmed, source.is_dir());
-        return Err(crate::platform::native_ui::ERR_NATIVE_SHOWN.to_string());
+        return Err(format!("已经有一个「{trimmed}」了"));
     }
 
     if let Err(err) = std::fs::rename(source, &target) {
@@ -1562,16 +1530,16 @@ const META_KEY_ATTACH: &str = "attach_mode";
 
 /// `grid_meta` 中「系统桌面图标是否被隐藏」的键名（崩溃后启动时据此恢复）。
 ///
-/// ⚠️ 这是**瞬时状态**（此刻图标是不是被我们藏着），不是偏好 —— 与
-/// [`META_KEY_TAKEOVER`] 分开记：收起挂件 / 退出应用会立刻恢复图标，但用户的
-/// 「由格子接管桌面」偏好要留着，下次显示格子时依它重新隐藏。
+/// ⚠️ **B 方案（V102 起）下恒为 `"0"`** —— 图标永远不藏。键与读写函数都是接管路线的
+/// 遗留物，保留只为「历史残留清场」（老库里可能是 `1`，启动时读它一次并复位）。
+/// 真正的事实键就是它；清理在 Step 6a。
 const META_KEY_ICONS_HIDDEN: &str = "desktop_icons_hidden";
 
 /// `grid_meta` 中「是否由格子层接管桌面呈现」的键名（V38）。
 ///
-/// 值 = `"1"`：整理桌面后隐藏系统桌面图标，桌面只由格子画 —— 用户 V38 原话
-/// 「不是整理了图标都收纳到格子里面 但是桌面原来的图标还在原地 没有消失
-/// 相当于桌面又两个相同的内容了」。`"0"` / 缺失 = 原生图标与格子共存。
+/// ⚠️ **V102 起已废弃**：迁移 v12 会把这一行直接删掉，读它只会得到 `false`。
+/// 保留常量只为少动轮询线程 / 启动装配里的几个调用点；清理在 Step 6a。
+/// 历史语义（已作废，勿据此推理）：`"1"` = 整理后隐藏系统图标、桌面只由格子画。
 const META_KEY_TAKEOVER: &str = "desktop_takeover";
 
 /// `grid_meta` 中「不再自动收录」名单的键名（JSON 字符串数组）。
@@ -1744,7 +1712,11 @@ fn desktop_dir_signature() -> (usize, u64) {
 
 /// 隐藏 / 恢复桌面系统图标（仅切换 `SysListView32` 的可见性，**不动任何文件**）。
 ///
-/// 语义：这是「桌面整理」的关键一步 —— 格子接管呈现后，原来的图标不该再重复显示。
+/// ⚠️ **B 方案（Step 4 起）只允许 `hidden = false`** —— 它的唯一职责是把历史接管态
+/// 残留的「藏」还回去。`hidden = true` 是**没有调用方**的（守卫钉着这一点，
+/// 见 `test-icon-control.mjs` ③ 组：全仓不许出现 `desktop_icons_apply(true)`）。
+/// 能力删掉比约束住更可靠：留一个能藏的入口，V45「桌面全空」随时能从这儿回来。
+///
 /// 返回 `Ok(false)` 表示没找到图标视图窗口（例如 Explorer 未运行 / 已被第三方接管），
 /// 调用方据此提示「本机不支持自动隐藏」而不是报错。
 #[cfg(target_os = "windows")]
@@ -2377,6 +2349,9 @@ fn write_icons_hidden(app: &AppHandle, hidden: bool) -> Result<(), String> {
 }
 
 /// 读「整理由格子层接管桌面呈现」偏好（V38）。
+///
+/// ⚠️ **已废弃**：键本身由迁移 v12 删掉，这里恒读到 `false`。保留函数壳只为少动
+/// 轮询线程的调用点；清理在 Step 6a。
 fn read_takeover(app: &AppHandle) -> bool {
     let Ok(conn) = connect(app) else {
         return false;
@@ -2392,6 +2367,9 @@ fn read_takeover(app: &AppHandle) -> bool {
 }
 
 /// 写「整理由格子层接管桌面呈现」偏好（V38）。
+///
+/// ⚠️ **已废弃**：写进去的键会被迁移 v12 删掉，等于写个寂寞。保留函数壳只为少动
+/// 调用点；清理在 Step 6a。
 fn write_takeover(app: &AppHandle, enabled: bool) -> Result<(), String> {
     let conn = connect(app)?;
     conn.execute(
@@ -2478,35 +2456,15 @@ pub fn restore_desktop_icons(app: &AppHandle) {
     grid_log("应用退出 / 收起：已把系统桌面图标还给系统");
 }
 
-// —— B 模式（不接管原生桌面）的内存镜像 ——
+// —— B 模式内存镜像已删除（Step 4，2026-10-10）——
 //
-// 轮询线程每 25ms 跑一拍，绝不能每次都开一个 SQLite 连接，所以把「B 模式是否开启」
-// 镜像成一个原子。三态：`255` = 还没从库里读过（懒加载一次），`1` / `0` = 已知。
-// 写库的地方（`grid_icons::desktop_icon_control_set`）必须同步调 [`set_icon_control_runtime`]，
-// 免得出现「库里开了、内存里还没开」的窗口期。
-
-/// [`icon_control_runtime`] 的「未知」哨兵。
-const ICON_CONTROL_UNKNOWN: u8 = 255;
-
-/// B 模式开关的内存镜像（见上方说明）。
-static ICON_CONTROL_ON: AtomicU8 = AtomicU8::new(ICON_CONTROL_UNKNOWN);
-
-/// 写库的路径同时更新镜像（唯一入口，避免两处记账不一致）。
-pub(crate) fn set_icon_control_runtime(on: bool) {
-    ICON_CONTROL_ON.store(u8::from(on), Ordering::Relaxed);
-}
-
-/// B 模式是否开着（首次调用时从 `grid_meta` 懒加载一次）。
-fn icon_control_runtime(app: &AppHandle) -> bool {
-    match ICON_CONTROL_ON.load(Ordering::Relaxed) {
-        ICON_CONTROL_UNKNOWN => {
-            let on = connect(app).ok().and_then(|c| b_icon_arg(&c)).is_some();
-            set_icon_control_runtime(on);
-            on
-        }
-        value => value == 1,
-    }
-}
+// 这里原本有一个 `ICON_CONTROL_ON: AtomicU8`，把「B 模式开没开」镜像给 25ms 的轮询线程，
+// 免得每拍都开一次 SQLite。**B 方案成为唯一模式之后它失去意义**：不再有「开/关」这个
+// 会变的量，也就不需要镜像。判断「有没有开」的地方（[`takeover_icons`] / [`reassert_takeover`]
+// 的守卫）随接管一起消失，见 `docs/04-review/PLAN-B-PHASED.md` Step 4。
+//
+// 留这段注释是为了让后来者知道**这里曾经有什么、为什么没了** —— 项目里已经有过
+// 「删掉的东西被重新加回来」的先例（见 CONVENTIONS 的 V96 条）。
 
 /// 启动时自愈：上次是被强杀 / 崩溃（图标还藏着），这里恢复并清标记。
 /// V55：双重检查 —— 标记为 hidden **或** 图标实际不可见时都恢复。
@@ -2549,14 +2507,23 @@ pub async fn grid_attach_set(app: AppHandle, mode: String) -> Result<(), String>
     Ok(())
 }
 
-/// 隐藏 / 恢复桌面系统图标。返回「本机是否支持」（false = 没找到桌面图标视图）。
+/// ~~隐藏 / 恢复桌面系统图标~~ —— **B 方案 Step 4 起「隐藏」已退场**。
+///
+/// 这个命令是 V30 时代的「一次性藏一下图标」开关。接管整体退场后**没有任何合法路径需要
+/// 藏图标**，所以它被降级成「确保原生图标可见」：`hidden` 参数**被忽略**，只做恢复。
+///
+/// # 为什么不留着「能藏」
+///
+/// 一个还能藏图标的入口，就是一条能绕开 [`takeover_icons`] 那条「恒不隐藏」约束的路 ——
+/// V45 装机实测的「桌面全空」事故随时能从这儿回来。**能力删掉比约束住更可靠**：
+/// 约束靠人记得住，删掉不靠任何人的记忆。
+///
+/// 保留命令名只为不改前端接口形状；它现在是幂等的「确保图标可见」。
 #[tauri::command]
 pub async fn grid_desktop_icons_set(app: AppHandle, hidden: bool) -> Result<bool, String> {
-    let supported = desktop_icons_apply(hidden)?;
-    if supported {
-        write_icons_hidden(&app, hidden)?;
-    }
-    Ok(supported)
+    let _ = hidden;
+    let _ = write_icons_hidden(&app, false);
+    Ok(desktop_icons_apply(false).unwrap_or(false))
 }
 
 /// 查询桌面系统图标当前是否可见。
@@ -3014,50 +2981,29 @@ static BOUNDS_RETRY_AT: AtomicU64 = AtomicU64::new(0);
 /// 30 秒足够区分「瞬态」与「真的收起了」：真收起/退出走 [`grid_overlay_hide`] 的立即归还。
 const OVERLAY_AWAY_GRACE_SECS: u64 = 30;
 
-/// 桌面接管开关（对称）：格子层贴上桌面时隐藏系统图标，收起时恢复。
+/// **接管已退场（B 方案 Step 4，2026-10-10 收尾）—— 桌面图标永远归 Explorer。**
 ///
-/// 仅在贴桌模式有意义（普通窗口模式下系统图标本来就看得见，无需也不该去动）。
-/// 隐藏失败不阻断显示（例如桌面图标视图已被第三方桌面工具接管时找不到句柄），
-/// 只留日志 —— 格子层照样可用，只是出现「格子 + 原图标」双层。
+/// V30–V101 这里会 `desktop_icons_apply(true)` 把 `SysListView32` 整个藏掉，再靠 Z 序锚定 /
+/// 驻留自愈 / Win+D 还原 / 接管自检一整套机制把它按住。**那套机制本身在持续生产 bug**：
+/// V42–V101 共 60 批次改动几乎全耗在这一个模块上，而每一批都在补上上批机制自己造出来的洞
+/// （藏了 → 被系统恢复 → 自检再藏 → 与第三方桌面工具打架 → 保险丝退避……）。
 ///
-/// 返回「此刻图标是否确实被我们藏起来了」（V38 起把结果透给调用方，让 UI 能说实话）。
+/// B 方案把「谁拥有图标」交还 Explorer 之后，这类问题**在定义上不存在** —— 图标由 Explorer
+/// 画、由 Explorer 响应右键，我们只遥控坐标（[`crate::commands::grid_icons`]）。
+///
+/// 于是这个函数只剩一个兜底职责：把**历史版本**藏起来过的图标还回去（老库
+/// `desktop_icons_hidden=1`，或强杀留下的残留）。`hidden` 参数保留只为少动调用点 —— **恒不隐藏**。
+///
+/// 返回恒为 `false`（「此刻图标并没有被我们藏起来」这个事实；前端据此显示徽标）。
 fn takeover_icons(app: &AppHandle, hidden: bool) -> bool {
-    // ★★ B 模式（不接管原生桌面）：图标归 Explorer 管，**绝不隐藏**。
-    // 见 `docs/04-review/PLAN-B-PHASED.md` Step 4 —— 「谁拥有图标」是这条路线的根，
-    // 藏起来 = 又回到「自己扮 Explorer」那一整套 Z 序 / Win+D / 自愈的坑里。
-    if hidden && icon_control_runtime(app) {
-        return false;
+    let _ = hidden;
+    if ICONS_TAKEN.swap(false, Ordering::Relaxed) {
+        let _ = desktop_icons_apply(false);
+        grid_log("B 方案：把历史上被接管的桌面图标还给系统");
     }
-    let applied = matches!(desktop_icons_apply(hidden), Ok(true));
-    match (hidden, applied) {
-        (true, true) => {
-            let _ = write_icons_hidden(app, true);
-        }
-        (true, false) => {
-            grid_log("未找到系统桌面图标视图，跳过隐藏（可能已被第三方桌面工具接管）");
-        }
-        (false, false) => {}
-        (false, true) => {
-            let _ = write_icons_hidden(app, false);
-        }
-    }
-    // 只有真正把图标藏起来才标记代管；恢复或失败一律解除
-    let taken = applied && hidden;
-    let was = ICONS_TAKEN.swap(taken, Ordering::Relaxed);
-    // V40：**状态真变化才落盘一行**（含句柄，便于下次拿它跟探针输出对照）。
-    // 以前这里只在失败时写日志，「图标什么时候被谁还回去的」在 handy.log 里查不到，
-    // 用户反馈「源图标还在」时只能靠猜 —— 这是 V38/V39 两轮都没查出根因的直接原因。
-    if was != taken {
-        match (taken, applied) {
-            (true, _) => grid_log(&format!(
-                "接管桌面图标：已隐藏系统桌面图标视图（view={:?}）",
-                desktop_icon_view()
-            )),
-            (false, true) => grid_log("交还系统桌面图标：原生图标已恢复显示"),
-            (false, false) => {}
-        }
-    }
-    taken
+    // 老库残留的标记一并抹掉（`heal_desktop_icons` 之外的第二道保险）。幂等 upsert，开销可忽略。
+    let _ = write_icons_hidden(app, false);
+    false
 }
 
 /// 兜底恢复：挂件层已不可见但图标仍在代管 → 立即还给系统（轮询线程调用）。
@@ -3072,84 +3018,32 @@ fn release_icons_if_taken(app: &AppHandle) {
     }
 }
 
-/// **接管自检**（V39）：偏好要求接管、图标却露出来了 → 重新隐藏。
+/// ~~**接管自检**（V39）~~ —— **B 方案 Step 4 起整体失效，保留函数壳仅为少动调用点。**
 ///
-/// # 为什么必须有这一步（用户反馈「源图标还在」的真根因）
+/// # 它当年为什么要存在（留作历史课）
 ///
 /// 轮询线程里有一条兜底：挂件窗一旦不可见就 [`release_icons_if_taken`]（把图标还给系统）。
-/// 这是 V30.1 的教训（最小化 Handy 后桌面空着没人管），本身没错 —— **错在还回去之后
-/// 没有任何路径再收回来**：用户按一次 Win+D（或点「显示桌面」、Explorer 重建、Z 序纠正
-/// 的瞬间），挂件窗短暂不可见 → 图标归还 → 此后永远是「格子 + 原图标」两份内容，
-/// 正是用户截图里那句「源图标还在」。
+/// 那是 V30.1 的教训（最小化 Handy 后桌面空着没人管），本身没错 —— **错在还回去之后
+/// 没有任何路径再收回来**：用户按一次 Win+D，挂件窗短暂不可见 → 图标归还 → 此后永远是
+/// 「格子 + 原图标」两份内容，正是用户截图里那句「源图标还在」。所以补了这条对称的自检。
 ///
-/// 所以这里补上对称的另一半：只要偏好还是「接管」，就周期性确认图标确实被藏住了，
-/// 没藏住就重新藏。与 Z 序自检同节奏（[`REASSERT_INTERVAL_MS`]）、同样带保险丝。
+/// # 为什么现在整个删掉
+///
+/// 这条自检的存在前提是「我们拥有图标」—— 只有我们藏了它，才谈得上「被系统放回来了、
+/// 赶紧再藏」。B 方案把图标交还 Explorer 之后，**Win+D 把图标显示出来本来就是正确状态**，
+/// 没有任何需要纠正的东西。自检本身连同它维护的那套保险丝/退避，都是自造的问题。
 fn reassert_takeover(app: &AppHandle) {
-    // ★★ B 模式：桌面图标本来就不该被藏，这条自检整个不适用
-    // （否则会每 3 秒把用户的原生图标藏一次 —— 正是 V45 那类「桌面全空」事故）。
-    if icon_control_runtime(app) {
-        TAKEOVER_FIXES.store(0, Ordering::Relaxed);
-        return;
-    }
-    // V81：桌面被借给系统期间（菜单开着），「原生图标露着」是我们主动造成的，
-    // 不是被系统恢复 —— 这里若照常纠正，就会把菜单期间新建的文件再一次藏进暗处。
-    if handoff_active() {
-        return;
-    }
-    if !read_takeover(app) {
-        // 用户没选接管：清零计数，下次开启接管时从干净状态开始
-        TAKEOVER_FIXES.store(0, Ordering::Relaxed);
-        return;
-    }
-    // —— 不变量 I1（见 docs/02-architecture/DESKTOP-LAYER.md §2.3）：`Off` 态绝不藏图标 ——
+    // ★★ B 方案 Step 4：这条自检整个不适用了。
     //
-    // V45 装机实测踩到的空桌面：用户点工具栏「隐藏」→ `grid_overlay_hide` 交还图标，
-    // 但**接管偏好**（`META_KEY_TAKEOVER`）仍然是「开」，于是 3 秒后这里又把图标藏回去。
-    // 用户面对的是「格子内容已收起 + 原生图标也被藏」= 一个什么都没有的桌面
-    // （用户原话：「桌面全都消失了」）。所以这里必须先读唯一真源 `overlay_visible`。
-    if !read_overlay_visible(app) {
-        TAKEOVER_FIXES.store(0, Ordering::Relaxed);
-        // 万一有路径漏了交还，这里兜底还给系统 —— `Off` 态的原生图标必须在。
-        release_icons_if_taken(app);
-        return;
-    }
-    if ICONS_TAKEN.load(Ordering::Relaxed) && !desktop_icons_visible() {
-        // 已经藏好了：正常态
-        TAKEOVER_FIXES.store(0, Ordering::Relaxed);
-        return;
-    }
-    // 保险丝：连续失败到顶了 → 退避期内不再尝试（避免与第三方桌面工具互相打架）
-    let now = unix_secs();
-    if TAKEOVER_RETRY_AT.load(Ordering::Relaxed) > now {
-        return;
-    }
-    if takeover_icons(app, true) {
-        TAKEOVER_FIXES.store(0, Ordering::Relaxed);
-        // 限流写日志：正常态不刷屏，但保留「确实被系统恢复过」这条证据
-        if now.saturating_sub(LAST_TAKEOVER_LOG_AT.load(Ordering::Relaxed))
-            >= TAKEOVER_LOG_INTERVAL_SECS
-        {
-            LAST_TAKEOVER_LOG_AT.store(now, Ordering::Relaxed);
-            grid_log("桌面图标曾被系统恢复（多为 Win+D / 显示桌面 / Explorer 重建），已重新接管");
-        }
-        return;
-    }
-    let fixes = TAKEOVER_FIXES.fetch_add(1, Ordering::Relaxed) + 1;
-    if fixes >= TAKEOVER_MAX_FIXES {
-        TAKEOVER_RETRY_AT.store(now + TAKEOVER_BACKOFF_SECS, Ordering::Relaxed);
-        TAKEOVER_FIXES.store(0, Ordering::Relaxed);
-        grid_log("连续多次无法隐藏系统桌面图标（多半被第三方桌面工具接管），暂停自动接管 5 分钟");
-    }
+    // 它存在的唯一理由是「接管偏好为开、图标却被系统放回来了 → 赶紧重新藏回去」。
+    // 接管在行为上已作废（[`takeover_icons`] 恒不隐藏），于是这里没有任何事可做：
+    // 图标归 Explorer，被 Win+D 重新显示本来就是正确状态，不需要我们纠正。
+    //
+    // 保留函数壳只为少动轮询线程里的 4 个调用点；真正的清理在 Step 6a。
+    let _ = app;
+    TAKEOVER_FIXES.store(0, Ordering::Relaxed);
 }
 
-/// 创建（幂等复用）并显示挂件窗。
-///
-/// 系统桌面图标的隐藏**不在这里决定**（V38）：由用户的「接管桌面」偏好
-/// （[`META_KEY_TAKEOVER`]，一键整理时置位）决定，见 [`apply_takeover_pref`]。
-/// V32 曾为了「原桌面 + 多一些格子」的共存形态彻底关掉自动隐藏 —— 那时格子只是
-/// 额外一层；V37 起格子变成桌面的**呈现层**（文件不再移动），两份图标并存就成了
-/// 用户眼里的「桌面有两个相同的内容」，所以又需要它回来，但必须是**用户可切换的偏好**
-/// 而不是每次启动都擅自决定的动作。
 /// 确保挂件窗存在并可见、已贴到基准层（不改动接管态 / 命中区域状态）。
 ///
 /// 新建与复用两条路径共用，避免 `show_overlay` / `show_launcher_only` 各写一遍建窗逻辑。
@@ -3223,10 +3117,12 @@ fn ensure_overlay_window(app: &AppHandle) -> Result<WebviewWindow, String> {
     Ok(win)
 }
 
-/// 创建（幂等复用）并显示挂件窗，并接管桌面呈现（隐藏原生图标）。
+/// 创建（幂等复用）并显示挂件窗，并让格子底板重新铺到桌面上。
 ///
-/// 系统桌面图标的隐藏**不在这里决定**（V38）：由用户的「接管桌面」偏好
-/// （[`META_KEY_TAKEOVER`]，一键整理时置位）决定，见 [`apply_takeover_pref`]。
+/// ★★ B 方案（Step 4 起是唯一模式）：这里**不再隐藏原生桌面图标** —— 图标永远归
+/// Explorer 画，格子只是画在它们下面的装饰底板。`apply_takeover_pref` 现在恒把
+/// 图标交还系统（历史残留的清场），于是「显示 / 收起」两条路下原生图标都看得见、
+/// 点得着（Delete / Shift+Delete / 框选 / 右键全归系统）。
 fn show_overlay(app: &AppHandle) -> Result<(), String> {
     let _ = ensure_overlay_window(app)?;
     let _ = write_overlay_visible(app, true);
@@ -3271,12 +3167,9 @@ fn show_launcher_only(app: &AppHandle) -> Result<(), String> {
 /// 三条路径都会调它：新建挂件窗、复用已有窗、应用启动恢复格子层 —— 于是
 /// 「整理过 → 图标藏起来」这个状态在收起再显示、重启之后都保持一致。
 fn apply_takeover_pref(app: &AppHandle) {
-    if read_takeover(app) {
-        let taken = takeover_icons(app, true);
-        if !taken {
-            grid_log("接管偏好为开，但本机隐藏桌面图标失败（格子与原图标将同时显示）");
-        }
-    }
+    // ★★ B 方案 Step 4：接管在行为上已作废，这条偏好不再驱动任何东西。
+    // 现在它只剩一个职责：确保原生图标是**可见**的（历史残留的清场）。
+    let _ = takeover_icons(app, false);
 }
 
 /// 读「挂件层是否应处于显示状态」（pub：供 `lib.rs` 启动期判断「桌面是否即主界面」）。
@@ -3768,26 +3661,6 @@ pub async fn shell_context_menu(
 ) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        // V102.7「幽灵条目」：文件/文件夹**已经被删掉或移走**时，Shell 拿不到它的
-        // `IShellItem`（`SHCreateItemFromParsingName` → `0x80070002`），菜单自然弹不出来。
-        // 那句失败发生在我们**投递到主线程的闭包**里 —— 前端收不到，用户在界面上看到的
-        // 就是「右键一点反应都没有」。
-        //
-        // 用户 10-11：「格子里面删除也有问题，什么玩意啊」—— 他右键的正是一个已被删除的
-        // 文件（网格里留着幽灵登记）。所以**先在调用线程探一次**：路径不在就直接回错误，
-        // 前端据此给出可读提示，并立刻刷新把这条失效登记从格子里摘掉。
-        if !std::path::Path::new(&path).exists() {
-            let name = std::path::Path::new(&path)
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| path.clone());
-            grid_log(&format!(
-                "条目已失效（{path}）：文件不在了，菜单击不出来 —— 已让前端刷新摘掉这条登记"
-            ));
-            return Err(format!(
-                "「{name}」已经不在了（可能刚被删除或移走），已把它从格子里去掉"
-            ));
-        }
         let handle = app.clone();
         let target = path.clone();
         let want_extended = extended.unwrap_or(false);
@@ -4198,6 +4071,48 @@ const CELL_EXTRA_H: i64 = 30;
 const GRID_GAP: i64 = 6;
 const GRID_PAD_X: i64 = 10;
 const GRID_PAD_Y: i64 = 8;
+
+/// **单元格度量**（逻辑像素）—— 布局引擎排「格子里的图标网格」时**只需要它**，
+/// 不需要「图标多大」：宽高由引擎直接消费，原来那两个增量常量已经并进来了。
+///
+/// ★ **V102.8：B 方案（不接管原生桌面）是唯一模式，单元格直接取 Explorer 的图标间距**
+/// （`LVM_GETITEMSPACING`，见 [`b_cell`]）：`w = spacing_x`、`h = spacing_y`、`gap = 0`
+/// （间距本来就含在槽位里）。于是「格子挡位」与「原生图标落点」是**同一张网格**，
+/// 格子与图标逐格重合。
+///
+/// ⚠️ V102.3 正是死在这里：当时 `cell_w = icon + CELL_EXTRA_W`（52 + 32 = 84 逻辑 →
+/// 105 物理），而 Explorer 的槽位横向步长是 `spacing_x × DPI`（76 × 1.25 = **95**）——
+/// 每往右一列就差 10px，第 5 列差半格，用户看到的就是「图标散成密集网格」。
+/// **这两个数必须同源，谁都不许自己再推一份。**
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Cell {
+    /// 单元格宽（B 模式 = Explorer 横向图标间距）
+    pub w: i64,
+    /// 单元格高（B 模式 = Explorer 纵向图标间距）
+    pub h: i64,
+    /// 单元格之间的缝（B 模式恒 0 —— 间距已经含在槽位里了）
+    pub gap: i64,
+}
+
+impl Cell {
+    /// 还没测到 Explorer 间距时的回退口径（图标尺寸 + 观感增量，与 V101 一致）。
+    ///
+    /// `const`：单测要拿它当编译期常量（`const REAL_CELL: Cell = Cell::from_icon(32);`）。
+    pub(crate) const fn from_icon(icon: i64) -> Self {
+        let icon = if icon < 16 {
+            16
+        } else if icon > 256 {
+            256
+        } else {
+            icon
+        };
+        Self {
+            w: icon + CELL_EXTRA_W,
+            h: icon + BOX_CELL_EXTRA_H,
+            gap: GRID_GAP,
+        }
+    }
+}
 /// 格子标题栏占的**总高**：`h-9`（36px）**＋ 标题栏那道 1px 的下边框**（`border-b`）。
 ///
 /// ⚠️ **V70 唯一改动的那个数就是这个 1（用户 09-23 两张截图）**。V65–V69 一直写 36，
@@ -4254,11 +4169,10 @@ const ARRANGE_BOX_H: i64 = 244;
 /// `repeat(auto-fill, minmax(icon + 32, 1fr))` 排出 `cols` 列。V65 之前两处都没保证 ——
 /// 前端每行比引擎少排一列，引擎却按多出来的那一列估高，于是**高度虚高一整行**
 /// （真机上「条目多的格子显示不全 / 下半截空着」两个症状，其实是同一个根因）。
-fn box_width_for_columns(cols: i64, icon: i64) -> i64 {
-    let cell_w = icon.clamp(16, 256) + CELL_EXTRA_W;
+fn box_width_for_columns(cols: i64, cell: Cell) -> i64 {
     let cols = cols.max(1);
     // `cols` 个单元格 + `cols - 1` 道缝（**内容本身**要占的宽）
-    let content: i64 = cols * cell_w + (cols - 1) * GRID_GAP;
+    let content: i64 = cols * cell.w + (cols - 1) * cell.gap;
     // 再把「非内容」的四样加上：左右内边距、卡片边框、**滚动槽**、余量
     //   —— 少算任何一样，前端就会少排一列（V70：滚动槽与余量正是漏掉的那两样）
     content + 2 * GRID_PAD_X + BOX_BORDER_H + GRID_SCROLLBAR_W + BOX_FIT_SLACK
@@ -4272,16 +4186,13 @@ fn box_width_for_columns(cols: i64, icon: i64) -> i64 {
 ///
 /// **这是 V65 唯一的宽度来源** —— 不再有「整批统一列宽」那一层：条目多的格子宽、条目少的
 /// 格子窄，这就是用户那句「根据内容多少协调空间」。
-fn desired_box_width(items: usize, icon: i64) -> i64 {
-    let icon = icon.clamp(16, 256);
-    let cell_w = icon + CELL_EXTRA_W;
-    let cell_h = icon + BOX_CELL_EXTRA_H;
+fn desired_box_width(items: usize, cell: Cell) -> i64 {
     let n = items.max(1) as i64;
-    let cols = (((n as f64) * (cell_h as f64) / (cell_w as f64)).sqrt().ceil() as i64)
+    let cols = (((n as f64) * (cell.h as f64) / (cell.w as f64)).sqrt().ceil() as i64)
         .clamp(1, AUTO_MAX_COLS)
         // 一个条目不需要两列 —— 平方根在 n = 1 处正好压着 1.0，`ceil` 会给出 2
         .min(n);
-    box_width_for_columns(cols, icon).clamp(MIN_BOX_W, AUTO_MAX_W)
+    box_width_for_columns(cols, cell).clamp(MIN_BOX_W, AUTO_MAX_W)
 }
 
 /// **整批统一的标准列宽**（V40）—— 现在只用于**新建格子的默认宽度 / 单格兜底**。
@@ -4310,10 +4221,9 @@ fn standard_box_width(desired: impl Iterator<Item = i64>, work_w: i64) -> i64 {
 /// ⚠️ V70：还要减掉**滚动槽**（[`GRID_SCROLLBAR_W`]）。前端 `.grid-scroll` 用了
 /// `scrollbar-gutter: stable`，那条 4px 的槽**恒占位**；不减它，引擎就会按「多 4px」估列数，
 /// 前端少排一列 ⇒ 又回到「藏图标 + 滚动条」。
-fn item_columns_at(w: i64, icon: i64) -> i64 {
-    let cell_w = icon.clamp(16, 256) + CELL_EXTRA_W;
+fn item_columns_at(w: i64, cell: Cell) -> i64 {
     let avail: i64 = w - BOX_BORDER_H - 2 * GRID_PAD_X - GRID_SCROLLBAR_W;
-    ((avail + GRID_GAP) / (cell_w + GRID_GAP)).max(1)
+    ((avail + cell.gap) / (cell.w + cell.gap)).max(1)
 }
 
 /// 宽度已定时，按条目数算高度 —— 即用户那句「高度根据图标多少自动撑开」。
@@ -4330,15 +4240,14 @@ fn item_columns_at(w: i64, icon: i64) -> i64 {
 /// 直接展示出来，没有滚动条，**除非是格子太多图标太多放不下了**」。于是「空间富余 ⇒ 长高到
 /// 全见」，「真挤不下 ⇒ 交给压缩 / 内部滚」。上限仍然存在（就是桌面本身有多高），
 /// 只是不再用一个与可用空间无关的常数把它锁死。
-fn box_height_at(items: usize, w: i64, icon: i64, max_h: i64) -> i64 {
-    let cell_h = icon.clamp(16, 256) + BOX_CELL_EXTRA_H;
-    let cols = item_columns_at(w, icon);
+fn box_height_at(items: usize, w: i64, cell: Cell, max_h: i64) -> i64 {
+    let cols = item_columns_at(w, cell);
     let n = items.max(1) as i64;
     let rows = (n + cols - 1) / cols;
     let h = BOX_HEADER_H
         + BOX_BORDER_H
-        + rows * cell_h
-        + (rows - 1) * GRID_GAP
+        + rows * cell.h
+        + (rows - 1) * cell.gap
         + 2 * GRID_PAD_Y
         + BOX_FIT_SLACK;
     h.clamp(MIN_BOX_H, max_h.max(MIN_BOX_H))
@@ -4349,9 +4258,9 @@ fn box_height_at(items: usize, w: i64, icon: i64, max_h: i64) -> i64 {
 /// 布局主路径请走 [`box_own_size`]（它再把宽度夹进收纳区可用宽度）。本函数作为
 /// 「单格规则」的**唯一表述**被单测引用，免得测试各自复制一份公式、改了生产忘了测试。
 #[allow(dead_code)]
-fn auto_box_size(items: usize, icon: i64, max_h: i64) -> (i64, i64) {
-    let w = desired_box_width(items, icon);
-    (w, box_height_at(items, w, icon, max_h))
+fn auto_box_size(items: usize, cell: Cell, max_h: i64) -> (i64, i64) {
+    let w = desired_box_width(items, cell);
+    (w, box_height_at(items, w, cell, max_h))
 }
 
 // ————————————————————————————————————————————————————————————————
@@ -4361,42 +4270,37 @@ fn auto_box_size(items: usize, icon: i64, max_h: i64) -> (i64, i64) {
 // 分开算过一次就会知道，两边差 1px 都会表现为「图标压到框线上」。
 // ————————————————————————————————————————————————————————————————
 
-/// B 模式的「图标基准」：布局引擎拿它当 `icon` 参数，于是
-/// `cell_h = icon + BOX_CELL_EXTRA_H` **恰好等于 Explorer 的图标纵向间距**
-/// （`LVM_GETITEMSPACING` 的高位），而 `cell_w = icon + CELL_EXTRA_W` 只会更宽、不会更窄。
+/// 从 `grid_meta` 读 B 模式**单元格度量**（= Explorer 的图标间距网格）。
 ///
-/// 为什么不用 `spacing_x` 反推宽度：引擎的宽/高用的是**同一个** `icon` 参数，
-/// 两个常数（[`CELL_EXTRA_W`] / [`BOX_CELL_EXTRA_H`]）又不相等，无法同时精确匹配。
-/// 取「高度精确 + 宽度只多不少」是唯一不会让图标互相重叠的解。
-pub(crate) fn b_icon_arg_for_spacing(spacing_y: i32) -> i64 {
-    (i64::from(spacing_y) - BOX_CELL_EXTRA_H).max(16)
-}
-
-/// 从 `grid_meta` 读 B 模式图标基准（未开启 / 没测到间距时返回 `None` = 保持原行为）。
-pub(crate) fn b_icon_arg(conn: &Connection) -> Option<i64> {
-    let read = |key: &str| -> Option<String> {
+/// ★ **V102.8：宽和高都直接取 Explorer 的间距**（`LVM_GETITEMSPACING` 的两个分量），
+/// 不再用单一 `icon` 去反推 —— 那正是 V102.3 的错处（见 [`Cell`] 的注释）。
+///
+/// 还没测到间距（Explorer 没跑过 / 首次启动）时返回 `None`，调用方退回 [`Cell::from_icon`]。
+/// 间距由 [`crate::commands::grid_icons::ensure_native_layout`] 在启动期与每次摆位时写入。
+pub(crate) fn b_cell(conn: &Connection) -> Option<Cell> {
+    let read = |key: &str| -> Option<i64> {
         conn.query_row(
             "SELECT value FROM grid_meta WHERE key = ?1",
-            params![key],
+            [key],
             |row| row.get::<_, String>(0),
         )
         .ok()
+        .and_then(|v| v.parse::<i64>().ok())
     };
-    if read("icon_control").as_deref() != Some("1") {
-        return None;
-    }
-    read("icon_spacing_y")
-        .and_then(|v| v.parse::<i32>().ok())
-        .map(b_icon_arg_for_spacing)
+    Some(Cell {
+        w: read(crate::commands::grid_icons::META_SPACING_X)?.max(16),
+        h: read(crate::commands::grid_icons::META_SPACING_Y)?.max(16),
+        gap: 0,
+    })
 }
 
 /// 格子内容区的图标网格（B 模式）。字段与 [`crate::commands::grid_icons`] 的摆位共用。
 pub(crate) struct BFrame {
     /// 每行几个图标
     pub cols: i64,
-    /// 图标单元格宽（= `arg + CELL_EXTRA_W`，只比 Explorer 间距宽、不窄）
+    /// 图标单元格宽（= Explorer 横向间距，见 [`Cell::w`]）
     pub cell_w: i64,
-    /// 图标单元格高（= Explorer 纵向间距）
+    /// 图标单元格高（= Explorer 纵向间距，见 [`Cell::h`]）
     pub cell_h: i64,
     /// 内容原点相对格子左上角的偏移
     pub origin_dx: i64,
@@ -4404,11 +4308,11 @@ pub(crate) struct BFrame {
 }
 
 /// B 模式的内容区几何 —— 前端「装饰底板」与 Rust「图标摆位」都读这一份。
-pub(crate) fn b_content_frame(box_w: i64, _box_h: i64, arg: i64, spacing_y: i32) -> BFrame {
+pub(crate) fn b_content_frame(box_w: i64, _box_h: i64, cell: Cell) -> BFrame {
     BFrame {
-        cols: item_columns_at(box_w, arg).max(1),
-        cell_w: arg.clamp(16, 256) + CELL_EXTRA_W,
-        cell_h: i64::from(spacing_y).max(CELL_EXTRA_H),
+        cols: item_columns_at(box_w, cell).max(1),
+        cell_w: cell.w,
+        cell_h: cell.h,
         origin_dx: BOX_BORDER_H + GRID_PAD_X,
         origin_dy: BOX_HEADER_H + BOX_BORDER_H + GRID_PAD_Y,
     }
@@ -5234,13 +5138,13 @@ fn needs_placement(
 ///
 /// ⚠️ V70：高度上限从「固定 460」变成**本带可用高**（`zone_h`）—— 见 [`box_height_at`]
 /// 上面那段。宽度上限仍是 [`AUTO_MAX_W`]（宽度一旦不设上限，一个格子就会横向吃掉整条带）。
-fn box_own_size(items: usize, zone_w: i64, zone_h: i64, icon: i64) -> (i64, i64) {
+fn box_own_size(items: usize, zone_w: i64, zone_h: i64, cell: Cell) -> (i64, i64) {
     let max_w = zone_w.max(MIN_BOX_W);
-    let w = desired_box_width(items, icon)
+    let w = desired_box_width(items, cell)
         .min(AUTO_MAX_W)
         .min(max_w)
         .max(MIN_BOX_W);
-    (w, box_height_at(items, w, icon, zone_h))
+    (w, box_height_at(items, w, cell, zone_h))
 }
 
 /// 收纳区整张落位表（V66）：**一段一列，列内自上而下紧挨着摞**。
@@ -5382,11 +5286,11 @@ fn packed_total_width(cols: &[Vec<usize>], widths: &[i64]) -> i64 {
 ///
 /// ⚠️ V70：高度上限 = **这条带的可用高**（`band_h`）—— 于是「空间多 ⇒ 长到全见」，
 /// 「空间紧 ⇒ 由压缩兜住」。
-fn own_sizes(items: &[usize], band_w: i64, band_h: i64, icon: i64) -> Vec<(i64, i64)> {
+fn own_sizes(items: &[usize], band_w: i64, band_h: i64, cell: Cell) -> Vec<(i64, i64)> {
     let zone_w = band_w.max(MIN_BOX_W);
     items
         .iter()
-        .map(|n| box_own_size(*n, zone_w, band_h.max(MIN_BOX_H), icon))
+        .map(|n| box_own_size(*n, zone_w, band_h.max(MIN_BOX_H), cell))
         .collect()
 }
 
@@ -5415,7 +5319,7 @@ fn scatter_back(order: &[usize], inner: ContentPlan, total: usize) -> ContentPla
 /// 因为「便签下方那条带」不是可选项）。留 `#[cfg(test)]` 是为了让「不许死代码」这条自检
 /// 在有问题的东西上真的响 —— 而不是把它标成 `allow(dead_code)` 糊过去。
 #[cfg(test)]
-fn content_plan(items: &[usize], zone_w: i64, zone_h: i64, icon: i64, min_x: i64) -> ContentPlan {
+fn content_plan(items: &[usize], zone_w: i64, zone_h: i64, cell: Cell, min_x: i64) -> ContentPlan {
     content_plan_batch(
         items,
         SlotRect {
@@ -5424,17 +5328,17 @@ fn content_plan(items: &[usize], zone_w: i64, zone_h: i64, icon: i64, min_x: i64
             w: zone_w,
             h: zone_h,
         },
-        icon,
+        cell,
     )
 }
 
 /// [`content_plan`] 与 [`content_plan_with_lower_band`] 共用的前半段：
 /// 算尺寸 → 定摆放序 → 排进 `band` → **摊回调用方给的输入序**。
 #[cfg(test)]
-fn content_plan_batch(items: &[usize], band: SlotRect, icon: i64) -> ContentPlan {
-    let sizes = own_sizes(items, band.w, band.h, icon);
+fn content_plan_batch(items: &[usize], band: SlotRect, cell: Cell) -> ContentPlan {
+    let sizes = own_sizes(items, band.w, band.h, cell);
     let order = placement_order(items, &sizes);
-    let inner = content_plan_in(&order, items, band, icon);
+    let inner = content_plan_in(&order, items, band, cell);
     scatter_back(&order, inner, items.len())
 }
 
@@ -5529,7 +5433,7 @@ fn pick_columns(
 ///      1926px。夹到 165 之后 5 列正好 921（也正好把 4 行 × 194 收进 848 里）。
 ///      ⚠️ 夹宽度必须**同时按新宽度重算高度**（`box_height_at`）—— 前端就是按这个宽度渲染的，
 ///      宽度变了行数就变；几何不自洽的话「后端算得下、前端还是滚」。
-fn content_plan_in(order: &[usize], items: &[usize], band: SlotRect, icon: i64) -> ContentPlan {
+fn content_plan_in(order: &[usize], items: &[usize], band: SlotRect, cell: Cell) -> ContentPlan {
     if order.is_empty() {
         return ContentPlan {
             slots: Vec::new(),
@@ -5539,7 +5443,7 @@ fn content_plan_in(order: &[usize], items: &[usize], band: SlotRect, icon: i64) 
     }
     let zone_w = band.w.max(MIN_BOX_W);
     let zone_h = band.h.max(MIN_BOX_H);
-    let base = own_sizes(items, band.w, band.h, icon);
+    let base = own_sizes(items, band.w, band.h, cell);
     let capacity = column_capacity(zone_w).clamp(1, order.len());
 
     // 自然尺寸（按摆放序取）
@@ -5560,7 +5464,7 @@ fn content_plan_in(order: &[usize], items: &[usize], band: SlotRect, icon: i64) 
             if bw > cap {
                 ws.push(cap);
                 // V70：上限是**这条带的可用高**（不再是与空间无关的固定 460）
-                hs.push(box_height_at(items[i], cap, icon, zone_h));
+                hs.push(box_height_at(items[i], cap, cell, zone_h));
             } else {
                 ws.push(bw);
                 hs.push(bh);
@@ -5614,7 +5518,7 @@ fn content_plan_in(order: &[usize], items: &[usize], band: SlotRect, icon: i64) 
                 if widths[i] < col_w {
                     // 撑满列宽：高度按新宽度重算（`order[i]` 才是条目数的下标 ——
                     // `heights` / `widths` / `slots` 都按摆放序的位置编号）
-                    box_height_at(items[order[i]], col_w, icon, zone_h)
+                    box_height_at(items[order[i]], col_w, cell, zone_h)
                 } else {
                     heights[i]
                 }
@@ -5691,13 +5595,13 @@ fn content_plan_with_lower_band(
     items: &[usize],
     band_a: SlotRect,
     band_b: Option<SlotRect>,
-    icon: i64,
+    cell: Cell,
 ) -> ContentPlan {
-    let sizes = own_sizes(items, band_a.w, band_a.h, icon);
+    let sizes = own_sizes(items, band_a.w, band_a.h, cell);
     // 摆放序 = 大格子在前（V69）。**两条带的切分也按这个序切** —— 于是「落在带下的永远是
     // 最小的那几个格子」，正是用户那句「大格子先布局好、小格子找空隙插入」在带下的落法。
     let order = placement_order(items, &sizes);
-    let whole = content_plan_in(&order, items, band_a, icon);
+    let whole = content_plan_in(&order, items, band_a, cell);
     if items.is_empty() {
         return scatter_back(&order, whole, items.len());
     }
@@ -5730,7 +5634,7 @@ fn content_plan_with_lower_band(
         return scatter_back(&order, best.1, items.len());
     }
     for m in 0..order.len() {
-        let pa = content_plan_in(&order[..m], items, band_a, icon);
+        let pa = content_plan_in(&order[..m], items, band_a, cell);
         // 左沿：`band_a` 用到的右沿 + 一道缝（`band_a` 空着时就从收纳区左沿起）
         let used_right = pa.slots.iter().map(|s| s.x + s.w).max();
         let x0 = match used_right {
@@ -5746,7 +5650,7 @@ fn content_plan_with_lower_band(
         if lower.w < MIN_BOX_W {
             continue;
         }
-        let pb = content_plan_in(&order[m..], items, lower, icon);
+        let pb = content_plan_in(&order[m..], items, lower, cell);
         // V95：带下那条**装不下就别硬塞** —— 顺序填充下溢出的格子会越过带下沿，
         // 留在那是「越界」，拽回去又挤坏上带；这种拆分不比整层溢出好，跳过。
         // 上带那半同理：拆完上带还溢出，等于把烂摊子摊到两条带上。
@@ -6244,10 +6148,10 @@ fn layout_all_boxes(
             0
         }
     };
-    // B 模式（不接管原生桌面）：改用 Explorer 的图标间距当单元格高，
-    // 这样底板高度与原生图标网格逐行对得上（见 [`b_icon_arg`]）。
-    let icon = b_icon_arg(conn).unwrap_or(icon);
-    layout_all_boxes_with(conn, work_w, work_h, icon, loose_count, mode)
+    // B 模式（不接管原生桌面）：单元格直接用 Explorer 的图标间距网格（见 [`b_cell`]），
+    // 于是「底板挡位」与「原生图标落点」同源、逐格重合。
+    let cell = b_cell(conn).unwrap_or_else(|| Cell::from_icon(icon));
+    layout_all_boxes_with(conn, work_w, work_h, cell, loose_count, mode)
 }
 
 /// [`layout_all_boxes`] 的可注入版本：`loose_count`（落单条目数）由调用方给定。
@@ -6255,7 +6159,7 @@ fn layout_all_boxes_with(
     conn: &Connection,
     work_w: i64,
     work_h: i64,
-    icon: i64,
+    cell: Cell,
     loose_count: usize,
     mode: LayoutMode,
 ) -> Result<LayoutOutcome, String> {
@@ -6270,12 +6174,18 @@ fn layout_all_boxes_with(
     let mut outcome = LayoutOutcome::default();
     let avail_h = (work_h - 2 * ARRANGE_MARGIN).max(MIN_BOX_H);
 
-    // —— ⓪ 左侧「未归类」竖条：收纳区与挂件区都不得越过它的右沿 ——
-    let strip = loose_strip_rect(work_w, work_h, loose_count, icon);
-    let min_x = match strip {
-        Some(s) => s.rect.x + s.rect.w + ARRANGE_GAP_X,
-        None => ARRANGE_MARGIN,
-    };
+    // —— ⓪ 「未归类」竖条已退场（B 方案 Step 5，2026-10-10）——
+    //
+    // V41–V101 这里要为左侧那条「未归类」竖条预留一列（`loose_strip_rect` 的右沿 + 一道缝），
+    // 收纳区与挂件区都从它右边开始。**竖条存在的唯一前提是「原生图标被我们藏起来了」**：
+    // 不接管之后原生图标一直在桌面上看得见，竖条就变成纯冗余 —— 而且是一条**白占一列宽**
+    // 的冗余（前端不画它，那列就是空白，格子整体被往右挤）。
+    //
+    // 所以布局不再为它留位：`min_x` 直接就是左边界。`loose_count` 参数**保留**（调用方仍按
+    // 原口径传、单测仍可注入），但不再影响落位 —— 留参数是为了让这次改动保持「零签名变更」，
+    // 前端那条竖条的代码清理在 Step 6a。
+    let _ = loose_count;
+    let min_x = ARRANGE_MARGIN;
 
     // —— ① 挂件按列自右向左落位（日历列 → 便签列 → 其他）——
     //
@@ -6412,7 +6322,7 @@ fn layout_all_boxes_with(
     // 用户手工把格子拖到哪，只是「拖到那儿的这一下」的表现；下一次整理仍按大小归位。
     let plan_of = |seq: &[&GridBoxRect]| -> ContentPlan {
         let items: Vec<usize> = seq.iter().map(|r| r.items).collect();
-        content_plan_with_lower_band(&items, band_a, band_b, icon)
+        content_plan_with_lower_band(&items, band_a, band_b, cell)
     };
     // `content` 的顺序就是 `sort, id`（登记顺序）—— 它只用来决定**同尺寸格子**的先后。
     let ordered: Vec<&GridBoxRect> = content.clone();
@@ -6556,11 +6466,13 @@ fn existing_standard_width(conn: &Connection, work_w: i64) -> i64 {
     let Ok(rows) = load_box_rects(conn) else {
         return ARRANGE_BOX_W;
     };
-    let icon = desktop_icon_size_cached();
+    // 与布局主路径同一个度量来源（Explorer 的图标间距网格）—— 否则「新建格子」的默认
+    // 宽度会和整理出来的格子对不齐。
+    let cell = b_cell(conn).unwrap_or_else(|| Cell::from_icon(desktop_icon_size_cached()));
     standard_box_width(
         rows.iter()
             .filter(|r| !r.is_widget())
-            .map(|r| desired_box_width(r.items, icon)),
+            .map(|r| desired_box_width(r.items, cell)),
         work_w,
     )
 }
@@ -6988,19 +6900,23 @@ fn layout_work_size(app: &AppHandle) -> (i64, i64) {
 
 /// 一键整理桌面 —— 「桌面整理」模块的主入口（工具栏的整理按钮也走这里）。
 ///
-/// 一次点击做完五件事（用户原话：「每次点击整理桌面，应该重新计算桌面所有的内容，
+/// 一次点击做完四件事（用户原话：「每次点击整理桌面，应该重新计算桌面所有的内容，
 /// 按照分类排开」）：
 ///   ① **重新扫一遍桌面**（用户桌面 + 公共桌面，全量重算，不受上次结果影响）；
 ///   ② 按类型分组的**只登记引用**：文件夹 / 图片 / 文档 / 压缩包 / 安装包 / 其他 ——
 ///      文件一个字节都不动（V37 呈现层模型）；
-///   ③ **快捷方式与系统入口不进格子**（V42）：它们排在左侧「未归类」竖条里，
-///      按 系统 → 快捷方式 → 文件夹 → 其他 的顺序自上而下；同时**摘掉**历史遗留在
-///      各格子里的快捷方式 / 系统登记，并解散 V41 建的「系统」「快捷方式」两个专用格；
-///   ④ **全量重排**所有格子：统一列宽 + 高度按内容撑开（默认不出滚动条）+
-///      **镜像流布**（自最右一列向左，挂件先占右上角，分类格从它下面接着排）；
-///   ⑤ **隐藏系统桌面图标**（接管）—— 桌面呈现此后完全由格子层 + 左侧竖条负责，
-///      同一份内容不会再显示两遍。这一步的偏好记在 `grid_meta.desktop_takeover`，
-///      收起挂件 / 退出应用都会立刻把图标还给系统；工具栏的「接管图标」开关可随时切回共存。
+///   ③ **快捷方式与系统入口不进格子**（V42）：摘掉历史遗留在各格子里的快捷方式 /
+///      系统登记，并解散 V41 建的「系统」「快捷方式」两个专用格。
+///      （V50–V101 它们会排进左侧「未归类」竖条；**Step 5 起竖条已不渲染** ——
+///       原生图标一直看得见，竖条纯冗余、白占一列）；
+///   ④ **增量补齐**（V48 用户口径：「普通整理保留用户已有布局，只是将散落的需要整理的
+///      其他内容归纳到格子即可」）：已经摆好的格子一个都不动，只安置本次新建的与
+///      「重叠 / 越界」的格子（[`LayoutMode::Fill`]），随后把原生图标摆到新挡位上。
+///      想按规则整体重排得走「重置整理」（[`LayoutMode::Full`]）。
+///
+/// ★★ B 方案（Step 4 起）：这里**不再碰系统桌面图标** —— `icons_hidden` 恒 `false`
+/// （它是前端徽标要显示的事实：**图标始终在**）。V38–V39 的「点整理顺手把图标藏起来」
+/// 已随接管路线一起拆除。
 ///
 /// `dir` 仅供测试 / 自定义目录，缺省为用户桌面。
 #[tauri::command]
@@ -7017,26 +6933,17 @@ pub async fn grid_auto_arrange(
     let (work_w, work_h) = layout_work_size(&app);
     let mut report = auto_arrange_inner(&conn, &roots, work_w, work_h)?;
 
-    // 「整理桌面」= 用户明确要求桌面由格子呈现 ⇒ **一律按接管偏好执行**。
+    // —— B 方案 Step 4（2026-10-10 收尾）：这里**不再动系统桌面图标** ——
     //
-    // ⚠️ V38–V39 这里写的是「只有真的往里登记了东西才接管」，本意是「空跑一次不该顺手把
-    // 用户的图标藏了」。但用户的桌面早就全部登记过了（每次整理都是「登记 0 项」），
-    // 于是**点整理根本不接管** —— 这正是他反馈「桌面原图标还存在呢？」的代码路径。
+    // V38–V39 这一段是「点整理 = 顺手把原生图标藏起来，由格子层接管呈现」。B 方案把图标的
+    // 归属交还 Explorer 之后，「藏图标」这件事不存在了。整理只剩「扫描 + 登记 + 重排」三件事。
     //
-    // 但有一道闸必须留着：**挂件层没在显示时不许藏图标**。否则（用户在管理页点整理、
-    // 而格子层是收起状态）会把桌面图标藏掉却没有任何格子顶上来，桌面直接变空白 ——
-    // 那是 V30.1 踩过的坑，比「两份内容」严重得多。
-    if read_overlay_visible(&app) {
-        if let Err(err) = write_takeover(&app, true) {
-            grid_log(&format!("保存桌面接管偏好失败：{err}"));
-        }
-        report.icons_hidden = takeover_icons(&app, true);
-        if !report.icons_hidden {
-            grid_log("接管桌面失败（未找到系统桌面图标视图），格子与原生图标将同时显示");
-        }
-    } else {
-        grid_log("挂件层未显示，本次整理不改动系统桌面图标（先显示格子再整理才会接管）");
-    }
+    // `icons_hidden` 恒 false —— 它是前端徽标要显示的事实：**图标始终在**。
+    report.icons_hidden = false;
+
+    // 整理的最后一步：把登记条目对应的原生图标**按新格子摆进去**（2026-10-11「整理失效」
+    // 事故的修复 —— 之前摆位只靠前端 relayoutSoon 那条链，一键整理根本没人摆）。
+    crate::commands::grid_icons::apply_after_relayout(&app);
     Ok(report)
 }
 
@@ -7060,6 +6967,7 @@ pub async fn grid_relayout(app: AppHandle) -> Result<(), String> {
         "重排（不扫描·增量）：挪动 {} 个 / 按内容调整 {} 个尺寸 / 挂件归位 {} 个 / 空间不足 {} 个",
         outcome.moved, outcome.resized, outcome.anchored, outcome.overflowed
     ));
+    crate::commands::grid_icons::apply_after_relayout(&app);
     Ok(())
 }
 
@@ -7077,6 +6985,7 @@ pub async fn grid_layout_reset(app: AppHandle) -> Result<(), String> {
         "重置整理（全量）：挪动 {} 个 / 按内容调整 {} 个尺寸 / 挂件归位 {} 个 / 空间不足 {} 个",
         outcome.moved, outcome.resized, outcome.anchored, outcome.overflowed
     ));
+    crate::commands::grid_icons::apply_after_relayout(&app);
     Ok(())
 }
 
@@ -8426,14 +8335,14 @@ mod flow_placer_tests {
         column_capacity, content_plan, content_zone_right, desired_box_width, fit_column_heights,
         bounds_need_fix,
         content_plan_with_lower_band, is_content_kind, own_sizes, pack_columns, placement_order,
-        ContentPlan,
+        b_content_frame, Cell, ContentPlan,
         item_columns_at, loose_cell_size,
         loose_strip_rect, needs_placement, place_widget_columns, standard_box_width,
         widget_zone, workstation_rect, zone_single_column, FlowPlacer, GridBoxRect, SlotRect,
         WidgetZone,         ARRANGE_BOX_W, ARRANGE_GAP_X, ARRANGE_GAP_Y, ARRANGE_MARGIN, AUTO_MAX_COLS,
         AUTO_MAX_W,
         BOX_BORDER_H, CALENDAR_BOX_W, WST_BOX_W,
-        BOX_CELL_EXTRA_H, BOX_FIT_SLACK, BOX_HEADER_H, CELL_EXTRA_W, GRID_GAP, GRID_PAD_X,
+        BOX_FIT_SLACK, BOX_HEADER_H, GRID_GAP, GRID_PAD_X,
         GRID_PAD_Y, GRID_SCROLLBAR_W,
         MIN_BOX_H, MIN_BOX_W,
     };
@@ -8479,14 +8388,14 @@ mod flow_placer_tests {
     const REAL_ZONE_W: i64 = 637;
     const REAL_ZONE_H: i64 = 848;
     const REAL_MIN_X: i64 = 330;
-    const REAL_ICON: i64 = 32;
+    const REAL_CELL: Cell = Cell::from_icon(32);
 
     /// V95（用户 10-10：「从右到左 从上到下 满了才换列」）：顺序填充下 18 项格占满第一列，
     /// 两个 8 项格摞进第二列 —— **2 列**，而不是 V71 时代的「各占一列铺开」。
     /// 18 项格（~550 高）+ 8 项格（~300 高）> 848 ⇒ 一列装不下，换列后的高度由内容自然决定。
     #[test]
     fn the_biggest_boxes_share_the_top_row_instead_of_piling_up() {
-        let plan = content_plan(&REAL_ITEMS, REAL_ZONE_W, REAL_ZONE_H, REAL_ICON, REAL_MIN_X);
+        let plan = content_plan(&REAL_ITEMS, REAL_ZONE_W, REAL_ZONE_H, REAL_CELL, REAL_MIN_X);
         assert_eq!(
             plan.column_count(),
             2,
@@ -8525,10 +8434,10 @@ mod flow_placer_tests {
     #[test]
     fn a_roomy_zone_keeps_natural_box_widths() {
         let items = [18usize, 8];
-        let plan = content_plan(&items, REAL_ZONE_W, REAL_ZONE_H, REAL_ICON, REAL_MIN_X);
+        let plan = content_plan(&items, REAL_ZONE_W, REAL_ZONE_H, REAL_CELL, REAL_MIN_X);
         let natural: Vec<i64> = items
             .iter()
-            .map(|n| box_own_size(*n, REAL_ZONE_W, REAL_ZONE_H, REAL_ICON).0)
+            .map(|n| box_own_size(*n, REAL_ZONE_W, REAL_ZONE_H, REAL_CELL).0)
             .collect();
         assert!(
             natural[0] + ARRANGE_GAP_X + natural[1] <= REAL_ZONE_W,
@@ -8554,7 +8463,7 @@ mod flow_placer_tests {
     #[test]
     fn small_boxes_fill_in_below_the_big_ones() {
         let items = [18usize, 8, 8, 8, 4];
-        let plan = content_plan(&items, REAL_ZONE_W, REAL_ZONE_H, REAL_ICON, REAL_MIN_X);
+        let plan = content_plan(&items, REAL_ZONE_W, REAL_ZONE_H, REAL_CELL, REAL_MIN_X);
         assert_eq!(
             plan.column_count(),
             2,
@@ -8563,7 +8472,7 @@ mod flow_placer_tests {
         );
         // 不许为了凑列数把任何格子夹窄（V71 的精神；V85 起撑宽到列宽是设计内行为）
         for (i, s) in plan.slots.iter().enumerate() {
-            let natural = box_own_size(items[i], REAL_ZONE_W, REAL_ZONE_H, REAL_ICON).0;
+            let natural = box_own_size(items[i], REAL_ZONE_W, REAL_ZONE_H, REAL_CELL).0;
             assert!(
                 s.w >= natural,
                 "第 {i} 个格子被夹窄到 {}（自然宽度 {}）",
@@ -8599,14 +8508,14 @@ mod flow_placer_tests {
     fn six_boxes_pack_into_wide_natural_columns_not_five_cramped_ones() {
         let items = [13usize, 12, 8, 2, 1, 1];
         let (zone_w, zone_h) = (920i64, 968i64);
-        let plan = content_plan(&items, zone_w, zone_h, 32, ARRANGE_MARGIN);
+        let plan = content_plan(&items, zone_w, zone_h, Cell::from_icon(32), ARRANGE_MARGIN);
         assert!(
             plan.column_count() <= 3,
             "不许再开 5 列（用户：「搞成那么多列」）：实际 {} 列",
             plan.column_count()
         );
         for (i, s) in plan.slots.iter().enumerate() {
-            let natural = box_own_size(items[i], zone_w, zone_h, 32).0;
+            let natural = box_own_size(items[i], zone_w, zone_h, Cell::from_icon(32)).0;
             assert!(
                 s.w >= natural,
                 "第 {i} 个格子被夹窄到 {}（自然宽度 {}）—— 宁可少一列也不夹窄",
@@ -8633,7 +8542,7 @@ mod flow_placer_tests {
     fn columns_anchor_right_and_narrow_boxes_fill_the_column_width() {
         let items = [18usize, 8];
         let (zone_w, zone_h) = (500i64, 848i64);
-        let plan = content_plan(&items, zone_w, zone_h, REAL_ICON, REAL_MIN_X);
+        let plan = content_plan(&items, zone_w, zone_h, REAL_CELL, REAL_MIN_X);
 
         // ① 右锚定：最右一格的右沿 == 可用区右沿（便签一侧），剩余空间留在左边
         let zone_right = REAL_MIN_X + zone_w;
@@ -8648,7 +8557,7 @@ mod flow_placer_tests {
         // ② 列内撑满：一列的宽度 = 该列最宽那格，其余格子同宽（不许「上宽下窄」）
         let col_w_expected = items
             .iter()
-            .map(|n| box_own_size(*n, zone_w, zone_h, REAL_ICON).0)
+            .map(|n| box_own_size(*n, zone_w, zone_h, REAL_CELL).0)
             .max()
             .unwrap();
         for s in &plan.slots {
@@ -8660,7 +8569,7 @@ mod flow_placer_tests {
         // ③ 撑宽之后高度按新宽度重算（几何自洽：宽了行数就少）—— 两格都不能越界
         assert!(!plan.overflowed, "撑满列宽之后不许越界");
         // ④ 幂等仍是算出来的：同样的内容排两遍一字不差
-        let again = content_plan(&items, zone_w, zone_h, REAL_ICON, REAL_MIN_X);
+        let again = content_plan(&items, zone_w, zone_h, REAL_CELL, REAL_MIN_X);
         let snap = |p: &ContentPlan| -> Vec<(i64, i64, i64, i64)> {
             p.slots.iter().map(|s| (s.x, s.y, s.w, s.h)).collect()
         };
@@ -8883,8 +8792,8 @@ mod flow_placer_tests {
     /// 收纳格单元格度量：`(iconSize + CELL_EXTRA_W) × (iconSize + BOX_CELL_EXTRA_H)`，
     /// 与前端 `minmax(icon + 32, 1fr)` + `gridAutoRows: icon + 36` 完全一致（V65 修：之前错用了
     /// 竖条那份 `CELL_EXTRA_H=30`，导致每个条目行矮 6px、多行累积裁切）。
-    fn cell(icon: i64) -> (i64, i64) {
-        (icon + CELL_EXTRA_W, icon + BOX_CELL_EXTRA_H)
+    fn cell(icon: Cell) -> (i64, i64) {
+        (icon.w, icon.h)
     }
 
     #[test]
@@ -8893,7 +8802,7 @@ mod flow_placer_tests {
         // 这里只守两条硬不变量：
         //   ① `desired_box_width` 给出的宽度**随条目数单调不减**，且夹在合法区间；
         //   ② `standard_box_width` 在「取本批最宽需求」时仍收敛（用于新建空格子的兜底宽度）。
-        let icon = 32;
+        let icon = Cell::from_icon(32);
         let counts = [2usize, 8, 16, 21, 36];
         let desired: Vec<i64> = counts
             .iter()
@@ -8919,7 +8828,7 @@ mod flow_placer_tests {
     #[test]
     fn height_grows_with_item_count_at_a_fixed_width() {
         // 用户 V40：「高度根据图标多少自动撑开」—— 宽度固定，高度必须跟着条目数走（V65 同样成立）。
-        let icon = 32;
+        let icon = Cell::from_icon(32);
         // V70：用「4 列的标准宽度」——**往返必须闭环**：按 4 列算出来的宽度，
         // 前端（含滚动槽与余量）必须真能排出 4 列。这条闭环以前是断的（见 BOX_HEADER_H 注释）。
         let w = box_width_for_columns(4, icon);
@@ -8947,7 +8856,7 @@ mod flow_placer_tests {
     #[test]
     fn standard_width_never_exceeds_the_work_area() {
         // 内容再多也不能把列宽算到工作区之外（否则格子会被排到屏幕外）
-        let icon = 32;
+        let icon = Cell::from_icon(32);
         let wide = [desired_box_width(200, icon)];
         let narrow = standard_box_width(wide.iter().copied(), 500);
         assert!(
@@ -8960,7 +8869,7 @@ mod flow_placer_tests {
 
     #[test]
     fn box_size_follows_item_count() {
-        let icon = 32;
+        let icon = Cell::from_icon(32);
         let (_cell_w, cell_h) = cell(icon);
 
         // 空格子：1 列 1 行（没有条目时按 1 算），给最小高度
@@ -8993,8 +8902,8 @@ mod flow_placer_tests {
     fn bigger_desktop_icons_make_bigger_boxes() {
         // V37 起格子图标跟着系统桌面图标尺寸走；尺寸算法必须同步跟着变，
         // 否则用户把桌面图标调大之后，格子里就会挤成一团。
-        let (w32, h32) = auto_box_size(6, 32, MAX_H);
-        let (w48, h48) = auto_box_size(6, 48, MAX_H);
+        let (w32, h32) = auto_box_size(6, Cell::from_icon(32), MAX_H);
+        let (w48, h48) = auto_box_size(6, Cell::from_icon(48), MAX_H);
         assert!(w48 >= w32 && h48 > h32);
     }
 
@@ -9002,7 +8911,7 @@ mod flow_placer_tests {
     fn size_is_clamped_into_the_legal_range() {
         for items in [0usize, 1, 7, 40, 500] {
             for icon in [16i64, 32, 48, 96, 256] {
-                let (w, h) = auto_box_size(items, icon, MAX_H);
+                let (w, h) = auto_box_size(items, Cell::from_icon(icon), MAX_H);
                 assert!(w >= MIN_BOX_W && w <= AUTO_MAX_W, "{items}/{icon} 宽度越界：{w}");
                 assert!(
                     h >= MIN_BOX_H && h <= MAX_H,
@@ -9011,7 +8920,7 @@ mod flow_placer_tests {
             }
         }
         // 可用高度很小时也不能算出小于最小高度的格子
-        let (_, h) = auto_box_size(30, 32, 100);
+        let (_, h) = auto_box_size(30, Cell::from_icon(32), 100);
         assert_eq!(h, MIN_BOX_H);
     }
 
@@ -9371,7 +9280,7 @@ mod flow_placer_tests {
         let items = [17usize, 8, 2, 1, 1, 5, 0];
         let zone_w = 935;
         let zone_h = 848;
-        let plan = content_plan(&items, zone_w, zone_h, 32, ARRANGE_MARGIN);
+        let plan = content_plan(&items, zone_w, zone_h, Cell::from_icon(32), ARRANGE_MARGIN);
         assert_eq!(plan.slots.len(), items.len(), "一个格子一个坑");
         let bottom = plan.slots.iter().map(|s| s.y + s.h).max().unwrap();
         assert!(
@@ -9403,7 +9312,7 @@ mod flow_placer_tests {
         // 40 个「20 条目」的格子：宽度只容得下 capacity 列，每列要塞十几个 ——
         // 连 `MIN_BOX_H` 都摞不下，这时才允许越过下边界（前端收纳区滚动容器兜住）。
         let items = vec![20usize; 40];
-        let plan = content_plan(&items, 850, 800, 48, 32);
+        let plan = content_plan(&items, 850, 800, Cell::from_icon(48), 32);
         assert_eq!(plan.slots.len(), 40, "一个格子一个坑");
         assert!(
             plan.column_count() <= column_capacity(850),
@@ -9425,7 +9334,7 @@ mod flow_placer_tests {
     #[test]
     fn content_plan_gives_more_items_a_larger_box() {
         // 彻底推翻 V64「1 条目占大空盒、17 条目挤小坑」的错配。
-        let icon = 32;
+        let icon = Cell::from_icon(32);
         let zone_w = 1200;
         let zone_h = 848;
         let min_x = ARRANGE_MARGIN;
@@ -9444,7 +9353,7 @@ mod flow_placer_tests {
     /// 列内自上而下紧挨着摞、列与列横向错开，且两两不重叠（V66）。
     #[test]
     fn content_plan_stacks_boxes_down_columns_without_overlap() {
-        let icon = 32;
+        let icon = Cell::from_icon(32);
         let zone_w = 1000;
         let min_x = ARRANGE_MARGIN;
         let items = [1usize, 17, 8, 2, 30, 5, 21];
@@ -9481,7 +9390,7 @@ mod flow_placer_tests {
     #[test]
     fn the_biggest_box_is_placed_first() {
         let items = [0usize, 0, 11, 1];
-        let sizes = own_sizes(&items, 935, 848, 32);
+        let sizes = own_sizes(&items, 935, 848, Cell::from_icon(32));
         let order = placement_order(&items, &sizes);
         assert_eq!(
             order[0], 2,
@@ -9498,9 +9407,9 @@ mod flow_placer_tests {
         let mut flipped = swapped;
         flipped.swap(0, 1);
         assert_eq!(
-            placement_order(&flipped, &own_sizes(&flipped, 935, 848, 32))
+            placement_order(&flipped, &own_sizes(&flipped, 935, 848, Cell::from_icon(32)))
                 .iter()
-                .map(|&i| own_sizes(&flipped, 935, 848, 32)[i])
+                .map(|&i| own_sizes(&flipped, 935, 848, Cell::from_icon(32))[i])
                 .collect::<Vec<_>>(),
             placement_order(&items, &sizes).iter().map(|&i| sizes[i]).collect::<Vec<_>>(),
             "两个空格子谁先登记都不改变尺寸序列（⇒ 落位一模一样）"
@@ -9512,16 +9421,14 @@ mod flow_placer_tests {
     /// ⚠️ 这里**刻意不引用** [`BOX_HEADER_H`] / [`BOX_FIT_SLACK`] 之外的引擎常量 ——
     /// 尤其是标题栏那 1px：它必须写成**前端真实结构**（`h-9` 的 36 ＋ `border-b` 的 1）。
     /// 若两边共用一个常量，把 `BOX_HEADER_H` 改回旧值这条校验照样通过，那就成了自证。
-    fn frontend_capacity(w: i64, h: i64, icon: i64) -> (i64, i64) {
+    fn frontend_capacity(w: i64, h: i64, cell: Cell) -> (i64, i64) {
         /// 前端标题栏：`className="flex h-9 … border-b border-white/[0.06]"` ⇒ 36 + 1。
         const FRONTEND_HEADER_H: i64 = 36 + 1;
-        let cell_w = icon + CELL_EXTRA_W;
-        let cell_h = icon + BOX_CELL_EXTRA_H;
         // 内容区 = 外框 − 上下边框 − 标题栏 − 内边距；宽度还要再减**滚动槽**（恒占位）
         let inner_w = w - BOX_BORDER_H - 2 * GRID_PAD_X - GRID_SCROLLBAR_W;
         let inner_h = h - BOX_BORDER_H - FRONTEND_HEADER_H - 2 * GRID_PAD_Y;
-        let cols = ((inner_w + GRID_GAP) / (cell_w + GRID_GAP)).max(1);
-        let rows = ((inner_h + GRID_GAP) / (cell_h + GRID_GAP)).max(0);
+        let cols = ((inner_w + cell.gap) / (cell.w + cell.gap)).max(1);
+        let rows = ((inner_h + cell.gap) / (cell.h + cell.gap)).max(0);
         (cols, rows)
     }
 
@@ -9535,7 +9442,7 @@ mod flow_placer_tests {
     /// 少了 1px 只排得出 4 列 × 4 行 = 16 格，18 个图标藏了 2 个）—— 见 [`BOX_HEADER_H`]。
     #[test]
     fn every_natural_box_size_really_shows_all_of_its_items() {
-        let icon = 32;
+        let icon = Cell::from_icon(32);
         // 真机收纳区：可用宽 637、可用高 848（handy.log：1707×912、挂件带左界 991）
         let (zone_w, zone_h) = (637, 848);
         for &items in [1usize, 4, 8, 11, 16, 17, 18, 21, 30, 43].iter() {
@@ -9558,23 +9465,64 @@ mod flow_placer_tests {
     #[test]
     fn the_width_for_n_columns_really_yields_n_columns() {
         for icon in [16i64, 24, 32, 48, 96] {
+            let cell = Cell::from_icon(icon);
             for cols in 1..=AUTO_MAX_COLS {
-                let w = box_width_for_columns(cols, icon);
+                let w = box_width_for_columns(cols, cell);
                 assert_eq!(
-                    item_columns_at(w, icon),
+                    item_columns_at(w, cell),
                     cols,
                     "icon={icon}：按 {cols} 列算出来的宽度 {w} 前端却排不出 {cols} 列"
                 );
                 // 也得让**前端的几何**同意（含滚动槽后的真实可用宽）
-                assert_eq!(frontend_capacity(w, 9999, icon).0, cols);
+                assert_eq!(frontend_capacity(w, 9999, cell).0, cols);
             }
         }
+    }
+
+    /// ★ **V102.8 的核心不变量**：B 模式下「格子挡位」与「原生图标落点」必须是
+    /// **同一张网格** —— 单元格的宽高直接就是 Explorer 的图标间距（`LVM_GETITEMSPACING`）。
+    ///
+    /// V102.3 把横向间距**反推**出来（`cell_w = spacing_y − BOX_CELL_EXTRA_H + CELL_EXTRA_W`
+    /// = 84），而 Explorer 真正的横向步长是 76 —— 每往右一列错 8px、第 5 列就错半格，
+    /// 用户看到的就是「图标散成密集网格」。**横向必须实测，不许反推。**
+    #[test]
+    fn b_mode_cell_is_the_explorer_grid_itself() {
+        // 真机实测值（Win11 / 125%）：逻辑 76×88，物理 95×110
+        let cell = Cell {
+            w: 76,
+            h: 88,
+            gap: 0,
+        };
+
+        // 格子宽 = N 个单元格 + 内边距 + 边框 + 滚动槽 + 余量（**gap 计入 0**：
+        // 76 本身已经把图标之间的空隙含进去了，再加一道缝就把落点推离槽位）
+        let w = box_width_for_columns(3, cell);
+        assert_eq!(
+            w,
+            3 * 76 + 2 * GRID_PAD_X + BOX_BORDER_H + GRID_SCROLLBAR_W + BOX_FIT_SLACK
+        );
+        assert_eq!(item_columns_at(w, cell), 3, "3 列算出来的宽度必须真能排 3 列");
+
+        // 行高就是 88 —— 与 Explorer 的纵向步长逐行重合
+        assert_eq!(
+            box_height_at(3, w, cell, 4000),
+            BOX_HEADER_H + BOX_BORDER_H + 88 + 2 * GRID_PAD_Y + BOX_FIT_SLACK
+        );
+
+        // 摆位读的那份几何（`BFrame`）与引擎**同源** —— 这是「底板与图标重合」的全部依据
+        let frame = b_content_frame(w, 400, cell);
+        assert_eq!((frame.cell_w, frame.cell_h), (76, 88));
+        assert_eq!(frame.cols, 3);
+
+        // 回退口径（还没测到间距）仍是图标尺寸 + 观感增量 —— 不影响已测到时的精确对齐
+        let fallback = Cell::from_icon(32);
+        assert_eq!((fallback.w, fallback.h, fallback.gap), (64, 68, GRID_GAP));
     }
 
     /// 空间富余 ⇒ 长到全见；空间紧张 ⇒ 才允许内部滚（用户 09-23 那句「除非…放不下了」）。
     #[test]
     fn a_box_grows_to_show_everything_before_it_is_allowed_to_scroll() {
-        let icon = 32;
+        let icon = Cell::from_icon(32);
         let items = 43usize;
         // 宽裕：43 个图标全部排出来（不再是 V69 那个固定 460 的上限把它切成 6 行）
         let (w, h) = box_own_size(items, 637, 848, icon);
@@ -9665,7 +9613,7 @@ mod flow_placer_tests {
             w: 236,
             h: 521,
         };
-        let plan = content_plan_with_lower_band(&items, band_a, Some(band_b), 32);
+        let plan = content_plan_with_lower_band(&items, band_a, Some(band_b), Cell::from_icon(32));
         assert_eq!(plan.slots.len(), items.len(), "一个格子一个坑");
 
         // ① 带下那条真的住进去了（判据用「x 越出上带右沿」而不是「y 够低」——
@@ -9691,14 +9639,14 @@ mod flow_placer_tests {
         assert!(!plan.overflowed, "两条带合起来仍然放不下 ⇒ 整层又要出滚动条");
 
         // ② 两次调用逐像素一致（摆放序是内容的纯函数 ⇒ 幂等不靠几何去兜）
-        let again = content_plan_with_lower_band(&items, band_a, Some(band_b), 32);
+        let again = content_plan_with_lower_band(&items, band_a, Some(band_b), Cell::from_icon(32));
         let snap = |p: &ContentPlan| -> Vec<(i64, i64, i64, i64)> {
             p.slots.iter().map(|s| (s.x, s.y, s.w, s.h)).collect()
         };
         assert_eq!(snap(&plan), snap(&again), "同一个输入排两次结果不同");
 
         // ③ 没有带下空间时（`band_b = None`）就是纯粹的单带排布 —— 不许越界
-        let solo = content_plan_with_lower_band(&items, band_a, None, 32);
+        let solo = content_plan_with_lower_band(&items, band_a, None, Cell::from_icon(32));
         assert_eq!(solo.slots.len(), items.len());
         assert!(
             solo.slots.iter().all(|s| s.x + s.w <= band_a.x + band_a.w),
@@ -9732,7 +9680,7 @@ mod flow_placer_tests {
             w: 260,
             h: 420,
         };
-        let plan = content_plan_with_lower_band(&items, band_a, Some(band_b), 32);
+        let plan = content_plan_with_lower_band(&items, band_a, Some(band_b), Cell::from_icon(32));
         assert_eq!(plan.slots.len(), items.len(), "一个格子一个坑");
         assert!(!plan.overflowed, "两条带合起来必须装得下：{:?}", plan.slots);
 
@@ -9764,7 +9712,7 @@ mod flow_placer_tests {
         );
 
         // ④ 幂等：同一个输入排两次逐像素一致
-        let again = content_plan_with_lower_band(&items, band_a, Some(band_b), 32);
+        let again = content_plan_with_lower_band(&items, band_a, Some(band_b), Cell::from_icon(32));
         let snap = |p: &ContentPlan| -> Vec<(i64, i64, i64, i64)> {
             p.slots.iter().map(|s| (s.x, s.y, s.w, s.h)).collect()
         };
@@ -9940,9 +9888,10 @@ mod flow_placer_tests {
 #[cfg(test)]
 mod layout_pipeline_tests {
     use super::{
-        probe_room_for_another_box, workstation_rect, layout_all_boxes_with, LayoutMode, SlotRect,
+        probe_room_for_another_box, workstation_rect, layout_all_boxes_with, Cell, LayoutMode,
+        SlotRect,
         item_columns_at, ARRANGE_GAP_X, ARRANGE_GAP_Y, ARRANGE_MARGIN, AUTO_MAX_W,
-        BOX_BORDER_H, BOX_CELL_EXTRA_H, BOX_FIT_SLACK, BOX_HEADER_H, GRID_GAP, GRID_PAD_Y,
+        BOX_BORDER_H, BOX_FIT_SLACK, BOX_HEADER_H, GRID_PAD_Y,
         INSERT_BOX_SQL, MIN_BOX_H, MIN_BOX_W,
     };
     use rusqlite::{params, Connection};
@@ -10124,15 +10073,15 @@ mod layout_pipeline_tests {
         let (path, conn) = temp_conn("col-idem");
         seed_real_boxes(&conn);
 
-        layout_all_boxes_with(&conn, WORK_W, WORK_H, ICON, 0, LayoutMode::Full).expect("首排失败");
-        let first = layout_all_boxes_with(&conn, WORK_W, WORK_H, ICON, 0, LayoutMode::Fill)
+        layout_all_boxes_with(&conn, WORK_W, WORK_H, Cell::from_icon(ICON), 0, LayoutMode::Full).expect("首排失败");
+        let first = layout_all_boxes_with(&conn, WORK_W, WORK_H, Cell::from_icon(ICON), 0, LayoutMode::Fill)
             .expect("增量排布失败");
         assert_eq!(first.moved, 0, "首排之后做一次增量整理不该再挪动任何格子");
         assert_eq!(first.resized, 0, "首排之后做一次增量整理不该再改尺寸");
 
         let baseline = snap(&conn);
         for round in 1..=3 {
-            let again = layout_all_boxes_with(&conn, WORK_W, WORK_H, ICON, 0, LayoutMode::Fill)
+            let again = layout_all_boxes_with(&conn, WORK_W, WORK_H, Cell::from_icon(ICON), 0, LayoutMode::Fill)
                 .expect("增量排布失败");
             assert_eq!(
                 again.moved, 0,
@@ -10153,7 +10102,7 @@ mod layout_pipeline_tests {
         let (path, conn) = temp_conn("align");
         seed_real_boxes(&conn);
         // 落单条目注入 0：端到端预演不依赖跑测试那台机器的桌面长什么样
-        let outcome = layout_all_boxes_with(&conn, WORK_W, WORK_H, ICON, 0, LayoutMode::Full).expect("排布失败");
+        let outcome = layout_all_boxes_with(&conn, WORK_W, WORK_H, Cell::from_icon(ICON), 0, LayoutMode::Full).expect("排布失败");
         let boxes = read_boxes(&conn);
         let _ = std::fs::remove_file(&path);
 
@@ -10386,7 +10335,7 @@ mod layout_pipeline_tests {
         );
 
         // 幂等：同样的输入再排一次不该再挪任何东西（否则每次整理都会“抖”一下）
-        let again = layout_all_boxes_with(&conn, WORK_W, WORK_H, ICON, 0, LayoutMode::Full).expect("二次排布失败");
+        let again = layout_all_boxes_with(&conn, WORK_W, WORK_H, Cell::from_icon(ICON), 0, LayoutMode::Full).expect("二次排布失败");
         assert_eq!(again.moved, 0, "排布必须幂等：第二次整理不该再挪动任何格子");
         assert_eq!(again.resized, 0, "排布必须幂等：第二次整理不该再改尺寸");
     }
@@ -10398,7 +10347,7 @@ mod layout_pipeline_tests {
         // 「日历可以修改为工作台」），障碍物就是工作台本身 —— 判据反而更直接。
         let (path, conn) = temp_conn("columns");
         seed_real_boxes(&conn);
-        layout_all_boxes_with(&conn, WORK_W, WORK_H, ICON, 0, LayoutMode::Full).expect("排布失败");
+        layout_all_boxes_with(&conn, WORK_W, WORK_H, Cell::from_icon(ICON), 0, LayoutMode::Full).expect("排布失败");
         let boxes = read_boxes(&conn);
         let _ = std::fs::remove_file(&path);
 
@@ -10424,40 +10373,45 @@ mod layout_pipeline_tests {
     }
 
     #[test]
-    fn content_boxes_stay_clear_of_the_left_loose_strip() {
-        // V42：左侧那条「未归类」竖条（系统 + 快捷方式 + 落单）占住左上角之后，
-        // 分类格**一个像素都不许压过去** —— 用户点名要那些快捷方式「依次展示」，
-        // 被格子盖住就白搭了。
-        let (path, conn) = temp_conn("strip");
-        seed_real_boxes(&conn);
-        // 注入 30 条未归类条目：19 行/列 → 3 列，宽 284、高 656 的一块
-        let loose_count = 30usize;
-        layout_all_boxes_with(&conn, WORK_W, WORK_H, ICON, loose_count, LayoutMode::Full).expect("排布失败");
-        let boxes = read_boxes(&conn);
-        let _ = std::fs::remove_file(&path);
+    fn content_boxes_ignore_the_retired_loose_strip() {
+        // ★ Step 5（B 方案收尾，2026-10-10）：左侧那条「未归类」竖条**已退场**。
+        //
+        // 它当年的存在前提是「原生图标被我们藏起来了，得有个地方展示没登记的文件」。
+        // B 方案把图标交还 Explorer 之后，原生图标一直看得见，竖条变成纯冗余 —— 而且是
+        // **白占一列宽**的冗余：布局为它预留 `strip.right + ARRANGE_GAP_X`，那列却没东西画，
+        // 所有格子被整体往右挤。
+        //
+        // 这条测试守**新不变量**：布局的落位**不受「未归类条目数」影响** —— 注入 0 与注入 30
+        // 必须算出逐像素相同的坐标。
+        //
+        // ⚠️ 旧版这条叫 `content_boxes_stay_clear_of_the_left_loose_strip`，断言「格子不压
+        // 竖条」。改完之后它**照样会通过**，但理由是错的（V85 右锚定让格子天然贴右，左半屏
+        // 本来就空着）—— 那正是「失败场景下也会成立的断言」，必须换掉而不是留着。
+        let (path_a, conn_a) = temp_conn("strip-a");
+        seed_real_boxes(&conn_a);
+        layout_all_boxes_with(&conn_a, WORK_W, WORK_H, Cell::from_icon(ICON), 0, LayoutMode::Full).expect("排布失败");
+        let with_zero = read_boxes(&conn_a);
+        let _ = std::fs::remove_file(&path_a);
 
-        let strip = super::loose_strip_rect(WORK_W, WORK_H, loose_count, ICON)
-            .expect("有未归类条目必须有竖条");
-        assert_eq!(strip.rect.x, ARRANGE_MARGIN);
-        assert_eq!(strip.rect.y, ARRANGE_MARGIN);
-        let strip_rect = strip.rect;
-        for b in boxes.iter().filter(|b| is_content(&b.kind)) {
-            let r = SlotRect {
-                x: b.x,
-                y: b.y,
-                w: b.w,
-                h: b.h,
-            };
-            assert!(
-                !r.intersects(&strip_rect),
-                "格子「{}」压到了左侧「未归类」竖条上",
-                b.name
-            );
-            assert!(
-                b.x >= strip_rect.x + strip_rect.w,
-                "格子「{}」挤进了竖条的横向区间（竖条右沿 = {}）",
-                b.name,
-                strip_rect.x + strip_rect.w
+        let (path_b, conn_b) = temp_conn("strip-b");
+        seed_real_boxes(&conn_b);
+        layout_all_boxes_with(&conn_b, WORK_W, WORK_H, Cell::from_icon(ICON), 30, LayoutMode::Full)
+            .expect("排布失败");
+        let with_thirty = read_boxes(&conn_b);
+        let _ = std::fs::remove_file(&path_b);
+
+        assert_eq!(
+            with_zero.len(),
+            with_thirty.len(),
+            "格子数量不该受未归类条目数影响"
+        );
+        assert!(!with_zero.is_empty(), "样本必须真的排出了格子，否则断言是空的");
+        for (a, b) in with_zero.iter().zip(with_thirty.iter()) {
+            assert_eq!(
+                (a.x, a.y, a.w, a.h),
+                (b.x, b.y, b.w, b.h),
+                "「{}」的落位随未归类条目数变了 —— 说明布局还在为那条已退场的竖条预留空间",
+                a.name
             );
         }
     }
@@ -10490,7 +10444,7 @@ mod layout_pipeline_tests {
         seed_real_boxes(&conn);
         let loose_count = 42usize;
         // 先照常整理一遍（模拟「用户已经整理好、桌面是正常的」）
-        layout_all_boxes_with(&conn, WORK_W, WORK_H, ICON, loose_count, LayoutMode::Full)
+        layout_all_boxes_with(&conn, WORK_W, WORK_H, Cell::from_icon(ICON), loose_count, LayoutMode::Full)
             .expect("首次排布失败");
         // 再连点两次「+ 便签」：`grid_box_upsert` 先落哨兵 (0,0)，由布局安置 ——
         // 这里刻意写成真机上那次的落点，确认它照样被救回来
@@ -10510,14 +10464,14 @@ mod layout_pipeline_tests {
             .expect("插入便签失败");
         }
         let outcome =
-            layout_all_boxes_with(&conn, WORK_W, WORK_H, ICON, loose_count, LayoutMode::Fill)
+            layout_all_boxes_with(&conn, WORK_W, WORK_H, Cell::from_icon(ICON), loose_count, LayoutMode::Fill)
                 .expect("增量排布失败");
         let boxes = read_boxes(&conn);
         let _ = std::fs::remove_file(&path);
 
-        let strip =
-            super::loose_strip_rect(WORK_W, WORK_H, loose_count, ICON).expect("有未归类条目必须有竖条");
-        let min_x = strip.rect.x + strip.rect.w + ARRANGE_GAP_X;
+        // Step 5：左侧「未归类」竖条已退场 ⇒ 可用区左沿就是 `ARRANGE_MARGIN`
+        //（旧版这里是 `strip.rect.x + strip.rect.w + ARRANGE_GAP_X`）。
+        let min_x = ARRANGE_MARGIN;
 
         assert_eq!(outcome.overflowed, 0, "三个便签也放得下，不该有格子被顶出屏幕");
         for b in &boxes {
@@ -10642,7 +10596,7 @@ mod layout_pipeline_tests {
             [],
         )
         .expect("挪便签失败");
-        let outcome = layout_all_boxes_with(&conn, WORK_W, WORK_H, ICON, 0, LayoutMode::Fill)
+        let outcome = layout_all_boxes_with(&conn, WORK_W, WORK_H, Cell::from_icon(ICON), 0, LayoutMode::Fill)
             .expect("增量排布失败");
         let boxes = read_boxes(&conn);
         let _ = std::fs::remove_file(&path);
@@ -10695,7 +10649,7 @@ mod layout_pipeline_tests {
         insert_box(&conn, "其他", "folder", 8, 300, 178, 1, 0, 0, false);
         insert_box(&conn, "安装包", "folder", 1, 160, 120, 2, 0, 0, false);
         insert_box(&conn, "日历 · 今日计划", "calendar", 0, 320, 470, 3, 0, 0, false);
-        layout_all_boxes_with(&conn, WORK_W, WORK_H, ICON, 0, LayoutMode::Full).expect("首排失败");
+        layout_all_boxes_with(&conn, WORK_W, WORK_H, Cell::from_icon(ICON), 0, LayoutMode::Full).expect("首排失败");
         let first = read_boxes(&conn);
         let column_xs: std::collections::BTreeSet<i64> = first
             .iter()
@@ -10763,7 +10717,7 @@ mod layout_pipeline_tests {
         )
         .expect("写入死坐标失败");
 
-        let outcome = layout_all_boxes_with(&conn, WORK_W, WORK_H, ICON, 0, LayoutMode::Fill)
+        let outcome = layout_all_boxes_with(&conn, WORK_W, WORK_H, Cell::from_icon(ICON), 0, LayoutMode::Fill)
             .expect("增量排布失败");
         let boxes = read_boxes(&conn);
         let _ = std::fs::remove_file(&path);
@@ -10831,7 +10785,7 @@ mod layout_pipeline_tests {
         {
             insert_box(&conn, name, "folder", items, 300, 244, i as i64, 0, 0, false);
         }
-        layout_all_boxes_with(&conn, WORK_W, WORK_H, ICON, 0, LayoutMode::Full).expect("排布失败");
+        layout_all_boxes_with(&conn, WORK_W, WORK_H, Cell::from_icon(ICON), 0, LayoutMode::Full).expect("排布失败");
         for b in read_boxes(&conn) {
             let rect = SlotRect { x: b.x, y: b.y, w: b.w, h: b.h };
             assert!(
@@ -10848,7 +10802,7 @@ mod layout_pipeline_tests {
         for i in 0..6 {
             insert_box(&conn, &format!("便签 {i}"), "note", 0, 260, 220, 10 + i, 0, 0, false);
         }
-        layout_all_boxes_with(&conn, WORK_W, WORK_H, ICON, 0, LayoutMode::Full).expect("排布失败");
+        layout_all_boxes_with(&conn, WORK_W, WORK_H, Cell::from_icon(ICON), 0, LayoutMode::Full).expect("排布失败");
         for b in read_boxes(&conn) {
             let rect = SlotRect { x: b.x, y: b.y, w: b.w, h: b.h };
             assert!(
@@ -10874,7 +10828,7 @@ mod layout_pipeline_tests {
         insert_box(&conn, "文档", "folder", 16, 341, 310, 0, 0, 0, false);
         insert_box(&conn, "日历 · 今日计划", "calendar", 0, 320, 470, 1, 0, 0, false);
         insert_box(&conn, "便签", "note", 0, 260, 120, 2, 0, 0, false);
-        layout_all_boxes_with(&conn, WORK_W, WORK_H, ICON, 0, LayoutMode::Full).expect("首排失败");
+        layout_all_boxes_with(&conn, WORK_W, WORK_H, Cell::from_icon(ICON), 0, LayoutMode::Full).expect("首排失败");
 
         let before = read_boxes(&conn);
         let note = before.iter().find(|b| b.kind == "note").expect("便签必须在");
@@ -10887,7 +10841,7 @@ mod layout_pipeline_tests {
         )
         .expect("手工摆位失败");
 
-        layout_all_boxes_with(&conn, WORK_W, WORK_H, ICON, 0, LayoutMode::Fill)
+        layout_all_boxes_with(&conn, WORK_W, WORK_H, Cell::from_icon(ICON), 0, LayoutMode::Fill)
             .expect("增量排布失败");
         let after = read_boxes(&conn);
         let note = after.iter().find(|b| b.kind == "note").expect("便签必须在");
@@ -10924,7 +10878,7 @@ mod layout_pipeline_tests {
         {
             insert_box(&conn, name, "folder", items, 341, 100, i as i64 + 1, 0, 0, false);
         }
-        layout_all_boxes_with(&conn, WORK_W, WORK_H, ICON, 48, LayoutMode::Fill).expect("首排失败");
+        layout_all_boxes_with(&conn, WORK_W, WORK_H, Cell::from_icon(ICON), 48, LayoutMode::Fill).expect("首排失败");
 
         // 把「文件夹」按**它自己的列位**手工停到下半屏（合法：在界内、不与人重叠），
         // 于是同列的引擎格子只剩它下面那点空间 —— 这正是真机「新格子 14 被顶出屏幕」的形状。
@@ -10944,7 +10898,7 @@ mod layout_pipeline_tests {
         )
         .expect("手工摆位失败");
 
-        layout_all_boxes_with(&conn, WORK_W, WORK_H, ICON, 48, LayoutMode::Fill).expect("排布失败");
+        layout_all_boxes_with(&conn, WORK_W, WORK_H, Cell::from_icon(ICON), 48, LayoutMode::Fill).expect("排布失败");
         let wst = workstation_rect(WORK_W, WORK_H);
         let boxes = read_boxes(&conn);
         let _ = std::fs::remove_file(&path);
@@ -10999,17 +10953,17 @@ mod layout_pipeline_tests {
         insert_box(&conn, "其他", "folder", 8, 300, 178, 1, 0, 0, false);
         insert_box(&conn, "压缩包", "folder", 2, 300, 120, 2, 0, 0, false);
         insert_box(&conn, "日历 · 今日计划", "calendar", 0, 320, 470, 3, 0, 0, false);
-        layout_all_boxes_with(&conn, WORK_W, WORK_H, ICON, 0, LayoutMode::Full).expect("首排失败");
+        layout_all_boxes_with(&conn, WORK_W, WORK_H, Cell::from_icon(ICON), 0, LayoutMode::Full).expect("首排失败");
 
         // 第一个便签：挂件带变宽，收纳区重新分列（允许动）
         insert_box(&conn, "便签", "note", 0, 260, 220, 10, 0, 0, false);
-        layout_all_boxes_with(&conn, WORK_W, WORK_H, ICON, 0, LayoutMode::Fill).expect("排布失败");
+        layout_all_boxes_with(&conn, WORK_W, WORK_H, Cell::from_icon(ICON), 0, LayoutMode::Fill).expect("排布失败");
 
         // 第二、三个便签：**一个都不许动**
         for (i, sort) in [11_i64, 12].iter().enumerate() {
             insert_box(&conn, &format!("便签 {}", i + 2), "note", 0, 260, 220, *sort, 0, 0, false);
         }
-        layout_all_boxes_with(&conn, WORK_W, WORK_H, ICON, 0, LayoutMode::Fill)
+        layout_all_boxes_with(&conn, WORK_W, WORK_H, Cell::from_icon(ICON), 0, LayoutMode::Fill)
             .expect("排布失败");
         let boxes = read_boxes(&conn);
         let _ = std::fs::remove_file(&path);
@@ -11110,7 +11064,7 @@ mod layout_pipeline_tests {
         }
 
         // 真机这次是**增量补齐**（用户点「一键归类桌面」，或挂件窗挂载时的自愈）
-        let outcome = layout_all_boxes_with(&conn, WORK_W, WORK_H, ICON, loose_count, LayoutMode::Fill)
+        let outcome = layout_all_boxes_with(&conn, WORK_W, WORK_H, Cell::from_icon(ICON), loose_count, LayoutMode::Fill)
             .expect("排布失败");
         let boxes = read_boxes(&conn);
         let _ = std::fs::remove_file(&path);
@@ -11123,8 +11077,8 @@ mod layout_pipeline_tests {
             );
         }
 
-        let strip = super::loose_strip_rect(WORK_W, WORK_H, loose_count, ICON).expect("必须有竖条");
-        let min_x = strip.rect.x + strip.rect.w + ARRANGE_GAP_X;
+        // Step 5：左侧「未归类」竖条已退场 ⇒ 可用区左沿就是 `ARRANGE_MARGIN`。
+        let min_x = ARRANGE_MARGIN;
         let band_left = boxes
             .iter()
             .filter(|b| !is_content(&b.kind))
@@ -11253,7 +11207,7 @@ mod layout_pipeline_tests {
         insert_box(&conn, "便签", "note", 0, 260, 303, 999, 0, 0, false);
 
         let outcome =
-            layout_all_boxes_with(&conn, WORK_W, WORK_H, ICON, 43, LayoutMode::Full).expect("排布失败");
+            layout_all_boxes_with(&conn, WORK_W, WORK_H, Cell::from_icon(ICON), 43, LayoutMode::Full).expect("排布失败");
         let boxes = read_boxes(&conn);
         let baseline = snap(&conn);
 
@@ -11308,7 +11262,7 @@ mod layout_pipeline_tests {
 
         // ③ 幂等：再排一遍（增量）一个格子都不许动
         let again =
-            layout_all_boxes_with(&conn, WORK_W, WORK_H, ICON, 43, LayoutMode::Fill).expect("排布失败");
+            layout_all_boxes_with(&conn, WORK_W, WORK_H, Cell::from_icon(ICON), 43, LayoutMode::Fill).expect("排布失败");
         assert_eq!(again.moved, 0, "第二遍增量整理挪动了格子（读序与落位不同构）");
         assert_eq!(again.resized, 0, "第二遍增量整理改了尺寸");
         assert_eq!(snap(&conn), baseline, "第二遍增量整理的落位与第一遍不一致");
@@ -11377,7 +11331,7 @@ mod layout_pipeline_tests {
         }
 
         let outcome =
-            layout_all_boxes_with(&conn, WORK_W, WORK_H, ICON, 43, LayoutMode::Full).expect("排布失败");
+            layout_all_boxes_with(&conn, WORK_W, WORK_H, Cell::from_icon(ICON), 43, LayoutMode::Full).expect("排布失败");
         let boxes = read_boxes(&conn);
         let baseline = snap(&conn);
         let wst = workstation_rect(WORK_W, WORK_H);
@@ -11435,7 +11389,7 @@ mod layout_pipeline_tests {
 
         // ④ 幂等
         let again =
-            layout_all_boxes_with(&conn, WORK_W, WORK_H, ICON, 43, LayoutMode::Fill).expect("排布失败");
+            layout_all_boxes_with(&conn, WORK_W, WORK_H, Cell::from_icon(ICON), 43, LayoutMode::Fill).expect("排布失败");
         assert_eq!(again.moved, 0, "第二遍增量整理挪动了格子");
         assert_eq!(again.resized, 0, "第二遍增量整理改了尺寸");
         assert_eq!(snap(&conn), baseline, "第二遍增量整理的落位与第一遍不一致");
@@ -11476,7 +11430,7 @@ mod layout_pipeline_tests {
 
         /// 试探「再来一个格子」—— 与 `grid_box_upsert` 走的是同一条 `INSERT_BOX_SQL`。
         fn probe_another(conn: &Connection, w: i64, h: i64) -> Option<String> {
-            probe_room_for_another_box(conn, WORK_W, WORK_H, ICON, 0, |probe| {
+            probe_room_for_another_box(conn, WORK_W, WORK_H, Cell::from_icon(ICON), 0, |probe| {
                 probe
                     .execute(
                         INSERT_BOX_SQL,
@@ -11490,7 +11444,7 @@ mod layout_pipeline_tests {
         let mut critical: Option<usize> = None;
         for n in 1..=40 {
             insert_box(&conn, &format!("格{n}"), "folder", 0, EMPTY_W, EMPTY_H, n as i64, 0, 0, false);
-            let out = layout_all_boxes_with(&conn, WORK_W, WORK_H, ICON, loose_count, LayoutMode::Fill)
+            let out = layout_all_boxes_with(&conn, WORK_W, WORK_H, Cell::from_icon(ICON), loose_count, LayoutMode::Fill)
                 .expect("排布失败");
             if out.overflowed > 0 {
                 critical = Some(n);
@@ -11502,7 +11456,7 @@ mod layout_pipeline_tests {
 
         // ② 退到「刚好排得下」的那一档，再建一个就越界 ⇒ 必须拒绝，且零副作用
         drop_last(&conn);
-        let fits = layout_all_boxes_with(&conn, WORK_W, WORK_H, ICON, loose_count, LayoutMode::Fill)
+        let fits = layout_all_boxes_with(&conn, WORK_W, WORK_H, Cell::from_icon(ICON), loose_count, LayoutMode::Fill)
             .expect("排布失败");
         assert_eq!(fits.overflowed, 0, "退一格之后应当排得下（临界点找错了）");
         assert_eq!(read_boxes(&conn).len(), critical - 1, "退一格之后的格数不对");
@@ -11537,11 +11491,10 @@ mod layout_pipeline_tests {
     ///
     /// 与 [`flow_placer_tests::frontend_capacity`] 同一个口径：引擎算的格子必须**真的**装得下
     /// 它自己的条目，否则前端就会在盒子内部长出滚动条 —— V70 那条「1px 几何账」的真身。
-    fn shown_items(w: i64, h: i64, icon: i64) -> i64 {
-        let cols = item_columns_at(w, icon);
-        let cell_h = icon.clamp(16, 256) + BOX_CELL_EXTRA_H;
+    fn shown_items(w: i64, h: i64, cell: Cell) -> i64 {
+        let cols = item_columns_at(w, cell);
         let avail_h = h - BOX_HEADER_H - BOX_BORDER_H - 2 * GRID_PAD_Y - BOX_FIT_SLACK;
-        let rows = (avail_h + GRID_GAP) / (cell_h + GRID_GAP);
+        let rows = (avail_h + cell.gap) / (cell.h + cell.gap);
         cols * rows.max(1)
     }
 
@@ -11565,7 +11518,7 @@ mod layout_pipeline_tests {
             insert_box(&conn, name, kind, *items, MIN_BOX_W, MIN_BOX_H, sort as i64, 0, 0, false);
         }
 
-        let out = layout_all_boxes_with(&conn, WORK_W, WORK_H, ICON, 0, LayoutMode::Full)
+        let out = layout_all_boxes_with(&conn, WORK_W, WORK_H, Cell::from_icon(ICON), 0, LayoutMode::Full)
             .expect("排布失败");
         assert_eq!(
             out.overflowed, 0,
@@ -11573,7 +11526,7 @@ mod layout_pipeline_tests {
         );
 
         for b in read_boxes(&conn).iter().filter(|b| is_content(&b.kind)) {
-            let shown = shown_items(b.w, b.h, ICON);
+            let shown = shown_items(b.w, b.h, Cell::from_icon(ICON));
             assert!(
                 shown >= b.items,
                 "「{}」有 {} 项，可引擎给的 {}×{} 只摆得下 {} 个 ⇒ 盒内会出滚动条（V70 的 1px 几何账）",

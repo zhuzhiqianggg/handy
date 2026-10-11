@@ -361,13 +361,18 @@ MUTATIONS: dict[str, _M] = {
             "看着像「日历自己少了一截」",
         ),
         # —— ⑰ 系统菜单期间「把桌面暂时还给系统」（V81）——
+        # ★ Step 4 换锚点：`reassert_takeover` 已整体空转（连「藏」这个动作都不存在了），
+        # 旧锚点 `if handoff_active() { return; }` 随「借出期间让路」一起消失。
+        # 那条断言现在的守护对象只有一个：**「函数体里没有 desktop_icons_apply」**。
         (
-            "借出期间接管自愈不让路（刚还回去的桌面又被抢回来）",
+            "接管自愈又在巡视时去藏一次（每 3 秒按一次用户的原生图标）",
             "src-tauri/src/commands/grid.rs",
-            "    if handoff_active() {\n        return;\n    }\n    if !read_takeover(app) {",
-            "    if !read_takeover(app) {",
-            "自愈看到「原生图标露着」就藏 ⇒ 菜单期间借出去的桌面 100ms 内被收回，"
-            "用户新建的文件夹再一次消失 —— 与没修完全一样，而且更难查",
+            "    let _ = app;\n    TAKEOVER_FIXES.store(0, Ordering::Relaxed);\n}",
+            "    let _ = desktop_icons_apply(true);\n    TAKEOVER_FIXES.store(0, Ordering::Relaxed);\n}",
+            "它由 25ms 轮询驱动 ⇒ 每 3 秒把用户的原生图标按回去：Explorer 每次重画都被我们"
+            "盖掉，表现为「桌面图标一闪一闪、Win+D 之后图标再也不出现」"
+            "（同一处源码在 test-icon-control 组也有一份用例 —— 两边证明的是**各自那条**"
+            "断言的判别力，不是重复登记）",
         ),
         (
             "挂件窗不可见的自愈不跳过借出期（这层在菜单上头糊回来）",
@@ -440,14 +445,15 @@ MUTATIONS: dict[str, _M] = {
             "    if false {",
             "菜单收起后几百个线程同时抢着收回桌面 ⇒ 反复 show/hide，桌面狂闪",
         ),
-        (
-            "系统入口的右键又被排除在原生菜单之外（回到复刻菜单）",
-            "src/modules/desktop-grid/GridOverlay.tsx",
-            "                if (!event.ctrlKey) {\n                  setMenuLoose(null);",
-            "                if (!event.ctrlKey && !entry.isSystem) {\n                  setMenuLoose(null);",
-            "右键「此电脑」弹回只有两行的复刻菜单 —— 用户 09-27 贴图报的原话"
-            "「我的电脑都变成这样了」就是这个",
-        ),
+        # ⚠️ 2026-10-11 删除一条用例：「系统入口的右键又被排除在原生菜单之外（回到复刻菜单）」。
+        #
+        # 它的锚点（竖条条目菜单里的 `if (!event.ctrlKey) { setMenuLoose(null); … }`）随
+        # Step 5「竖条退场」一起消失，连同 `entry` 这个标识符。而**没有 `entry`，退化就写不出来**：
+        # 要触发 `test-drag-pointer.mjs` 那条 `!/!entry\.isSystem/` ，只能人为往源码里塞一个
+        # 已不存在的标识符 —— 那种「变异」不反映任何真实退化，只会证明工具自己能塞串。
+        #
+        # 该断言保留为**结构反悔网**（零成本，专防有人把老代码整段抄回来），
+        # 在此登记为「已知无变异证据」，不计入本组用例数。
         (
             "认桌面菜单时不再看「菜单压在谁身上」",
             "src-tauri/src/platform/desktop_handoff.rs",
@@ -662,31 +668,6 @@ MUTATIONS: dict[str, _M] = {
     # 另一套守卫，结果是「改了源码守卫仍然全绿」的假通过（自检会直接点名它没判别力）。
     "scripts/regression/test-shell-menu.mjs": [
         (
-            "改名撞名又弹回 Handy toast（原生对话框被摘掉）",
-            "src-tauri/src/commands/grid.rs",
-            "        crate::platform::native_ui::rename_conflict_dialog(&trimmed, source.is_dir());\n"
-            "        return Err(crate::platform::native_ui::ERR_NATIVE_SHOWN.to_string());",
-            '        return Err(format!("已经有一个「{trimmed}」了"));',
-            "用户 10-11 拍板「名称重复提示应该是 Windows 的提示」—— 自绘 toast 那条路"
-            "已经撤了，摘掉原生对话框调用 = 退回用户点名的旧体验",
-        ),
-        (
-            "原生删除被改成不进回收站（FOF_NOCONFIRMATION = 无确认 + 不保撤销）",
-            "src-tauri/src/platform/native_ui.rs",
-            "        fFlags: FOF_ALLOWUNDO.0 as u16,",
-            "        fFlags: (FOF_ALLOWUNDO.0 | FOF_NOCONFIRMATION.0) as u16,",
-            "用户 10-11 拍板「删除行为应该使用 Windows 原生的」—— 加 NOCONFIRMATION "
-            "等于绕开系统确认框且失去可还原语义",
-        ),
-        (
-            "前端撞名时不再保持输入框打开（Explorer 同款交互被拆）",
-            "src/modules/desktop-grid/GridOverlay.tsx",
-            "          setRenamingItemPath(path);\n"
-            "          setItemRenameDraft(itemRenameDraft.trim());",
-            "          // mutation: 输入框被拆掉\n",
-            "撞名后输入框关闭 = 用户得重新 F2 打一遍名字，与资源管理器行为不一致",
-        ),
-        (
             "V99 枚举数据源退回纯注册表全量扫（与原生「新建」列表对不上）",
             "src-tauri/src/platform/shell_menu.rs",
             "    let mut exts = read_discardable_shell_new_classes();",
@@ -804,20 +785,25 @@ MUTATIONS: dict[str, _M] = {
         # （用户 10-10 00:12 原话，取证确认那一轮十几次右键一个文件都没建出来）。
         # 现在空白一律穿透，下面几条守住「穿透」与它的补偿措施不被改回。
         (
-            "V96 根画布又改回「只拖拽时可交互」（空白右键穿透给 Explorer ⇒ 新建又压在 ShellNew 上）",
+            "根画布回到有条件穿透（空白右键又落到我们窗口上）",
             "src/modules/desktop-grid/GridOverlay.tsx",
-            "        pointerEvents: contentHidden || iconControl ? 'none' : 'auto',",
-            "        pointerEvents: contentHidden || itemDragging ? 'none' : 'auto',",
-            "空白右键一穿透，就又回到「隔空操作被我们隐藏的图标视图」那条路 —— V92/V93/V94/V95 "
-            "修了七轮都不收敛（用户 10-10：第一次成、第二次时好时坏、第三次直接建不出来）",
+            "        pointerEvents: 'none',\n      }}\n      onContextMenu={(event) => {",
+            "        pointerEvents: contentHidden ? 'none' : 'auto',\n      }}\n      onContextMenu={(event) => {",
+            "Step 4 之前这里是「按模式切换」，现在模式是常量、根画布**恒定**穿透。改回带条件的"
+            "形态，空白处的事件就重新落到我们窗口上：Explorer 那张原生右键菜单"
+            "（查看 / 排序方式 / 刷新 / 新建）永远弹不出来。"
+            "（test-icon-control 组也有一份同源用例，两边各自证明判别力）",
         ),
         (
-            "V96 不再上报「整窗」命中区（Rust 命中轮询会把整窗切回穿透 ⇒ 空白右键点不到）",
+            "又上报「整窗」命中区（Rust 命中轮询把整窗切回可交互 ⇒ 原生右键弹不出来）",
             "src/modules/desktop-grid/GridOverlay.tsx",
-            "        width: window.innerWidth * scaleFactor,",
-            "        width: 0,",
-            "整窗命中区没了 ⇒ Rust 的 25ms 命中测试判「光标不在交互区」⇒ set_ignore_cursor_events(true) "
-            "⇒ 桌面空白处右键直接漏给真实桌面，我们自己的菜单根本收不到",
+            "    void ipc.gridOverlayUpdateRegions(regions).catch(() => undefined);",
+            "    regions.push({ x: 0, y: 0, width: window.innerWidth * scaleFactor, height: 1 });\n"
+            "    void ipc.gridOverlayUpdateRegions(regions).catch(() => undefined);",
+            "「根画布 pointerEvents:none」只解决窗口**内部**的转发；真正决定「这个点归谁」的"
+            "是 Rust 那条 25ms 轮询。整窗命中区一报，桌面空白处就仍是我们的窗口吃点击 —— "
+            "原生右键菜单弹不出来、框选也选不动。"
+            "（test-icon-control 组也有一份同源用例，两边各自证明判别力）",
         ),
         (
             "V92 命令不等菜单收起（去掉 mpsc 的 recv）",
@@ -853,48 +839,128 @@ MUTATIONS: dict[str, _M] = {
             "不是「名字上有了光标」，而是「整张桌面自己刷了一下、格子全跳一遍」——"
             "正是用户 10-10 说的「跟正常的桌面行为不一样」",
         ),
-        (
-            "V102.7 幽灵条目：右键前不再探路径（回执变成「右键没反应」）",
-            "src-tauri/src/commands/grid.rs",
-            "        if !std::path::Path::new(&path).exists() {\n",
-            "        if false {\n",
-            "文件已被删除时 Shell 拿不到 IShellItem（0x80070002），菜单弹不出来；而那句失败"
-            "发生在**投递到主线程的闭包**里 ⇒ 前端收不到 ⇒ 用户看到的是「右键一点反应都没有」"
-            "（10-11 原话：「格子里面删除也有问题，什么玩意啊」）",
-        ),
-        (
-            "V102.7 幽灵条目：右键失败不再刷新（死条目永远赖在格子里）",
-            "src/modules/desktop-grid/GridOverlay.tsx",
-            "                          showHint(error.message);\n"
-            "                          void refresh()\n"
-            "                            .then(() => refreshLoose())\n"
-            "                            .catch(() => undefined);",
-            "                          showHint(error.message);",
-            "提示了却不摘登记 ⇒ 用户每右键一次同一条死条目都是同一个错，格子越点越脏",
-        ),
-        (
-            "V102.7 幽灵条目：桌面变化只看竖条（格子里被外部删除的文件长时间不消失）",
-            "src/modules/desktop-grid/GridOverlay.tsx",
-            "    if (added.length === 0) {",
-            "    if (false) {",
-            "被删掉的文件在**格子里**而不在「未归类竖条」里 ⇒ 竖条前后一样 ⇒ 这条事件快通道"
-            "直接 return，失效登记只能等 15 秒轮询才对账；窗口期内用户点它就是「毫无反应」",
-        ),
     ],
 
     # V102 新增：B 方案（不接管原生桌面）这一组归 test-icon-control.mjs 管。
     # 这一组挑的都是**「编译通过、类型正确、跑起来才炸」**或**「跑起来也不炸、只是
     # 图标悄悄跑偏」**的退化方式 —— 后者才是 B 方案最危险的失效形态（用户只说得出
     # 「看着不对」，说不出哪里不对）。
+    #
+    # ★★ 2026-10-11 Step 4/5 之后**整体换代**：旧版守的是「B 模式开关打开时让路」
+    # （`icon_control_runtime` 镜像 + 开关闸门那一套），Step 4 把开关和「藏」这个动作
+    # 一起删掉了 —— 那 9 条锚点在源码里已不存在（留着它们，「替换没生效」会被当 FAIL
+    # 报出来，这正是本工具该有的行为）。
+    #
+    # 新选题的重心从「**加了一条约束吗**」移到「**能力删干净了没有**」。Step 4 的核心
+    # 不是加约束，是把能力整个拿掉；所以这里多数用例是反着来的 —— **「把能力偷偷装回来」**。
+    # 这类退化在代码评审里最不容易看出来（加的常是一行看着无害的恢复逻辑），
+    # 却会把 V42–V101 那六十批的坑整套搬回来。
     "scripts/regression/test-icon-control.mjs": [
+        # —— V102.8：单元格必须**就是** Explorer 的间距网格（格挡 == 图标落点）——
         (
-            "B 模式下仍然隐藏原生图标（等于又回到「自己扮 Explorer」）",
+            "单元格横向间距又回到「用纵向反推」（V102.3 老路：每列错 8px）",
             "src-tauri/src/commands/grid.rs",
-            "    if hidden && icon_control_runtime(app) {\n        return false;\n    }\n",
-            "    if hidden && false {\n        return false;\n    }\n",
-            "B 方案的根就是「图标归 Explorer」。这一拦没了 ⇒ 图标被我们藏起来，而我们的"
-            "摆位是发给 Explorer 的（它画的图标却不可见）⇒ 桌面空白，只有我们画的装饰底板；"
-            "「接管桌面」那六十批的 Z 序 / Win+D / 自愈 / ShellNew 全套坑原样搬回来",
+            "        w: read(crate::commands::grid_icons::META_SPACING_X)?.max(16),",
+            "        w: read(crate::commands::grid_icons::META_SPACING_Y)?.max(16) - 12,",
+            "横向必须**实测**（真机 76）。拿纵向 88 减一个常数去凑，凑出来 84 ⇒ 每往右一列偏"
+            "8px、第 5 列偏半格 —— 用户 10-11 看到的「图标散成密集网格」正是它",
+        ),
+        (
+            "单元格之间又加一道缝（间距已含在槽位里，再加就把落点推离网格）",
+            "src-tauri/src/commands/grid.rs",
+            "        gap: 0,",
+            "        gap: GRID_GAP,",
+            "Explorer 的横向间距（76）本身已经把图标之间的空隙含进去了。再补一道 6px 的缝，"
+            "格子挡位与槽位网格就不同源 —— 每一列再偏 6px",
+        ),
+        (
+            "b_content_frame 的 cell_w 与 cell_h 混用（宽高各推各的）",
+            "src-tauri/src/commands/grid.rs",
+            "        cell_w: cell.w,\n        cell_h: cell.h,",
+            "        cell_w: cell.h,\n        cell_h: cell.h,",
+            "摆位按 cell_w 走。写成 cell.h 就是「横向按 88 逻辑摆、格子按 76 画」—— 每列偏"
+            "12px、越排越歪，正是「底板与图标两套尺寸」的翻版",
+        ),
+        (
+            "接管从后门回来（`takeover_icons` 真去藏图标）",
+            "src-tauri/src/commands/grid.rs",
+            "fn takeover_icons(app: &AppHandle, hidden: bool) -> bool {\n    let _ = hidden;",
+            "fn takeover_icons(app: &AppHandle, hidden: bool) -> bool {\n"
+            "    if hidden {\n        let _ = desktop_icons_apply(true);\n    }",
+            "B 方案的根就是「图标归 Explorer」。它一旦真去藏：图标被我们藏起来、而我们的"
+            "摆位是发给 Explorer 的（它画的图标却不可见）⇒ 桌面空白，只剩我们画的装饰底板；"
+            "V45 装机实测的「桌面全空」当场复现",
+        ),
+        (
+            "`grid_desktop_icons_set` 又能藏图标（留了一条绕开「恒不隐藏」的路）",
+            "src-tauri/src/commands/grid.rs",
+            "pub async fn grid_desktop_icons_set(app: AppHandle, hidden: bool) -> Result<bool, String> {\n"
+            "    let _ = hidden;\n"
+            "    let _ = write_icons_hidden(&app, false);\n"
+            "    Ok(desktop_icons_apply(false).unwrap_or(false))",
+            "pub async fn grid_desktop_icons_set(app: AppHandle, hidden: bool) -> Result<bool, String> {\n"
+            "    let _ = write_icons_hidden(&app, hidden);\n"
+            "    Ok(desktop_icons_apply(hidden).unwrap_or(false))",
+            "Step 4 特意把这个「一次性藏一下」的入口降级成幂等恢复（`hidden` 参数被忽略）—— "
+            "它是最后一个能藏图标的地方。放它回来 = 留了一条绕开 `takeover_icons` 那条"
+            "「恒不隐藏」约束的路：**能力删掉比约束住更可靠**（约束靠人记得住，删掉不靠记忆）",
+        ),
+        (
+            "`reassert_takeover` 又去藏一次 + 保险丝计数只增不减",
+            "src-tauri/src/commands/grid.rs",
+            "    let _ = app;\n    TAKEOVER_FIXES.store(0, Ordering::Relaxed);\n}",
+            "    let _ = desktop_icons_apply(true);\n    TAKEOVER_FIXES.store(1, Ordering::Relaxed);\n}",
+            "它由 25ms 轮询驱动 ⇒ 每 3 秒把用户的原生图标按回去 —— Explorer 每次重画都被我们"
+            "盖掉，表现为「桌面图标一闪一闪、Win+D 之后图标再也不出现」。计数不减是另一头："
+            "`TAKEOVER_FIXES` 只增不减，日志里永远在报「又修了一次」，真出故障时没人看得出"
+            "那是常态还是异常",
+        ),
+        (
+            "位置快照每次开启都重存（原始布局被我们摆过的那一版覆盖）",
+            "src-tauri/src/commands/grid_icons.rs",
+            "        if meta_get(&conn, META_POS_BACKUP).is_none() {",
+            "        if true {",
+            "用户「开 → 关 → 开」之后，快照里存的已经不是原始布局、而是**我们摆过的那一版**"
+            "⇒「还原图标布局」变成「还原成 Handy 摆的样子」，原始布局永久丢失。"
+            "快照只在 `is_none()` 时写，正是为了这个",
+        ),
+        (
+            "FFlags 备份每次开启都重存（用户原本的桌面偏好被我们改过的那版覆盖）",
+            "src-tauri/src/commands/grid_icons.rs",
+            "        if meta_get(&conn, META_FFLAGS_BACKUP).is_none() {",
+            "        if true {",
+            "比上一条更隐蔽：备份里存的是**用户原本的**「自动排列 / 对齐网格」偏好。被我们"
+            "清过的那一版覆盖之后，「还原图标布局」会把偏好还原成**我们改过的值** —— "
+            "用户永远拿不回自己那份设置，而且看不出是我们干的",
+        ),
+        (
+            "还原时硬编码成「开着自动排列」（不还原备份原值）",
+            "src-tauri/src/commands/grid_icons.rs",
+            "di::set_autoarrange(list, di::flags_autoarrange_on(flags));",
+            "di::set_autoarrange(list, true);",
+            "用户本来就没开自动排列（用第三方桌面工具前关过）⇒ 我们退出时反而**替他打开**了。"
+            "决策 3 定的就是「原值还原」，不是「还原成默认值」",
+        ),
+        (
+            "还原只还位置、不还偏好（「保留位置」这句承诺当场作废）",
+            "src-tauri/src/commands/grid_icons.rs",
+            "        if let Some(flags) = meta_get(&conn, META_FFLAGS_BACKUP).and_then(|v| v.parse::<u32>().ok())\n"
+            "        {\n"
+            "            di::set_autoarrange(list, di::flags_autoarrange_on(flags));\n"
+            "            let _ = di::write_folder_flags(flags);\n"
+            "        }",
+            "        if false {\n            let _ = 0u32;\n        }",
+            "决策 2 / 3 的合流点：位置与偏好必须绑定。只把图标摆回去、不恢复偏好，只要"
+            "「自动排列」还是关着，下一次任何刷新都可能被 Explorer 重新打散 —— "
+            "用户点了一次「还原」却眼看着它又散开，只会认为这个按钮坏了",
+        ),
+        (
+            "底板内容原点写死数字（图标与框线错位）",
+            "src-tauri/src/commands/grid.rs",
+            "        origin_dy: BOX_HEADER_H + BOX_BORDER_H + GRID_PAD_Y,",
+            "        origin_dy: 47,",
+            "写死数字就与前端脱钩：只要标题栏高 / 边距 / 内边距任一改动，图标就会整体压到"
+            "框线上或飘出格子（V59「渲染几何 = 引擎几何」的同一类错，只不过这次错在 B 模式）",
         ),
         (
             "LVS_AUTOARRANGE 位值写错成 0x0001（那是 LVS_REPORT）",
@@ -902,7 +968,7 @@ MUTATIONS: dict[str, _M] = {
             "pub const LVS_AUTOARRANGE: u32 = 0x0100;",
             "pub const LVS_AUTOARRANGE: u32 = 0x0001;",
             "照着错的位判「自动排列」，永远读到「关着」（或永远读到「开着」）⇒ 该关的时候"
-            "没关，`LVM_SETITEMPOSITION` 发出去被 Explorer 立刻拉回，表现为「点了开关没反应」。"
+            "没关，`LVM_SETITEMPOSITION` 发出去被 Explorer 立刻拉回，表现为「摆了等于没摆」。"
             "取证探针第一版就栽在这里，结论**整个反了**（见 desktop-icons-pos-probe.py 抬头）",
         ),
         (
@@ -919,36 +985,30 @@ MUTATIONS: dict[str, _M] = {
             "src-tauri/src/platform/desktop_icons.rs",
             "    flags & !(FLAG_AUTOARRANGE | FLAG_SNAPTOGRID)",
             "    flags & !(FLAG_AUTOARRANGE | FLAG_SNAPTOGRID | 0x0000_0002)",
-            "备份只有一份：多清的位在用户关掉 B 模式时还原不回去 —— 用户根本不知道是我们干的。"
+            "备份只有一份：多清的位在用户点「还原」时还原不回去 —— 用户根本不知道是我们干的。"
             "「只动自己那两位」必须由单测 + 守卫同时锁死",
         ),
         (
-            "位置快照每次开启都重存（原始布局被我们摆过的那一版覆盖）",
-            "src-tauri/src/commands/grid_icons.rs",
-            "            if meta_get(&conn, META_POS_BACKUP).is_none() {",
-            "            if true {",
-            "用户「开 → 关 → 开」之后，快照里存的已经不是原始布局、而是**我们摆过的那一版**"
-            "⇒「还原图标布局」变成「还原成 Handy 摆的样子」，原始布局永久丢失。"
-            "快照只在 `is_none()` 时写，正是为了这个",
-        ),
-        (
-            "关闭时硬编码还原成「开着自动排列」（不还原备份原值）",
-            "src-tauri/src/commands/grid_icons.rs",
-            "                di::set_autoarrange(list, di::flags_autoarrange_on(flags));",
-            "                di::set_autoarrange(list, true);",
-            "用户本来就没开自动排列（用第三方桌面工具前关过）⇒ 我们退出时反而**替他打开**了。"
-            "决策 3 定的就是「原值还原」，不是「还原成默认值」",
-        ),
-        (
-            "底板内容原点写死数字（图标与框线错位）",
+            "命中区外扩 HIT_PADDING 大过内容区上内边距（啃掉第一行图标的最上面几像素）",
             "src-tauri/src/commands/grid.rs",
-            "        origin_dy: BOX_HEADER_H + BOX_BORDER_H + GRID_PAD_Y,",
-            "        origin_dy: 47,",
-            "写死数字就与前端脱钩：只要标题栏高 / 边距 / 内边距任一改动，图标就会整体压到"
-            "框线上或飘出格子（V59「渲染几何 = 引擎几何」的同一类错，只不过这次错在 B 模式）",
+            "const HIT_PADDING: f64 = 4.0;",
+            "const HIT_PADDING: f64 = 12.0;",
+            "外扩是补「离散采样 vs 连续移动」的时间窗，代价是命中矩形四边各胖一圈。我们报的"
+            "标题栏条**紧贴**内容区，这一圈一旦大过 `GRID_PAD_Y(8)`，第一行原生图标的最上面"
+            "几像素就点不着 —— 用户看到的是「第一行点不动、下面几行都正常」，最难归因的那种坏。"
+            "两边都是裸常量，谁调大一点都不会编译报错",
         ),
         (
-            "B 模式下前端继续画图标（每个图标出现两份）",
+            "布局又为已退场的竖条预留一列",
+            "src-tauri/src/commands/grid.rs",
+            "    let _ = loose_count;\n    let min_x = ARRANGE_MARGIN;",
+            "    let min_x = ARRANGE_MARGIN;",
+            "前端已经不画竖条了，还留位就是一条**白占一列宽**的空白 —— 所有格子被整体往右挤、"
+            "右侧溢出到工作台下面。用户在真机上一眼能看到「右边怎么挤成一堆」，"
+            "但很难想到是给一个已经不存在的面板留的位",
+        ),
+        (
+            "前端又画一份图标（每个图标显示两遍）",
             "src/modules/desktop-grid/GridOverlay.tsx",
             "              {!iconControl && boxItems.map((item) => {",
             "              {boxItems.map((item) => {",
@@ -956,17 +1016,57 @@ MUTATIONS: dict[str, _M] = {
             "才对 —— 表现为「图标点一下没反应，要点两下」",
         ),
         (
-            "B 模式下格子内容区不穿透（原生图标的双击 / 右键 / 拖拽全废）",
+            "格子内容区不穿透（原生图标的双击 / 右键 / 拖拽全废）",
             "src/modules/desktop-grid/GridOverlay.tsx",
-            "                  pointerEvents: iconControl ? 'none' : undefined,",
-            "                  pointerEvents: undefined,",
-            "内容区不吃点击就是「看得见、点不着」：用户双击图标没反应、右键出的是我们的菜单"
+            "                  pointerEvents: 'none',\n                  ...(getBoxViewMode(box.id) === 'grid'",
+            "                  pointerEvents: undefined,\n                  ...(getBoxViewMode(box.id) === 'grid'",
+            "内容区吃点击就是「看得见、点不着」：用户双击图标没反应、右键出的是我们的菜单"
             "而不是原生的。B 方案的全部价值（原生行为一字不改）都建立在穿透上",
+        ),
+        (
+            "根画布回到有条件穿透（空白右键不再落到 Explorer 的原生菜单）",
+            "src/modules/desktop-grid/GridOverlay.tsx",
+            "        pointerEvents: 'none',\n      }}\n      onContextMenu={(event) => {",
+            "        pointerEvents: contentHidden ? 'none' : 'auto',\n      }}\n      onContextMenu={(event) => {",
+            "空白处的事件重新落到我们窗口上 ⇒ Explorer 那张原生右键菜单（查看 / 排序方式 / "
+            "刷新 / 新建）永远弹不出来。★ 这条**必须**锚定到根画布**那一处**：本文件另有 3 处 "
+            "`pointerEvents: 'none'`（内容区 / 提示外框 / 预览），写成「文件里存在这个串」"
+            "会永远绿 —— 上一版就是这么写的，被本次换代的变异自检当场揪出来",
+        ),
+        (
+            "「未归类」竖条渲染被加回来",
+            "src/modules/desktop-grid/GridOverlay.tsx",
+            "      {/* ★ Step 5（B 方案收尾）：左侧「未归类」竖条已退场",
+            "      <div ref={looseRef} className=\"hidden\" />\n"
+            "      {/* ★ Step 5（B 方案收尾）：左侧「未归类」竖条已退场",
+            "竖条一回来，布局里那条白占一列宽的位（见上）也跟着回来，而且它与 B 方案的前提"
+            "直接冲突：原生图标一直看得见，「未归类」的文件本来就在桌面上排着，"
+            "再抄一份到竖条就是同一批图标显示两遍",
+        ),
+        (
+            "又上报「整窗」命中区（原生图标看得见、点不动）",
+            "src/modules/desktop-grid/GridOverlay.tsx",
+            "    void ipc.gridOverlayUpdateRegions(regions).catch(() => undefined);",
+            "    regions.push({ x: 0, y: 0, width: window.innerWidth * scaleFactor, height: 1 });\n"
+            "    void ipc.gridOverlayUpdateRegions(regions).catch(() => undefined);",
+            "「根画布 pointerEvents:none」只解决窗口**内部**的转发；真正决定「这个点归谁」的"
+            "是 Rust 那条 25ms 命中轮询（`let want = interactive || cursor_hit(&win)`）。"
+            "整窗命中区一报，窗口就一直吃点击 ⇒ 桌面空白处仍是我们的：原生右键菜单弹不出来、"
+            "框选也选不动",
+        ),
+        (
+            "格子整块报成命中区（内容区吃掉了原生图标）",
+            "src/modules/desktop-grid/GridOverlay.tsx",
+            "          height: (BOX_HEADER_H + BOX_BORDER_H) * scaleFactor,",
+            "          height: box.height * scaleFactor,",
+            "内容区被报成命中区 ⇒ 光标一进格子（也就是一进图标那一整片区域）窗口就恢复吃点击"
+            "⇒ 格子里所有原生图标全部点不着 —— 而「格子里的图标点不着」正是用户会第一眼"
+            "看到、却最难归因的那种坏",
         ),
         (
             "摆位不再挂在重排之后（按新格子算坐标、按旧底板放图标）",
             "src/modules/desktop-grid/GridOverlay.tsx",
-            "        .then(() => (iconControl ? ipc.desktopIconLayoutApply() : Promise.resolve(null)))",
+            "        .then(() => ipc.desktopIconLayoutApply())",
             "        .then(() => null)",
             "少了这一脚，拖动格子之后底板挪了、图标还停在旧位置 —— 直到下一次偶然的重排才"
             "跟上。表现为「拖完格子图标乱飞一下又回到原位」",
@@ -976,35 +1076,110 @@ MUTATIONS: dict[str, _M] = {
             "src/modules/desktop-grid/GridManagerView.tsx",
             "      {iconControl.snapshot > 0 && (",
             "      {true && (",
-            "没存过快照也摆一个「还原图标布局」按钮，点下去 Rust 报「没有可还原的快照」——"
+            "没存过快照也摆一个「还原图标布局」按钮，点下去报「没有可还原的快照」——"
             "用户视角就是「按钮是个摆设」，正是 V97 明确砍掉的那类项（宁缺毋滥）",
         ),
         (
-            "B 模式下仍然上报「整窗」命中区（原生图标看得见、点不动）",
-            "src/modules/desktop-grid/GridOverlay.tsx",
-            "      if (!iconControl) {\n        regions.push({\n          x: 0,\n          y: 0,",
-            "      if (true) {\n        regions.push({\n          x: 0,\n          y: 0,",
-            "「根画布 pointerEvents:none」只解决窗口**内部**的转发；真正决定「这个点归谁」的是"
-            "Rust 那条 25ms 命中轮询（`let want = interactive || cursor_hit(&win)`）。整窗命中区"
-            "还在 ⇒ 窗口一直吃点击 ⇒ 原生图标双击没反应、右键出的是我们的菜单 —— "
-            "B 方案唯一要保住的东西（原生行为一字不改）就没了",
+            "管理页又出现「接管开关」（撤掉接管的功能性反悔）",
+            "src/modules/desktop-grid/GridManagerView.tsx",
+            "  const [iconControl, setIconControl] = useState<IconControlStatus>(ICON_CONTROL_OFF);",
+            "  const toggleIconControl = async (): Promise<void> => {};\n"
+            "  const [iconControl, setIconControl] = useState<IconControlStatus>(ICON_CONTROL_OFF);",
+            "开关一回来，用户就有办法把摆位关掉 —— 而前端那套「自己画图标」的渲染已经删了 ⇒ "
+            "桌面上的图标不受我们管、格子里的图标又没人画，一排空框。"
+            "这正是 Step 4 删掉开关（而不是把开关默认关）的原因",
         ),
         (
-            "B 模式下仍把整块格子报成命中区（内容区吃掉了原生图标）",
-            "src/modules/desktop-grid/GridOverlay.tsx",
-            "            height: (BOX_HEADER_H + BOX_BORDER_H) * scaleFactor,",
-            "            height: box.height * scaleFactor,",
-            "内容区被报成命中区 ⇒ 光标一进格子（也就是一进图标那一整片区域）窗口就恢复吃点击"
-            "⇒ 格子里所有原生图标全部点不着 —— 而「格子里的图标点不着」正是用户会第一眼"
-            "看到、却最难归因的那种坏",
+            "命令注册又多了 `desktop_icon_control_set`",
+            "src-tauri/src/lib.rs",
+            "            commands::grid_icons::desktop_icon_control_get,",
+            "            commands::grid_icons::desktop_icon_control_set,\n"
+            "            commands::grid_icons::desktop_icon_control_get,",
+            "命令一旦注册，前端（或任何脚本）就能调它 —— Rust 侧那个「只恢复不隐藏」的实现"
+            "只是当下的克制，注册表上多一条就是一条能被接回去的线。守卫同时锁 lib.rs 与 "
+            "ipc.ts 两端，缺一条就是「后端还留着、前端随时能复活」",
         ),
         (
-            "B 模式镜像出现第二条写路（grid.rs 里再写一次）",
+            "启动装配被拿掉（间距没测到，格子高与 Explorer 间距脱钩）",
+            "src-tauri/src/lib.rs",
+            "            commands::grid_icons::ensure_native_layout(app.handle());",
+            "            let _ = app.handle();",
+            "装配那一步采集了 Explorer 的真实图标间距（`icon_spacing_y`）并关掉自动排列"
+            "（否则 `LVM_SETITEMPOSITION` 发出去会被立刻拉回）。没了它：格子高按默认值算 ⇒ "
+            "底板格子与图标各排各的，「格子套图标」当场对不上；而且没有任何报错",
+        ),
+        (
+            "迁移 v12 顺手清了还要用的键（把「唯一真源」一起删掉）",
+            "src-tauri/src/db/migrations.rs",
+            "DELETE FROM grid_meta WHERE key IN ('desktop_takeover', 'desktop_icons_hidden', 'icon_control');",
+            "DELETE FROM grid_meta WHERE key IN ('desktop_takeover', 'desktop_icons_hidden', 'icon_control', 'overlay_visible');",
+            "v12 的职责只有一个：清掉**接管时代**的键。`overlay_visible` 是显隐的唯一真源"
+            "（V79：谁写谁广播，前端 fail-closed 依赖它）、`icon_pos_backup` 是「还原图标布局」"
+            "的凭据、`fflags_backup` 是自动排列的原值 —— 顺手清掉其中之一，功能就静默少一块",
+        ),
+        # —— V102.2「整理失效」（2026-10-11）：摆位必须有 Rust 端这条腿 ——
+        (
+            "一键整理又不含摆位（底板重排了、图标原地不动）",
             "src-tauri/src/commands/grid.rs",
-            "fn icon_control_runtime(app: &AppHandle) -> bool {\n",
-            "fn icon_control_runtime(app: &AppHandle) -> bool {\n    set_icon_control_runtime(false);\n",
-            "V61 教训：一个跨线程状态两条写路就会互相覆盖（当时表现为「右键好使、左键不好使」）。"
-            "两条路各自读到的库值可能不同 ⇒「开关点了没反应」或「重启后开关自己变回来」",
+            "    crate::commands::grid_icons::apply_after_relayout(&app);\n    Ok(report)",
+            "    Ok(report)",
+            "2026-10-11 事故本体：摆位只靠前端 relayoutSoon 那条链，一键整理跑完格子重排、"
+            "图标却停在自动排列时代的密集网格位置 —— 用户看到的就是「整理失效」，且零报错",
+        ),
+        (
+            "增量重排又不含摆位（便签一加、图标就跟格子对不齐）",
+            "src-tauri/src/commands/grid.rs",
+            "        \"重排（不扫描·增量）：挪动 {} 个 / 按内容调整 {} 个尺寸 / 挂件归位 {} 个 / 空间不足 {} 个\",\n"
+            "        outcome.moved, outcome.resized, outcome.anchored, outcome.overflowed\n"
+            "    ));\n"
+            "    crate::commands::grid_icons::apply_after_relayout(&app);",
+            "        \"重排（不扫描·增量）：挪动 {} 个 / 按内容调整 {} 个尺寸 / 挂件归位 {} 个 / 空间不足 {} 个\",\n"
+            "        outcome.moved, outcome.resized, outcome.anchored, outcome.overflowed\n"
+            "    ));",
+            "grid_relayout 是挂件 / 新格子 / 拖动后最常走的重排路 —— 少这一脚，"
+            "每次增量重排都让底板与图标错开一点，攒几次就「看着不对却说不出哪次开始错的」",
+        ),
+        (
+            "启动装配的最后一脚摆位被拿掉（开机后图标停回密集网格）",
+            "src-tauri/src/commands/grid_icons.rs",
+            "    // ⑤ 启动即摆位：自动排列已经关掉，图标停在关掉那一刻的密集网格位置 ——\n"
+            "    //    不在这里摆一次，格子底板和图标就一直是两张皮，直到用户碰巧触发一次重排\n"
+            "    //    （2026-10-11「整理失效」事故的另一半根因）。\n"
+            "    apply_after_relayout(app);",
+            "    let _ = app;",
+            "关掉自动排列不会重新摆放图标 —— 它们停在关掉那一刻的位置。启动不摆位 ⇒ "
+            "从启动到第一次重排之间，桌面永远是「空格子底板 + 密集网格图标」两张皮",
+        ),
+        # —— V102.3（10-11 深夜）：摆位必须量化到 Explorer 槽位网格 ——
+        (
+            "摆位坐标不再量化（发任意像素 ⇒ Explorer 0.3s 内把图标吸到别处）",
+            "src-tauri/src/commands/grid_icons.rs",
+            "            let slot_x = quantize(screen_x, sx_phys, phase_x);\n"
+            "            let slot_y = quantize(screen_y, sy_phys, phase_y);\n"
+            "            placements.push((\n"
+            "                index,\n"
+            "                slot_x - client_x,\n"
+            "                slot_y - client_y,\n"
+            "            ));",
+            "            placements.push((\n"
+            "                index,\n"
+            "                screen_x as i32 - client_x,\n"
+            "                screen_y as i32 - client_y,\n"
+            "            ));",
+            "真机实测（Win11 125%）：Explorer 会把非槽位坐标 0.3s 内吸到最近槽位 —— "
+            "清 LVS_EX_SNAPTOGRID / FFlags / 自动排列都拦不住；表现就是用户 12:45 的截图："
+            "「格子底板在、图标全散成密集网格」",
+        ),
+        (
+            "槽位相位写死 0（不按现有图标反推 ⇒ 整体偏半格）",
+            "src-tauri/src/commands/grid_icons.rs",
+            "        Ok(pos) if !pos.is_empty() => (\n"
+            "            f64::from(pos[0].0.rem_euclid(sx_phys as i32)),\n"
+            "            f64::from(pos[0].1.rem_euclid(sy_phys as i32)),\n"
+            "        ),",
+            "        Ok(_pos) => (0.0, 0.0),",
+            "槽位网格有相位（本机实测 (27,2) 物理）——写死 0 会让整列图标偏到格子外面，"
+            "而「偏差一致」还会让它看起来不像 bug、像设计",
         ),
     ],
 }

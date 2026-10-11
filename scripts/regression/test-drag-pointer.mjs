@@ -177,8 +177,9 @@ ok('没过阈值 / 按过 Esc 一律不落点（V86：没取消的单击转为�
 ok('条目 onMouseDown 里先 stopPropagation 再 beginItemDrag',
   /event\.stopPropagation\(\);\s*\/\/[\s\S]{0,200}?beginItemDrag\(item, event\);/.test(overlay)
   || /beginItemDrag\(item, event\)/.test(overlay));
-ok('竖条条目 onMouseDown 里也走 beginLooseDrag',
-  /beginLooseDrag\(entry, event\)/.test(overlay));
+ok('「未归类」竖条的拖拽入口已随竖条一起退场（不再有渲染引用 beginLooseDrag）',
+  !/beginLooseDrag\(entry, event\)/.test(overlay),
+  '★ 这条是**反向**断言：Step 5 删了竖条，若哪天它又冒出来，说明有人把退场的代码加回来了');
 
 /* ================================================================== *
  * ④ 落点判定：入口优先于格子，判定函数复用同一套（不另起一套坐标换算）
@@ -238,25 +239,24 @@ ok('工作台的内容区也带 min-h-0 flex-1 overflow-y-auto（日历 + 快捷
   '少了 min-h-0，flex 子项的 min-height:auto 会把标题栏 / 按钮条顶出屏幕');
 ok('收纳格内容区已去掉 max-h-[60vh]（高度上限由盒子本身给）',
   !/max-h-\[60vh\]/.test(overlayCode));
-ok('左下「未归类」竖条自己滚（列数撞 4 列上限时，内容天然高于引擎给的区域）',
-  /"absolute grid content-start gap-1\.5 overflow-y-auto grid-scroll"/.test(overlayCode),
-  '少了它，多出来的行会溢出竖条、被根画布的可滚动溢出区收走 → 整个桌面又能滚了');
+ok('「未归类」竖条已退场 ⇒ 那条「自己滚」的容器随之消失（根画布仍不许滚）',
+  !/"absolute grid content-start gap-1\.5 overflow-y-auto grid-scroll"/.test(overlayCode),
+  'Step 5：原生图标一直看得见，竖条纯冗余；删了它，桌面层就只剩「定高容器」这一种滚动源');
+
 {
   // 扫描**每个**桌面层文件里所有「滚动的类名字符串」，除了白名单里的，都必须带 `min-h-0`。
   //
-  // 白名单里那一条是左侧「未归类」竖条：绝对定位 + 引擎给定的 `height`（定高），
-  // 不靠 flex 压缩，所以不需要 min-h-0。
+  // 白名单里的都是**绝对定位 + 定高**的容器（高度由 inset / max-h 定死，不靠 flex 压缩），
+  // 所以不需要 min-h-0。
   //
   // ⚠️ 判据是「漏掉的**恰好等于**白名单」，不是数个数 —— 数个数那种写法一有人
   // 合理地新增/删除一个滚动容器就会误报（V60 就撞上了：工作台的内容区从 GridOverlay
   // 搬进 DesktopWorkstation，GridOverlay 那份白名单里的快捷入口条目当场过期）。
   // 集合相等这个判据同时挡住了两边：新增了没带 min-h-0 的容器 → 漏掉的变多 → 红；
   // 白名单里的东西被改好或删掉了 → 漏掉的变少 → 也红（顺手删掉白名单项）。
-  // V63：白名单从「一条」扩成「一组」—— 判据没变（**绝对定位 + 定高**，不靠 flex
-  // 压缩，所以不需要 min-h-0），只是符合这条的容器多了一个。
+  // V63：白名单从「一条」扩成「一组」—— 判据没变。
+  // Step 5：原来第一条（左侧「未归类」竖条）**已随竖条一起删除**。
   const ABSOLUTE_SCROLLERS = new Set([
-    // 左侧「未归类」竖条：绝对定位 + 引擎给定的 `height`
-    '"absolute grid content-start gap-1.5 overflow-y-auto grid-scroll"',
     // V63 收纳区滚动容器：绝对定位 + `top-0 bottom-0`（统一网格放不下时在这里滚）。
     // 高度由上下 inset 定死，加 min-h-0 只是个无害的摆设，不如进白名单说清楚。
     '"absolute left-0 top-0 bottom-0 overflow-y-auto overflow-x-hidden"',
@@ -283,9 +283,10 @@ ok('左下「未归类」竖条自己滚（列数撞 4 列上限时，内容天�
   ok('盒内 / 工作台里漏掉 min-h-0 的滚动容器恰好只有白名单那几条（都是绝对定位定高）',
     leaked.length === 0,
     `多出来 ${leaked.length} 处：${leaked.join(' | ')}`);
-  ok('白名单没过期：「未归类」竖条仍在，且仍是那几条不带 min-h-0 的滚动容器之一',
-    count(overlayCode, /"absolute grid content-start gap-1\.5 overflow-y-auto grid-scroll"/g) === 1,
-    '竖条被改写成带 min-h-0 或删掉了 → 请同步删掉 ABSOLUTE_SCROLLERS 里的对应项');
+  ok('白名单没过期：「未归类」竖条已退场，白名单里也不许再留着它那条',
+    !count(overlayCode, /"absolute grid content-start gap-1\.5 overflow-y-auto grid-scroll"/g) &&
+      ![...ABSOLUTE_SCROLLERS].some((cls) => cls.includes('content-start gap-1.5')),
+    'Step 5 删了竖条 ⇒ 白名单必须同步删掉那一项（判据是「漏掉的恰好等于白名单」，留一项就永远对不上）');
   ok('带 min-h-0 的滚动容器总数没掉（盒子两种视图 + 便签 + 工作台）',
     withMin >= 4,
     `只有 ${withMin} 个 —— 有人的 min-h-0 掉了，或滚动容器被删了`);
@@ -820,11 +821,14 @@ ok('视图模式切换后写回 localStorage',
 {
   // —— ① 借出期间，接管自愈必须让路 ——
   {
+    // ★ Step 4（B 方案收尾）：接管自愈整体空转，「让路」这条已被**更强的性质**取代 ——
+    // 函数体里根本没有「藏图标」这个动作，所以不存在「借出期间要不要让路」的问题。
+    // 旧断言守的是「不让路 ⇒ 刚还回去的桌面 100ms 内又被藏起来」，现在连「藏」都没了。
     const at = rustCmdCode.indexOf('fn reassert_takeover(app: &AppHandle) {');
-    const body = at < 0 ? '' : rustCmdCode.slice(at, at + 400);
-    ok('接管自愈在「桌面借给系统」期间让路',
-      body.includes('handoff_active()') && body.includes('return;'),
-      '不让路 ⇒ 刚还回去的桌面 100ms 内又被藏起来，用户新建的文件夹照样看不见');
+    const body = at < 0 ? '' : rustCmdCode.slice(at, at + 600);
+    ok('接管自愈在 Step 4 起整体空转（体里没有 desktop_icons_apply，比「让路」更强）',
+      body !== '' && body.includes('TAKEOVER_FIXES.store(0') && !body.includes('desktop_icons_apply'),
+      '留个空壳 + 一条反向约束：谁把它改回「再去藏一次」，这条立刻变红');
   }
   {
     // 取 `hidden_ticks += 1;` 之前的那一小段：那里的自愈会把挂件窗 show 回来
@@ -937,15 +941,26 @@ ok('视图模式切换后写回 localStorage',
   }
 
   // —— ⑨ 系统图标（此电脑 / 回收站）的右键也必须交回原生 ——
+  //
+  // ★ Step 5：这条链路整个退场了。它当初要解决的问题是「未归类竖条里那些系统入口
+  //（此电脑 / 回收站 / 用户目录）右键弹的是我们复刻的菜单 —— 只有两行」
+  //（用户 09-27 贴图：「我的电脑都变成这样了」）。
+  //
+  // 竖条删掉之后，这些图标就是桌面上**原生**的图标，右键天然是 Explorer 给它们的
+  // 完整菜单 —— 问题从定义上消失，复刻那条路也不复存在。所以这里改成**反向**断言。
+  //
+  // ⚠️ 这两条是**结构反悔网**，**已知没有变异证据**（见 guard-mutation-check.py 里
+  // 本组的登记说明）：竖条退场时 `entry` 这个标识符一起没了，所以「退化」写不出来 ——
+  // 要触发它们只能人为往源码里塞一个已不存在的标识符，那样的变异不反映真实退化。
+  // 留着的价值是零成本地拦住「有人把老代码整段抄回来」；真要动作，也只能从
+  // `guides/` 里翻出竖条那一段 —— 那时这两条会立刻变红。
   {
-    ok('系统入口（此电脑 / 回收站）的右键也走原生 Shell 菜单',
-      !/!entry\.isSystem/.test(overlayCode)
-        && /shellContextMenu\(entry\.path, event\.shiftKey\)/.test(overlayCode),
-      '把系统图标排除在外 ⇒ 右键「此电脑」弹的是只有两行的复刻菜单'
-      + '（用户 09-27 贴图报的正是这个：「我的电脑都变成这样了」）');
-    ok('原生菜单拿不到时**才**回落到 Handy 自己的菜单（降级成兜底）',
-      /shellContextMenu\(entry\.path, event\.shiftKey\)[\s\S]{0,420}setMenuLoose\(/.test(overlayCode),
-      '原先是无条件回落 ⇒ 系统图标的右键永远到不了 Shell');
+    ok('「未归类」竖条退场 ⇒ 系统入口的右键天然归原生（复刻菜单那条路不复存在）',
+      !/!entry\.isSystem/.test(overlayCode),
+      '`!entry.isSystem` 是「把系统图标排除在原生菜单之外」的写法，随竖条一起删掉了');
+    ok('不再有「竖条条目右键 → 回落 setMenuLoose」的兜底',
+      !/shellContextMenu\(entry\.path, event\.shiftKey\)/.test(overlayCode),
+      '这条兜底的前提是「竖条里画着图标」；原生图标由 Explorer 画，它自己会给菜单');
   }
 
   // —— ⑩ 窗口几何：只由**主显示器实时决定**，不再持久化（V83）——

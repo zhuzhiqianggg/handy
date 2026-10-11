@@ -270,19 +270,24 @@ export interface TakeoverState {
 }
 
 /**
- * B 方案（不接管原生桌面）状态 —— `desktop_icon_control_*` 返回。
+ * 桌面整理运行状态 —— `desktop_icon_control_get` 返回。
+ *
+ * 工作方式是「不接管原生桌面」：原生图标照旧（由 Explorer 画、由它响应右键），
+ * Handy 只**遥控它的位置**，把它摆进各格子的网格。
  *
  * 与 [`TakeoverState`] 是**两条互斥的路线**：那是「藏掉原生图标、自己画」，
  * 这是「原生图标照旧，只遥控它的位置」。详见 `docs/04-review/PLAN-B-PHASED.md`。
+ *
+ * Step 4 起接管退场、B 方案成为唯一路径，所以这里**没有「开 / 关」**。
  */
 export interface IconControlStatus {
-  /** B 模式是否开启 */
+  /** 遥控链路是否生效。**Step 4 起恒为 true** —— 保留字段只为不动接口形状。 */
   enabled: boolean;
   /** 是否已关掉桌面「自动排列」（遥控的**前提**；没关掉的话摆位会被立刻拉回） */
   autoarrangeOff: boolean;
   /** 当前 `FFlags`（十进制，便于和备份对照） */
   fflags: number | null;
-  /** 开启前备份的 `FFlags`（关闭时按它还原） */
+  /** 进入整理前备份的 `FFlags`（「还原图标布局」时按它还原） */
   fflagsBackup: number | null;
   /** 桌面图标总数 */
   iconCount: number;
