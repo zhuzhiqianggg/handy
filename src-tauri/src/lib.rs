@@ -240,6 +240,7 @@ pub fn run() {
 
             // B 方案（不接管原生桌面）：图标遥控。默认关，开启后才动桌面图标位置。
             commands::grid_icons::desktop_icon_control_get,
+            commands::grid_icons::desktop_icon_control_set,
             commands::grid_icons::desktop_icon_layout_apply,
             commands::grid_icons::desktop_icon_layout_restore,
             // V38：桌面接管偏好（整理后隐藏原生图标，由格子代管桌面呈现）
@@ -313,11 +314,6 @@ pub fn run() {
             // `restore_overlay_if_visible` 之前：如果用户开了接管偏好，紧接着的
             // 恢复格子层会按偏好重新隐藏，两者顺序不能反。
             commands::grid::heal_desktop_icons(app.handle());
-            // ★ B 方案 Step 4（2026-10-10 收尾）：**接管退场，桌面整理改由「遥控原生图标」实现**。
-            // 这里做一次幂等装配：快照图标位置（供「还原」）+ 备份并关掉「自动排列 / 对齐网格」
-            // + 记下 Explorer 的图标间距（布局引擎据此把格子高对齐到原生图标网格）。
-            // 必须在 `restore_overlay_if_visible` 之前 —— 那一步会让前端重排，而重排要读间距。
-            commands::grid_icons::ensure_native_layout(app.handle());
             // V47：装机即把「打开 Handy 桌面整理」注册进桌面空白处右键菜单。
             // 必须在 db::init 之后（要用 grid_meta 读用户的关闭偏好）；
             // 与格子层显示与否无关，所以放在 `restore_overlay_if_visible` 之前。

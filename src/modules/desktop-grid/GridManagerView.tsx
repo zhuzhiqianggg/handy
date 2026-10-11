@@ -120,7 +120,7 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
     }
   }, []);
 
-  /** 桌面整理运行状态（图标数 / 间距 / 快照条数；读不到就给安全默认）。 */
+  /** B 模式状态（读不到就给安全默认 = 关）。 */
   const syncIconControl = useCallback(async (): Promise<void> => {
     try {
       setIconControl(await ipc.desktopIconControlGet());
@@ -130,22 +130,62 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
   }, []);
 
   /**
-   * 还原到「进入桌面整理之前」的图标布局（决策 2：首次进入存快照 + 提供手动还原）。
+   * 开 / 关 B 模式（不接管原生桌面）。
+   *
+   * 为什么必须二次确认：开启会**写桌面图标位置**并**改注册表里的「自动排列」开关**，
+   * 且会立刻把图标按格子重排一次。用户不点确认，绝不动他的桌面。
+   */
+  const toggleIconControl = useCallback(async (): Promise<void> => {
+    const next = !iconControl.enabled;
+    if (next) {
+      const ok = await confirmAction(
+        '改用「不接管原生桌面」模式？\n\n' +
+          '· 桌面图标**仍由系统绘制**：右键菜单、新建、改名、Win+D 全部是原生的；\n' +
+          '· Handy 只把图标**遥控**摆进各个格子的网格里；\n' +
+          '· 需要先关掉桌面的「自动排列 / 对齐网格」（退出时会还原原值）；\n' +
+          '· 会先给你的当前图标布局**存一份快照**，随时可一键还原；\n' +
+          '· 文件本身**一个字节都不会动**。\n\n确定开启？',
+      );
+      if (!ok) {
+        return;
+      }
+    }
+    setBusy(true);
+    try {
+      const status = await ipc.desktopIconControlSet(next);
+      setIconControl(status);
+      if (next && status.unmatched > 0) {
+        toast.success('已改用原生桌面', {
+          description: `摆位 ${status.placed} 个；有 ${status.unmatched} 个条目没能对上桌面图标（不会丢文件）`,
+        });
+      } else {
+        toast.success(next ? '已改用原生桌面（图标由系统绘制）' : '已退出原生桌面模式');
+      }
+      await refresh();
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }, [iconControl.enabled, refresh]);
+
+  /**
+   * 还原到「开启 B 模式之前」的图标布局（决策 2：首次接管存快照 + 提供手动还原）。
    *
    * 为什么必须给它一个显式入口：`desktop_icon_layout_apply` 会按格子重排图标，而
-   * 用户第一次进入时那份「原始布局」是我们**替他**存下来的、**唯一**一份（只在
-   * `is_none()` 时写，反复进入不会覆盖）。没有还原入口，那份快照就只是躺在库里的一串
-   * 数字 —— 而「随时能一键还原」正是这套「我们会写你桌面图标位置」的正当性来源。
+   * 用户第一次开启时那份「原始布局」是我们**替他**存下来的、**唯一**一份（开启时
+   * 只在 `is_none()` 时写，反复开关不会覆盖）。没有还原入口，那份快照就只是躺在
+   * 库里的一串数字 —— 而「随时能一键还原」正是用户敢点这个开关的前提。
    *
-   * Step 4 起位置与「自动排列」偏好**绑定还原**（单独恢复偏好会立刻把图标打散、
-   * 让「保留位置」这句承诺作废），所以这一个按钮做两件事，见 Rust `desktop_icon_layout_restore`。
+   * 注意：还原**不动** B 模式开关。用户可能只想看一眼原样，再让我们摆回去；
+   * 顺手替他关掉开关反而是另一种「不问就改」。
    */
   const restoreIconLayout = useCallback(async (): Promise<void> => {
     const ok = await confirmAction(
-      '把桌面图标还原成「进入桌面整理之前」的那份布局？\n\n' +
+      '把桌面图标还原成「开启原生桌面模式之前」的那份布局？\n\n' +
         `· 按快照里的原始坐标重摆 ${iconControl.snapshot} 个图标；\n` +
-        '· 同时把「自动排列 / 对齐网格」恢复成进入前的那份偏好；\n' +
-        '· 快照之后才新增 / 删除过的图标不在里面，位置保持不变。\n\n确定还原？',
+        '· 快照之后才新增 / 删除过的图标不在里面，位置保持不变；\n' +
+        '· 开关状态不变，随时可以再摆回来。\n\n确定还原？',
     );
     if (!ok) {
       return;
@@ -154,7 +194,7 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
     try {
       const status = await ipc.desktopIconLayoutRestore();
       setIconControl(status);
-      toast.success(`已还原 ${status.placed} 个图标的原始位置与自动排列偏好`);
+      toast.success(`已还原 ${status.placed} 个图标的原始位置`);
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : String(err));
     } finally {
@@ -590,18 +630,22 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
         {overlayVisible ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
         {overlayVisible ? '隐藏格子' : '显示格子'}
       </Button>
-      {/* 桌面整理的工作方式（V102 起 = B 方案；**Step 4 起是唯一模式，没有开关**）。
-          不接管原生桌面，只遥控图标位置 —— 图标始终由 Explorer 画、由它响应右键，
-          我们只把登记过的条目摆进各格子的网格。
-          为什么不再给开关：关掉它既没有原生摆位、也没有前端图标（那套渲染已删），
-          格子会变成一排空框。所以这里只做**状态告知**。 */}
-      <span
-        className="inline-flex h-8 select-none items-center gap-1.5 rounded-md border border-white/10 bg-white/[0.06] px-2.5 text-xs font-medium text-neutral-200"
-        title="桌面图标始终由系统绘制（右键 / 新建 / 改名 / Win+D 全是原生的）；Handy 只把它们摆进各格子的网格。文件本身一个字节都不会动。"
+      {/* B 方案开关（V102）：不接管原生桌面，只遥控图标位置。
+          会写桌面图标位置与注册表偏好，所以是**显式开关 + 二次确认**，不是默认行为。 */}
+      <Button
+        variant={iconControl.enabled ? 'default' : 'outline'}
+        size="sm"
+        onClick={toggleIconControl}
+        disabled={busy}
+        title={
+          iconControl.enabled
+            ? '当前：原生图标照旧（右键 / 新建 / 改名全原生），只由 Handy 遥控位置。点此关闭（自动排列 / 对齐网格还原成原值；图标位置会保留，要还原位置请用右边那个按钮）'
+            : '改用「不接管原生桌面」：原生图标照旧，Handy 只把图标摆进各格子的网格'
+        }
       >
         <MousePointer2 className="h-3.5 w-3.5" />
-        原生桌面 · 图标由系统绘制
-      </span>
+        {iconControl.enabled ? '已用原生桌面' : '用原生桌面'}
+      </Button>
       {/* 快照还原入口（决策 2）：只在**确实存过快照**时才出现 ——
           没存过还摆一个点了报错的按钮，比不摆更糟。 */}
       {iconControl.snapshot > 0 && (
@@ -610,7 +654,7 @@ export function GridManagerView({ embedded = false }: GridManagerViewProps = {})
           size="sm"
           onClick={restoreIconLayout}
           disabled={busy}
-          title={`按「进入整理前」的快照还原图标原始位置，并把「自动排列 / 对齐网格」恢复成原值（快照 ${iconControl.snapshot} 条）`}
+          title={`按「开启前」的快照还原图标原始位置（快照 ${iconControl.snapshot} 条）`}
         >
           <RotateCcw className="h-3.5 w-3.5" />
           还原图标布局

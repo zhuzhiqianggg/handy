@@ -205,27 +205,6 @@ DELETE FROM grid_items WHERE box_id IN (SELECT id FROM grid_boxes WHERE kind = '
 DELETE FROM grid_boxes WHERE kind = 'calendar';
 ";
 
-/// v12：**接管时代的三个键退场**（B 方案 Step 4，2026-10-10 收尾）。
-///
-/// `desktop_takeover`（偏好：要不要把原生图标藏起来、由格子层接管呈现）、
-/// `desktop_icons_hidden`（事实：此刻藏没藏）、`icon_control`（B 方案的临时开关）都属于
-/// 「谁拥有桌面图标」这个已经被回答的问题。B 方案把归属交还 Explorer 之后，三者**都没有
-/// 意义了** —— 图标永远可见，遥控恒生效。
-///
-/// 留着它们的危害很实在：老库里 `desktop_takeover='1'` 会让启动装配在语义上「还在考虑
-/// 要不要藏」，而代码里那条路已经删空 —— 一处不再被读的陈旧偏好，正是「删掉的东西又被
-/// 加回来」的温床（项目里已有先例，见 CONVENTIONS 的 V96 条）。
-///
-/// **只清这三个键**：`overlay_visible`（桌面整理开没开，唯一真源）、`icon_pos_backup`
-/// （「还原图标布局」的凭据）、`fflags_backup`（自动排列偏好原值）**一个字都不动**。
-///
-/// 旧图标若正被藏着，由启动期的 `heal_desktop_icons` 按**实际可见性**兜底还原
-/// （它本来就做双重检查：标记为 hidden **或** 图标实际不可见时都恢复）—— 所以这里
-/// 清标记不会让用户卡在「图标不见了」的状态。
-pub const V12_DROP_TAKEOVER_KEYS: &str = "
-DELETE FROM grid_meta WHERE key IN ('desktop_takeover', 'desktop_icons_hidden', 'icon_control');
-";
-
 /// 全部迁移：(版本号, SQL)。新增结构在**末尾追加**；移除历史结构可追加 DROP 迁移。
 pub const MIGRATIONS: &[(i64, &str)] = &[
     (1, V1_SCHEMA),
@@ -239,7 +218,6 @@ pub const MIGRATIONS: &[(i64, &str)] = &[
     (9, V9_GRID_CATEGORY),
     (10, V10_GRID_MANUAL),
     (11, V11_GRID_DROP_CALENDAR),
-    (12, V12_DROP_TAKEOVER_KEYS),
 ];
 
 /// 当前毫秒时间戳（用于 `applied_at`）。

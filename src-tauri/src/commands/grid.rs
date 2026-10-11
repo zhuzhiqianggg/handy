@@ -2441,15 +2441,35 @@ pub fn restore_desktop_icons(app: &AppHandle) {
     grid_log("应用退出 / 收起：已把系统桌面图标还给系统");
 }
 
-// —— B 模式内存镜像已删除（Step 4，2026-10-10）——
+// —— B 模式（不接管原生桌面）的内存镜像 ——
 //
-// 这里原本有一个 `ICON_CONTROL_ON: AtomicU8`，把「B 模式开没开」镜像给 25ms 的轮询线程，
-// 免得每拍都开一次 SQLite。**B 方案成为唯一模式之后它失去意义**：不再有「开/关」这个
-// 会变的量，也就不需要镜像。判断「有没有开」的地方（[`takeover_icons`] / [`reassert_takeover`]
-// 的守卫）随接管一起消失，见 `docs/04-review/PLAN-B-PHASED.md` Step 4。
-//
-// 留这段注释是为了让后来者知道**这里曾经有什么、为什么没了** —— 项目里已经有过
-// 「删掉的东西被重新加回来」的先例（见 CONVENTIONS 的 V96 条）。
+// 轮询线程每 25ms 跑一拍，绝不能每次都开一个 SQLite 连接，所以把「B 模式是否开启」
+// 镜像成一个原子。三态：`255` = 还没从库里读过（懒加载一次），`1` / `0` = 已知。
+// 写库的地方（`grid_icons::desktop_icon_control_set`）必须同步调 [`set_icon_control_runtime`]，
+// 免得出现「库里开了、内存里还没开」的窗口期。
+
+/// [`icon_control_runtime`] 的「未知」哨兵。
+const ICON_CONTROL_UNKNOWN: u8 = 255;
+
+/// B 模式开关的内存镜像（见上方说明）。
+static ICON_CONTROL_ON: AtomicU8 = AtomicU8::new(ICON_CONTROL_UNKNOWN);
+
+/// 写库的路径同时更新镜像（唯一入口，避免两处记账不一致）。
+pub(crate) fn set_icon_control_runtime(on: bool) {
+    ICON_CONTROL_ON.store(u8::from(on), Ordering::Relaxed);
+}
+
+/// B 模式是否开着（首次调用时从 `grid_meta` 懒加载一次）。
+fn icon_control_runtime(app: &AppHandle) -> bool {
+    match ICON_CONTROL_ON.load(Ordering::Relaxed) {
+        ICON_CONTROL_UNKNOWN => {
+            let on = connect(app).ok().and_then(|c| b_icon_arg(&c)).is_some();
+            set_icon_control_runtime(on);
+            on
+        }
+        value => value == 1,
+    }
+}
 
 /// 启动时自愈：上次是被强杀 / 崩溃（图标还藏着），这里恢复并清标记。
 /// V55：双重检查 —— 标记为 hidden **或** 图标实际不可见时都恢复。
@@ -2492,23 +2512,14 @@ pub async fn grid_attach_set(app: AppHandle, mode: String) -> Result<(), String>
     Ok(())
 }
 
-/// ~~隐藏 / 恢复桌面系统图标~~ —— **B 方案 Step 4 起「隐藏」已退场**。
-///
-/// 这个命令是 V30 时代的「一次性藏一下图标」开关。接管整体退场后**没有任何合法路径需要
-/// 藏图标**，所以它被降级成「确保原生图标可见」：`hidden` 参数**被忽略**，只做恢复。
-///
-/// # 为什么不留着「能藏」
-///
-/// 一个还能藏图标的入口，就是一条能绕开 [`takeover_icons`] 那条「恒不隐藏」约束的路 ——
-/// V45 装机实测的「桌面全空」事故随时能从这儿回来。**能力删掉比约束住更可靠**：
-/// 约束靠人记得住，删掉不靠任何人的记忆。
-///
-/// 保留命令名只为不改前端接口形状；它现在是幂等的「确保图标可见」。
+/// 隐藏 / 恢复桌面系统图标。返回「本机是否支持」（false = 没找到桌面图标视图）。
 #[tauri::command]
 pub async fn grid_desktop_icons_set(app: AppHandle, hidden: bool) -> Result<bool, String> {
-    let _ = hidden;
-    let _ = write_icons_hidden(&app, false);
-    Ok(desktop_icons_apply(false).unwrap_or(false))
+    let supported = desktop_icons_apply(hidden)?;
+    if supported {
+        write_icons_hidden(&app, hidden)?;
+    }
+    Ok(supported)
 }
 
 /// 查询桌面系统图标当前是否可见。
@@ -2966,29 +2977,50 @@ static BOUNDS_RETRY_AT: AtomicU64 = AtomicU64::new(0);
 /// 30 秒足够区分「瞬态」与「真的收起了」：真收起/退出走 [`grid_overlay_hide`] 的立即归还。
 const OVERLAY_AWAY_GRACE_SECS: u64 = 30;
 
-/// **接管已退场（B 方案 Step 4，2026-10-10 收尾）—— 桌面图标永远归 Explorer。**
+/// 桌面接管开关（对称）：格子层贴上桌面时隐藏系统图标，收起时恢复。
 ///
-/// V30–V101 这里会 `desktop_icons_apply(true)` 把 `SysListView32` 整个藏掉，再靠 Z 序锚定 /
-/// 驻留自愈 / Win+D 还原 / 接管自检一整套机制把它按住。**那套机制本身在持续生产 bug**：
-/// V42–V101 共 60 批次改动几乎全耗在这一个模块上，而每一批都在补上上批机制自己造出来的洞
-/// （藏了 → 被系统恢复 → 自检再藏 → 与第三方桌面工具打架 → 保险丝退避……）。
+/// 仅在贴桌模式有意义（普通窗口模式下系统图标本来就看得见，无需也不该去动）。
+/// 隐藏失败不阻断显示（例如桌面图标视图已被第三方桌面工具接管时找不到句柄），
+/// 只留日志 —— 格子层照样可用，只是出现「格子 + 原图标」双层。
 ///
-/// B 方案把「谁拥有图标」交还 Explorer 之后，这类问题**在定义上不存在** —— 图标由 Explorer
-/// 画、由 Explorer 响应右键，我们只遥控坐标（[`crate::commands::grid_icons`]）。
-///
-/// 于是这个函数只剩一个兜底职责：把**历史版本**藏起来过的图标还回去（老库
-/// `desktop_icons_hidden=1`，或强杀留下的残留）。`hidden` 参数保留只为少动调用点 —— **恒不隐藏**。
-///
-/// 返回恒为 `false`（「此刻图标并没有被我们藏起来」这个事实；前端据此显示徽标）。
+/// 返回「此刻图标是否确实被我们藏起来了」（V38 起把结果透给调用方，让 UI 能说实话）。
 fn takeover_icons(app: &AppHandle, hidden: bool) -> bool {
-    let _ = hidden;
-    if ICONS_TAKEN.swap(false, Ordering::Relaxed) {
-        let _ = desktop_icons_apply(false);
-        grid_log("B 方案：把历史上被接管的桌面图标还给系统");
+    // ★★ B 模式（不接管原生桌面）：图标归 Explorer 管，**绝不隐藏**。
+    // 见 `docs/04-review/PLAN-B-PHASED.md` Step 4 —— 「谁拥有图标」是这条路线的根，
+    // 藏起来 = 又回到「自己扮 Explorer」那一整套 Z 序 / Win+D / 自愈的坑里。
+    if hidden && icon_control_runtime(app) {
+        return false;
     }
-    // 老库残留的标记一并抹掉（`heal_desktop_icons` 之外的第二道保险）。幂等 upsert，开销可忽略。
-    let _ = write_icons_hidden(app, false);
-    false
+    let applied = matches!(desktop_icons_apply(hidden), Ok(true));
+    match (hidden, applied) {
+        (true, true) => {
+            let _ = write_icons_hidden(app, true);
+        }
+        (true, false) => {
+            grid_log("未找到系统桌面图标视图，跳过隐藏（可能已被第三方桌面工具接管）");
+        }
+        (false, false) => {}
+        (false, true) => {
+            let _ = write_icons_hidden(app, false);
+        }
+    }
+    // 只有真正把图标藏起来才标记代管；恢复或失败一律解除
+    let taken = applied && hidden;
+    let was = ICONS_TAKEN.swap(taken, Ordering::Relaxed);
+    // V40：**状态真变化才落盘一行**（含句柄，便于下次拿它跟探针输出对照）。
+    // 以前这里只在失败时写日志，「图标什么时候被谁还回去的」在 handy.log 里查不到，
+    // 用户反馈「源图标还在」时只能靠猜 —— 这是 V38/V39 两轮都没查出根因的直接原因。
+    if was != taken {
+        match (taken, applied) {
+            (true, _) => grid_log(&format!(
+                "接管桌面图标：已隐藏系统桌面图标视图（view={:?}）",
+                desktop_icon_view()
+            )),
+            (false, true) => grid_log("交还系统桌面图标：原生图标已恢复显示"),
+            (false, false) => {}
+        }
+    }
+    taken
 }
 
 /// 兜底恢复：挂件层已不可见但图标仍在代管 → 立即还给系统（轮询线程调用）。
@@ -3003,30 +3035,74 @@ fn release_icons_if_taken(app: &AppHandle) {
     }
 }
 
-/// ~~**接管自检**（V39）~~ —— **B 方案 Step 4 起整体失效，保留函数壳仅为少动调用点。**
+/// **接管自检**（V39）：偏好要求接管、图标却露出来了 → 重新隐藏。
 ///
-/// # 它当年为什么要存在（留作历史课）
+/// # 为什么必须有这一步（用户反馈「源图标还在」的真根因）
 ///
 /// 轮询线程里有一条兜底：挂件窗一旦不可见就 [`release_icons_if_taken`]（把图标还给系统）。
-/// 那是 V30.1 的教训（最小化 Handy 后桌面空着没人管），本身没错 —— **错在还回去之后
-/// 没有任何路径再收回来**：用户按一次 Win+D，挂件窗短暂不可见 → 图标归还 → 此后永远是
-/// 「格子 + 原图标」两份内容，正是用户截图里那句「源图标还在」。所以补了这条对称的自检。
+/// 这是 V30.1 的教训（最小化 Handy 后桌面空着没人管），本身没错 —— **错在还回去之后
+/// 没有任何路径再收回来**：用户按一次 Win+D（或点「显示桌面」、Explorer 重建、Z 序纠正
+/// 的瞬间），挂件窗短暂不可见 → 图标归还 → 此后永远是「格子 + 原图标」两份内容，
+/// 正是用户截图里那句「源图标还在」。
 ///
-/// # 为什么现在整个删掉
-///
-/// 这条自检的存在前提是「我们拥有图标」—— 只有我们藏了它，才谈得上「被系统放回来了、
-/// 赶紧再藏」。B 方案把图标交还 Explorer 之后，**Win+D 把图标显示出来本来就是正确状态**，
-/// 没有任何需要纠正的东西。自检本身连同它维护的那套保险丝/退避，都是自造的问题。
+/// 所以这里补上对称的另一半：只要偏好还是「接管」，就周期性确认图标确实被藏住了，
+/// 没藏住就重新藏。与 Z 序自检同节奏（[`REASSERT_INTERVAL_MS`]）、同样带保险丝。
 fn reassert_takeover(app: &AppHandle) {
-    // ★★ B 方案 Step 4：这条自检整个不适用了。
+    // ★★ B 模式：桌面图标本来就不该被藏，这条自检整个不适用
+    // （否则会每 3 秒把用户的原生图标藏一次 —— 正是 V45 那类「桌面全空」事故）。
+    if icon_control_runtime(app) {
+        TAKEOVER_FIXES.store(0, Ordering::Relaxed);
+        return;
+    }
+    // V81：桌面被借给系统期间（菜单开着），「原生图标露着」是我们主动造成的，
+    // 不是被系统恢复 —— 这里若照常纠正，就会把菜单期间新建的文件再一次藏进暗处。
+    if handoff_active() {
+        return;
+    }
+    if !read_takeover(app) {
+        // 用户没选接管：清零计数，下次开启接管时从干净状态开始
+        TAKEOVER_FIXES.store(0, Ordering::Relaxed);
+        return;
+    }
+    // —— 不变量 I1（见 docs/02-architecture/DESKTOP-LAYER.md §2.3）：`Off` 态绝不藏图标 ——
     //
-    // 它存在的唯一理由是「接管偏好为开、图标却被系统放回来了 → 赶紧重新藏回去」。
-    // 接管在行为上已作废（[`takeover_icons`] 恒不隐藏），于是这里没有任何事可做：
-    // 图标归 Explorer，被 Win+D 重新显示本来就是正确状态，不需要我们纠正。
-    //
-    // 保留函数壳只为少动轮询线程里的 4 个调用点；真正的清理在 Step 6a。
-    let _ = app;
-    TAKEOVER_FIXES.store(0, Ordering::Relaxed);
+    // V45 装机实测踩到的空桌面：用户点工具栏「隐藏」→ `grid_overlay_hide` 交还图标，
+    // 但**接管偏好**（`META_KEY_TAKEOVER`）仍然是「开」，于是 3 秒后这里又把图标藏回去。
+    // 用户面对的是「格子内容已收起 + 原生图标也被藏」= 一个什么都没有的桌面
+    // （用户原话：「桌面全都消失了」）。所以这里必须先读唯一真源 `overlay_visible`。
+    if !read_overlay_visible(app) {
+        TAKEOVER_FIXES.store(0, Ordering::Relaxed);
+        // 万一有路径漏了交还，这里兜底还给系统 —— `Off` 态的原生图标必须在。
+        release_icons_if_taken(app);
+        return;
+    }
+    if ICONS_TAKEN.load(Ordering::Relaxed) && !desktop_icons_visible() {
+        // 已经藏好了：正常态
+        TAKEOVER_FIXES.store(0, Ordering::Relaxed);
+        return;
+    }
+    // 保险丝：连续失败到顶了 → 退避期内不再尝试（避免与第三方桌面工具互相打架）
+    let now = unix_secs();
+    if TAKEOVER_RETRY_AT.load(Ordering::Relaxed) > now {
+        return;
+    }
+    if takeover_icons(app, true) {
+        TAKEOVER_FIXES.store(0, Ordering::Relaxed);
+        // 限流写日志：正常态不刷屏，但保留「确实被系统恢复过」这条证据
+        if now.saturating_sub(LAST_TAKEOVER_LOG_AT.load(Ordering::Relaxed))
+            >= TAKEOVER_LOG_INTERVAL_SECS
+        {
+            LAST_TAKEOVER_LOG_AT.store(now, Ordering::Relaxed);
+            grid_log("桌面图标曾被系统恢复（多为 Win+D / 显示桌面 / Explorer 重建），已重新接管");
+        }
+        return;
+    }
+    let fixes = TAKEOVER_FIXES.fetch_add(1, Ordering::Relaxed) + 1;
+    if fixes >= TAKEOVER_MAX_FIXES {
+        TAKEOVER_RETRY_AT.store(now + TAKEOVER_BACKOFF_SECS, Ordering::Relaxed);
+        TAKEOVER_FIXES.store(0, Ordering::Relaxed);
+        grid_log("连续多次无法隐藏系统桌面图标（多半被第三方桌面工具接管），暂停自动接管 5 分钟");
+    }
 }
 
 /// 创建（幂等复用）并显示挂件窗。
@@ -3158,9 +3234,12 @@ fn show_launcher_only(app: &AppHandle) -> Result<(), String> {
 /// 三条路径都会调它：新建挂件窗、复用已有窗、应用启动恢复格子层 —— 于是
 /// 「整理过 → 图标藏起来」这个状态在收起再显示、重启之后都保持一致。
 fn apply_takeover_pref(app: &AppHandle) {
-    // ★★ B 方案 Step 4：接管在行为上已作废，这条偏好不再驱动任何东西。
-    // 现在它只剩一个职责：确保原生图标是**可见**的（历史残留的清场）。
-    let _ = takeover_icons(app, false);
+    if read_takeover(app) {
+        let taken = takeover_icons(app, true);
+        if !taken {
+            grid_log("接管偏好为开，但本机隐藏桌面图标失败（格子与原图标将同时显示）");
+        }
+    }
 }
 
 /// 读「挂件层是否应处于显示状态」（pub：供 `lib.rs` 启动期判断「桌面是否即主界面」）。
@@ -4236,19 +4315,22 @@ pub(crate) fn b_icon_arg_for_spacing(spacing_y: i32) -> i64 {
     (i64::from(spacing_y) - BOX_CELL_EXTRA_H).max(16)
 }
 
-/// 从 `grid_meta` 读 B 模式图标基准（从未测到间距时返回 `None` = 用调用方的默认 `icon`）。
-///
-/// ★ Step 4 起**不再看 `icon_control` 开关** —— B 方案是唯一模式，只差「间距测到没有」。
-/// 间距由 [`crate::commands::grid_icons::ensure_native_layout`] 在启动期与每次摆位时写入。
+/// 从 `grid_meta` 读 B 模式图标基准（未开启 / 没测到间距时返回 `None` = 保持原行为）。
 pub(crate) fn b_icon_arg(conn: &Connection) -> Option<i64> {
-    conn.query_row(
-        "SELECT value FROM grid_meta WHERE key = 'icon_spacing_y'",
-        [],
-        |row| row.get::<_, String>(0),
-    )
-    .ok()
-    .and_then(|v| v.parse::<i32>().ok())
-    .map(b_icon_arg_for_spacing)
+    let read = |key: &str| -> Option<String> {
+        conn.query_row(
+            "SELECT value FROM grid_meta WHERE key = ?1",
+            params![key],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+    };
+    if read("icon_control").as_deref() != Some("1") {
+        return None;
+    }
+    read("icon_spacing_y")
+        .and_then(|v| v.parse::<i32>().ok())
+        .map(b_icon_arg_for_spacing)
 }
 
 /// 格子内容区的图标网格（B 模式）。字段与 [`crate::commands::grid_icons`] 的摆位共用。
@@ -6131,18 +6213,12 @@ fn layout_all_boxes_with(
     let mut outcome = LayoutOutcome::default();
     let avail_h = (work_h - 2 * ARRANGE_MARGIN).max(MIN_BOX_H);
 
-    // —— ⓪ 「未归类」竖条已退场（B 方案 Step 5，2026-10-10）——
-    //
-    // V41–V101 这里要为左侧那条「未归类」竖条预留一列（`loose_strip_rect` 的右沿 + 一道缝），
-    // 收纳区与挂件区都从它右边开始。**竖条存在的唯一前提是「原生图标被我们藏起来了」**：
-    // 不接管之后原生图标一直在桌面上看得见，竖条就变成纯冗余 —— 而且是一条**白占一列宽**
-    // 的冗余（前端不画它，那列就是空白，格子整体被往右挤）。
-    //
-    // 所以布局不再为它留位：`min_x` 直接就是左边界。`loose_count` 参数**保留**（调用方仍按
-    // 原口径传、单测仍可注入），但不再影响落位 —— 留参数是为了让这次改动保持「零签名变更」，
-    // 前端那条竖条的代码清理在 Step 6a。
-    let _ = loose_count;
-    let min_x = ARRANGE_MARGIN;
+    // —— ⓪ 左侧「未归类」竖条：收纳区与挂件区都不得越过它的右沿 ——
+    let strip = loose_strip_rect(work_w, work_h, loose_count, icon);
+    let min_x = match strip {
+        Some(s) => s.rect.x + s.rect.w + ARRANGE_GAP_X,
+        None => ARRANGE_MARGIN,
+    };
 
     // —— ① 挂件按列自右向左落位（日历列 → 便签列 → 其他）——
     //
@@ -6884,14 +6960,26 @@ pub async fn grid_auto_arrange(
     let (work_w, work_h) = layout_work_size(&app);
     let mut report = auto_arrange_inner(&conn, &roots, work_w, work_h)?;
 
-    // —— B 方案 Step 4（2026-10-10 收尾）：这里**不再动系统桌面图标** ——
+    // 「整理桌面」= 用户明确要求桌面由格子呈现 ⇒ **一律按接管偏好执行**。
     //
-    // V38–V39 这一段是「点整理 = 顺手把原生图标藏起来，由格子层接管呈现」。B 方案把图标的
-    // 归属交还 Explorer 之后，「藏图标」这件事不存在了。整理只剩「扫描 + 登记 + 重排」三件事，
-    // 摆位由 [`crate::commands::grid_icons::desktop_icon_layout_apply`] 负责（前端在重排后调）。
+    // ⚠️ V38–V39 这里写的是「只有真的往里登记了东西才接管」，本意是「空跑一次不该顺手把
+    // 用户的图标藏了」。但用户的桌面早就全部登记过了（每次整理都是「登记 0 项」），
+    // 于是**点整理根本不接管** —— 这正是他反馈「桌面原图标还存在呢？」的代码路径。
     //
-    // `icons_hidden` 恒 false —— 它是前端徽标要显示的事实：**图标始终在**。
-    report.icons_hidden = false;
+    // 但有一道闸必须留着：**挂件层没在显示时不许藏图标**。否则（用户在管理页点整理、
+    // 而格子层是收起状态）会把桌面图标藏掉却没有任何格子顶上来，桌面直接变空白 ——
+    // 那是 V30.1 踩过的坑，比「两份内容」严重得多。
+    if read_overlay_visible(&app) {
+        if let Err(err) = write_takeover(&app, true) {
+            grid_log(&format!("保存桌面接管偏好失败：{err}"));
+        }
+        report.icons_hidden = takeover_icons(&app, true);
+        if !report.icons_hidden {
+            grid_log("接管桌面失败（未找到系统桌面图标视图），格子与原生图标将同时显示");
+        }
+    } else {
+        grid_log("挂件层未显示，本次整理不改动系统桌面图标（先显示格子再整理才会接管）");
+    }
     Ok(report)
 }
 
@@ -10279,45 +10367,40 @@ mod layout_pipeline_tests {
     }
 
     #[test]
-    fn content_boxes_ignore_the_retired_loose_strip() {
-        // ★ Step 5（B 方案收尾，2026-10-10）：左侧那条「未归类」竖条**已退场**。
-        //
-        // 它当年的存在前提是「原生图标被我们藏起来了，得有个地方展示没登记的文件」。
-        // B 方案把图标交还 Explorer 之后，原生图标一直看得见，竖条变成纯冗余 —— 而且是
-        // **白占一列宽**的冗余：布局为它预留 `strip.right + ARRANGE_GAP_X`，那列却没东西画，
-        // 所有格子被整体往右挤。
-        //
-        // 这条测试守**新不变量**：布局的落位**不受「未归类条目数」影响** —— 注入 0 与注入 30
-        // 必须算出逐像素相同的坐标。
-        //
-        // ⚠️ 旧版这条叫 `content_boxes_stay_clear_of_the_left_loose_strip`，断言「格子不压
-        // 竖条」。改完之后它**照样会通过**，但理由是错的（V85 右锚定让格子天然贴右，左半屏
-        // 本来就空着）—— 那正是「失败场景下也会成立的断言」，必须换掉而不是留着。
-        let (path_a, conn_a) = temp_conn("strip-a");
-        seed_real_boxes(&conn_a);
-        layout_all_boxes_with(&conn_a, WORK_W, WORK_H, ICON, 0, LayoutMode::Full).expect("排布失败");
-        let with_zero = read_boxes(&conn_a);
-        let _ = std::fs::remove_file(&path_a);
+    fn content_boxes_stay_clear_of_the_left_loose_strip() {
+        // V42：左侧那条「未归类」竖条（系统 + 快捷方式 + 落单）占住左上角之后，
+        // 分类格**一个像素都不许压过去** —— 用户点名要那些快捷方式「依次展示」，
+        // 被格子盖住就白搭了。
+        let (path, conn) = temp_conn("strip");
+        seed_real_boxes(&conn);
+        // 注入 30 条未归类条目：19 行/列 → 3 列，宽 284、高 656 的一块
+        let loose_count = 30usize;
+        layout_all_boxes_with(&conn, WORK_W, WORK_H, ICON, loose_count, LayoutMode::Full).expect("排布失败");
+        let boxes = read_boxes(&conn);
+        let _ = std::fs::remove_file(&path);
 
-        let (path_b, conn_b) = temp_conn("strip-b");
-        seed_real_boxes(&conn_b);
-        layout_all_boxes_with(&conn_b, WORK_W, WORK_H, ICON, 30, LayoutMode::Full)
-            .expect("排布失败");
-        let with_thirty = read_boxes(&conn_b);
-        let _ = std::fs::remove_file(&path_b);
-
-        assert_eq!(
-            with_zero.len(),
-            with_thirty.len(),
-            "格子数量不该受未归类条目数影响"
-        );
-        assert!(!with_zero.is_empty(), "样本必须真的排出了格子，否则断言是空的");
-        for (a, b) in with_zero.iter().zip(with_thirty.iter()) {
-            assert_eq!(
-                (a.x, a.y, a.w, a.h),
-                (b.x, b.y, b.w, b.h),
-                "「{}」的落位随未归类条目数变了 —— 说明布局还在为那条已退场的竖条预留空间",
-                a.name
+        let strip = super::loose_strip_rect(WORK_W, WORK_H, loose_count, ICON)
+            .expect("有未归类条目必须有竖条");
+        assert_eq!(strip.rect.x, ARRANGE_MARGIN);
+        assert_eq!(strip.rect.y, ARRANGE_MARGIN);
+        let strip_rect = strip.rect;
+        for b in boxes.iter().filter(|b| is_content(&b.kind)) {
+            let r = SlotRect {
+                x: b.x,
+                y: b.y,
+                w: b.w,
+                h: b.h,
+            };
+            assert!(
+                !r.intersects(&strip_rect),
+                "格子「{}」压到了左侧「未归类」竖条上",
+                b.name
+            );
+            assert!(
+                b.x >= strip_rect.x + strip_rect.w,
+                "格子「{}」挤进了竖条的横向区间（竖条右沿 = {}）",
+                b.name,
+                strip_rect.x + strip_rect.w
             );
         }
     }
@@ -10375,9 +10458,9 @@ mod layout_pipeline_tests {
         let boxes = read_boxes(&conn);
         let _ = std::fs::remove_file(&path);
 
-        // Step 5：左侧「未归类」竖条已退场 ⇒ 可用区左沿就是 `ARRANGE_MARGIN`
-        //（旧版这里是 `strip.rect.x + strip.rect.w + ARRANGE_GAP_X`）。
-        let min_x = ARRANGE_MARGIN;
+        let strip =
+            super::loose_strip_rect(WORK_W, WORK_H, loose_count, ICON).expect("有未归类条目必须有竖条");
+        let min_x = strip.rect.x + strip.rect.w + ARRANGE_GAP_X;
 
         assert_eq!(outcome.overflowed, 0, "三个便签也放得下，不该有格子被顶出屏幕");
         for b in &boxes {
@@ -10983,8 +11066,8 @@ mod layout_pipeline_tests {
             );
         }
 
-        // Step 5：左侧「未归类」竖条已退场 ⇒ 可用区左沿就是 `ARRANGE_MARGIN`。
-        let min_x = ARRANGE_MARGIN;
+        let strip = super::loose_strip_rect(WORK_W, WORK_H, loose_count, ICON).expect("必须有竖条");
+        let min_x = strip.rect.x + strip.rect.w + ARRANGE_GAP_X;
         let band_left = boxes
             .iter()
             .filter(|b| !is_content(&b.kind))
