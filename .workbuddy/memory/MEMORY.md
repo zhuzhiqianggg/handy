@@ -10,9 +10,10 @@
 - ★ Git：远端 `git@github.com:zhuzhiqianggg/handy.git`（**必须 SSH**，HTTPS 超时）。推送前看 `size-pack`（正常 ~2MB，暴涨=`target/` 漏进）。
 - 真实库 `%APPDATA%\com.handy.desktop\handy.db`（接管态看 `grid_meta` 三键）；日志/程序 `%LOCALAPPDATA%\Handy\`。
 - 命令：Rust `source scripts/rust-env.sh && cd src-tauri`（⚠️ 无 src-tauri/scripts/）；tsc `node node_modules/typescript/bin/tsc --noEmit`；打包 `build-release.sh --no-deploy`；回归 `scripts/regression/run.mjs`；**改守卫必跑** `scripts/audit/guard-mutation-check.py`。迁移链 v1→v11 由 `cargo test --lib` 守。
+- ★★ **装机打包禁令（V102.8 事故）**：裸 `cargo build --release` 产出 **dev 模式 exe**（不嵌 dist ⇒ WebView2 连 `localhost:1420` ⇒ 启动即「localhost 拒绝连接」白页）。装机必须走 `build-release.sh --no-deploy`（内部 `tauri build` 自动带 `custom-protocol`）；内存紧张致 rustc OOM（0xc0000409，编 lib 三件套 staticlib/cdylib/rlib 时）可退 `cargo build --release --features custom-protocol --bin handy`。**判据：`grep -c "assets/index-" exe` >0 = 已嵌 dist；0 = dev 模式禁装。**
 
 ## 2. 硬不变量（改前必读）
-- **格子 = 呈现层**（V37）：归类/拖入**不移动文件**；V48 起 Rust 无 `fs::rename`。★ **接管模式仍在**（V102.5 回退到 Step 3 后）：启动隐藏 `SysListView32`（日志「接管桌面图标：已隐藏系统桌面图标视图」）+ 格子自绘 + Z 序锚定；脱离接管的「B 方案」曾落地（`ba78b36`）但**已整体回退**。
+- **格子 = 呈现层**（V37）：归类/拖入**不移动文件**；V48 起 Rust 无 `fs::rename`。★★ **V102.8 起不接管（B 方案唯一模式）**：`const iconControl = true`（GridOverlay.tsx 硬编码）—— 不藏 `SysListView32`，格子=装饰底板+标题栏、内容区 `pointerEvents:none` 穿透、竖条不渲染，图标归 Explorer ⇒ Delete/Shift+Delete/框选/右键/属性/第三方 Shell 扩展**全原生**。
 - `grid_overlay_hide` 只收内容（**不**藏挂件窗，否则无入口=死路）；启动 `restore_overlay_if_visible` 不弹主窗。
 - **「常驻」与「盒子」互斥**（V60）：退出整理后还在 ⇒ 必须浮窗，引擎当禁区（右侧整列 400）。
 - **外部唤起 = 入队+唤醒**（V60）：冷启动 emit 必丢 ⇒ `PENDING_ACTION` 入队（挂载 + 收到唤醒各取一次，**不采信载荷**）。HKCU 能力必须有版本标记：`install()` **整键重建**。**一个跨线程状态只许一个记账人**（V61）。
@@ -38,8 +39,7 @@
 ## 4. 批次索引（细节见 PROJECT_STATUS §1.x；约定/踩坑见 CONVENTIONS）
 - **V42–V71**：竖条·三面板·Z 序锚定·挂件分列·指针拖拽·工作台·列式填满（**V64/V65 作废**）。
 - **V81–V101**：桌面右键九轮 V97 定稿 / V89–V92 终判「不代理」/ V83–V85 几何不持久化 + 只算主屏 / V93–V96 新建链路 / **V101 带下拆分见 §3**。
-- ★★ **现状基线 = `c682f36`（Step 3 轮次）+ V102.6/V102.7**（10-11 用户「先回退到这次提交，后面就改坏了」）：★ **接管模式仍在**（启动日志 `接管桌面图标：已隐藏系统桌面图标视图`；DB `desktop_icons_hidden=1`/`desktop_takeover=1`）。**B 方案 Step 4+5（`ba78b36`）与 V102.1–V102.5 摆位实验全部作废**；分支 `b-plan` 已推 origin。⚠️ `NoteWindow.tsx`（`App.tsx:111`）与 `shell_menu.rs`（格子条目右键）都是**活的**，禁删。守卫基线：shell-menu **164** / drag-pointer 163 / icon-control 83；cargo 90；变异 4 守卫 **114** 用例全捕获。
-- ★★ **接管模式的天花板**（10-11 用户：「为什么我们现在所有的还不是原始功能呢？」）：藏了 `SysListView32` ⇒ 桌面/格子里全是自绘 DOM ⇒ 右键·删除·改名·拖拽只能一条条复刻，永远差一层（360压缩那类只认 `explorer.exe` 的扩展永远拿不到）。出路只有「不接管」= B 方案，它撞 Win11 槽位吸附（§3）。**待用户拍板路线。**
+- ★★ **现状基线 = `89797a9`（V102.8，b-plan 已推）**：B 方案落地。`Cell{w,h,gap}` 横纵**实测**（`icon_spacing_x`/`_y`，gap=0，横向必须实测不许反推——V102.3 就是反推 84 vs 真值 76 才「散成一片」）；`b_cell` 读不到退 `Cell::from_icon(32)`。固有代价：用户手动拖走图标 ⇒ 格子空一块。⚠️ `NoteWindow.tsx`（`App.tsx:111`）与 `shell_menu.rs` **活的**，禁删。守卫基线：shell-menu 150 / drag-pointer 163 / icon-control 109；cargo 91；变异 4 守卫 **126** 全捕获。V102.1–V102.7 与 `ba78b36` 全部作废。**待用户拍板**：Step 6a 清死代码（7 条 never used 警告）/ 6b 拆 grid.rs（11.7k 行）。
 - **V102.7 幽灵条目**（10-11）：格子条目指向的文件已被删 ⇒ 右键**毫无反应**（`SHCreateItemFromParsingName` → 0x80070002；失败在 `run_on_main_thread` 闭包里、前端收不到）。修：① `shell_context_menu` 投递前探路径回人话；② 前端 `.catch` 里 refresh 摘登记；③ `onDesktopChanged` 加 `added.length===0` 对账（原来只看竖条）。★ **教训：登记式格子 ⇒ 外部删除靠「变化事件 + 对账」兜，别等 15s 轮询。**
 - ⚠️ agent 会话启动不了本 GUI ⇒ 打包 + 装机即止，**不代启动**。
 
