@@ -12,26 +12,23 @@
 - 命令：Rust `source scripts/rust-env.sh && cd src-tauri`（⚠️ 无 src-tauri/scripts/）；tsc `node node_modules/typescript/bin/tsc --noEmit`；打包 `build-release.sh --no-deploy`；回归 `scripts/regression/run.mjs`；**改守卫必跑** `scripts/audit/guard-mutation-check.py`。迁移链 v1→v11 由 `cargo test --lib` 守。
 
 ## 2. 硬不变量（改前必读）
-- **格子 = 呈现层**（V37）：归类/拖入**不移动文件**；V48 起 Rust 无 `fs::rename`。**「接管」已于 V102 整体删除** —— 图标永远归 Explorer，启动 `ensure_native_layout` 装配（关自动排列 + 快照 + 间距），摆位靠 `LVM_SETITEMPOSITION` 遥控；**旧的隐藏 `SysListView32` / Z 序锚定 / `desktop_icons_apply(true)` 都不复存在**。
+- **格子 = 呈现层**（V37）：归类/拖入**不移动文件**；V48 起 Rust 无 `fs::rename`。★ **接管模式仍在**（V102.5 回退到 Step 3 后）：启动隐藏 `SysListView32`（日志「接管桌面图标：已隐藏系统桌面图标视图」）+ 格子自绘 + Z 序锚定；脱离接管的「B 方案」曾落地（`ba78b36`）但**已整体回退**。
 - `grid_overlay_hide` 只收内容（**不**藏挂件窗，否则无入口=死路）；启动 `restore_overlay_if_visible` 不弹主窗。
 - **「常驻」与「盒子」互斥**（V60）：退出整理后还在 ⇒ 必须浮窗，引擎当禁区（右侧整列 400）。
 - **外部唤起 = 入队+唤醒**（V60）：冷启动 emit 必丢 ⇒ `PENDING_ACTION` 入队（挂载 + 收到唤醒各取一次，**不采信载荷**）。HKCU 能力必须有版本标记：`install()` **整键重建**。**一个跨线程状态只许一个记账人**（V61）。
 - ★★ **显隐唯一真源 `overlay_visible`：谁写谁广播**（V79）：三处写完必须 `emit_visibility`；托盘**不许**再自己发。前端 `contentHidden` 初值 **`true`**（fail-closed），**先注册监听、再查状态**。
 - **内部拖拽 = 指针拖拽**（V59）：wry 无 `CF_HDROP` 不写 `*pdwEffect` ⇒ 自算落点（5px）；**不许关 `drag_drop_enabled`**。
-- ★★ **Win11 桌面 `LVM_SETITEMPOSITION` 任意坐标 0.3s 内被吸到最近槽位**（V102.3 实测）：槽位网格步长 = `LVM_GETITEMSPACING`(逻辑 76×88) × DPI = 物理 95×110，相位 = 现有槽位坐标 mod 步长（实测 (27,2)）；清 `LVS_EX_SNAPTOGRID` / FFlags SNAP 位 / 关自动排列**都拦不住**；**摆到精确槽位则稳定**；`LVM_SETICONSPACING` 会引发**全桌面重排**（禁用）。⇒ apply_layout 必须量化：logic×scale→物理→round 槽位；cell_h 88×1.25=110 恰好=步长（y 天然对齐），cell_w 105≠95 半格内偏差（腾讯同样有）。⚠️ 跨进程坐标实验必须 `SetProcessDpiAwarenessContext(-4)`（cargo test 进程默认 DPI-unaware 读到虚拟化值）；`work_area().position` 是物理、格子坐标是逻辑——混算曾被 (0,0) 主屏掩盖。
-- ★★ **「底板画到哪」与「图标摆到哪」必须同段 Rust 逻辑保证**（V102.2，10-11「整理失效」）：摆位不能只靠前端 relayoutSoon 的 `.then(ipc.desktopIconLayoutApply())`（会静默吞错，且启动/一键整理根本不走它）。Rust 端唯一入口 `grid_icons::apply_after_relayout`，挂在 grid_auto_arrange / grid_relayout / grid_layout_reset 尾部 + ensure_native_layout 第⑤步（**启动即摆位**，关自动排列不会重摆图标）。改这三处守卫时 find 串必须带 grid_log 文案锚定（两函数尾部逐字相同）。
+- ★★ **Win11 桌面 `LVM_SETITEMPOSITION` 任意坐标 0.3s 内被吸到最近槽位**（V102.3 实测；走「图标遥控」路线的硬前提）：步长 = `LVM_GETITEMSPACING`(逻辑 76×88) × DPI = 物理 95×110，相位 = 现有槽位坐标 mod 步长；清 `LVS_EX_SNAPTOGRID` / FFlags SNAP / 关自动排列**都拦不住**；**摆到精确槽位才稳定**；`LVM_SETICONSPACING` 引发**全桌面重排**（禁用）。⚠️ 跨进程坐标实验必须 `SetProcessDpiAwarenessContext(-4)`（cargo test 默认 DPI-unaware 读到虚拟化值）；`work_area().position` 是物理、格子坐标是逻辑 —— 混算曾被 (0,0) 主屏掩盖。
 - ★★ **渲染几何 = 引擎几何**（V59/V70）：`height: box.height`、**不叠 `max-height`**（装不下交盒内滚动）；**常量差 1px 就少一行/列**；根画布永远 `overflow-hidden`、菜单必须 `fixed`。拖动链路（V57）：移动永远可用，锁只收编辑。
 - ★★ **条目改名框必须全选默认名**（V96）：`autoFocus` 只聚焦不选中 ⇒ 打字变**追加**。两个 input 都要 `onFocus={e => e.currentTarget.select()}`。
-- ★★ **B 模式「原生图标可点」两条腿**（V102）：① 根画布 `pointerEvents: none`；② **命中区只报每格标题栏**（归属由 Rust 25ms 轮询裁决，不报整窗）。不变量 `HIT_PADDING(4) < GRID_PAD_Y(8)`。代价：拖文件进格子只剩标题栏 37px。
 - ★★ **便签 contentEditable**（V67/V68）：`\n` 写进光标所在文本节点 + 垫 ZWSP；「跳出」看「上一步是不是我们插的换行」；`applyHighlight` 每 400ms 重写 `innerHTML` ⇒ `reapplyZwsp` 必须在 `restoreCaretIn` 之前。
 - ★★ **压缩列高不许事后夹 `MIN_BOX_H`**（V68）：先缩放再夹会顶出可用区 ⇒ **二分求最大可行缩放比**。
 
 ## 3. 布局（用户口径 = 5 列）
-**第1列「未归类」竖条已于 V102 退场（`min_x = ARRANGE_MARGIN`）→ 归纳格子 → 便签 → 工作台**。收纳区右界 = `workstation_rect().x - ARRANGE_GAP_X`。
-- **V69 按内容定尺寸**：尺寸只看条目数；常量 `CELL_EXTRA_W=32`、`BOX_CELL_EXTRA_H=36`（勿混竖条 30）、`BOX_HEADER_H=37`、`GRID_SCROLLBAR_W=4`、`BOX_FIT_SLACK=2`、`MIN_BOX_W=160/120`、`AUTO_MAX_W=520`、`AUTO_MAX_COLS=5`；摆放序 = `(面积, 内容量, 高, 宽)` 降序（**内容量分量不可省**）。
-  - ★★ **V95 分列 = 顺序填充**（用户「从右到左 从上到下 满了才换列」；LPT 最矮列废弃）：第一列塞满才换列；**物理装不下退回 LPT 均衡**。评分 `(-k, 自然宽优先, tallest, used_w)`：列数最少赢；**同 k 没夹宽的赢**（V94/V84 作废）。带下分流：whole `overflowed||squeezed` 才拆分。
-  - ★★ **V101 带下拆分平局裁决 = 升序遍历 + `<=`**（真机事故：便签 5→2 后六格全体甩到便签底下 y=364、上带整片留空）：降序 + `<=` 会让最后检查的 m=0 赢走所有平局。**平局时 band_a 装得更多者胜**（m 越大越优先；m=0 全塞带下只有严格更低才能赢）。
-  - **V97–V99 桌面右键自绘 + 新建› 对齐原生**：细节/踩坑见 CONVENTIONS（**B 方案起整体删**）。
+**未归类竖条（V102 曾退场，V102.5 回退后**又回来了**）→ 归纳格子 → 便签 → 工作台**。收纳区右界 = `workstation_rect().x - ARRANGE_GAP_X`。
+- **V69 按内容定尺寸**：尺寸只看条目数；常量清单由 `test-desktop-constants.mjs` 锁（`CELL_EXTRA_W=32`/`BOX_CELL_EXTRA_H=36` 勿混 30/`BOX_HEADER_H=37`/`MIN_BOX_W=160,120`/`AUTO_MAX_W=520`）；摆放序 = `(面积, 内容量, 高, 宽)` 降序（**内容量分量不可省**）。
+  - ★★ **V95 分列 = 顺序填充**（用户「从右到左 从上到下 满了才换列」；LPT 废弃）：第一列塞满才换列；装不下退回 LPT 均衡。评分 `(-k, 自然宽优先, tallest, used_w)`：列数最少赢、**同 k 没夹宽的赢**。带下分流：whole `overflowed||squeezed` 才拆。
+  - ★★ **V101 带下拆分平局裁决 = 升序遍历 + `<=`**（真机事故：便签 5→2 后六格全体甩到便签底下、上带留空）：**平局时 band_a 装得更多者胜**（m=0 只有严格更低才能赢）。
 - ★★ **V85 落位右锚定 + 列内撑满**：列**从右往左**排（第一列贴便签/工作台侧）；窄格**撑到列宽**并按新宽重算高（只撑宽、**不夹窄**）。`content_plan_in` ④ 用**右沿递减**（摆完一列 `right = x - GAP`）——写成「x = 右沿−总宽」= 块**左**端 ⇒ 左溢。
 - ★ **幂等是算出来的，不许几何去兜**（V69）：摆放序是内容的纯函数 ⇒ 尺寸没变 ⇒ 落位一字不差。
 - ★★ **V70**：内部几何两边逐像素相等（差 1px ⇒ 提前出滚动条 ⇒ 少一列）；高度上限跟 zone_h；**满了不许再建**（`probe_room_for_another_box` 真插真排看 overflowed，出错放行）。
@@ -40,8 +37,10 @@
 
 ## 4. 批次索引（细节见 PROJECT_STATUS §1.x；约定/踩坑见 CONVENTIONS）
 - **V42–V71**：竖条·三面板·Z 序锚定·挂件分列·指针拖拽·工作台·列式填满（**V64/V65 作废**）。
-- **V81–V101**（**B 方案起多为死码，待 Step 6 清**）：桌面右键九轮 V97 定稿 / V89–V92 五次迭代终判「不代理」/ V83–V85 几何不持久化 + 只算主屏（变则广播 `grid:bounds-changed`，副屏全原生）/ V93–V96 新建链路（判据·确认·还前台三块已删）/ V99 排序方式（随竖条删）/ **V101 格子乱排修复见 §3**。
-- ★★ **B 方案（10-10 拍板；10-11 Step 4+5 已落地+装机）**：文档 `docs/04-review/{REVIEW-2026-10-10,PLAN-B-PHASED}.md`；根因 = 「接管桌面」这条路线本身在持续生产 bug。分支 `b-plan`（**已推 origin**）：Step 0–3 `699038d`→`c682f36`；**Step 4+5 = `ba78b36`**（接管能力整体删除 + 竖条退场 + 迁移 **v12** 清三键）；**V102.1 = `353c3a7`**；**V102.2 = `fb9d63a`**（摆位收进 Rust + toast 文案）；V102.3 = 摆位量化到槽位。**剩余 Step 6a/6b**（删死代码 / 拆 grid.rs）。⚠️ `NoteWindow.tsx`（`App.tsx:111`）与 `shell_menu.rs`（格子条目右键）都是**活的**，禁删 —— 方案 v1 那三条删除建议是错的。守卫：shell-menu 150 / drag-pointer 163 / icon-control 108；`cargo test --lib` 90；变异 123 用例全捕获。
+- **V81–V101**：桌面右键九轮 V97 定稿 / V89–V92 终判「不代理」/ V83–V85 几何不持久化 + 只算主屏 / V93–V96 新建链路 / **V101 带下拆分见 §3**。
+- ★★ **现状基线 = `c682f36`（Step 3 轮次）+ V102.6/V102.7**（10-11 用户「先回退到这次提交，后面就改坏了」）：★ **接管模式仍在**（启动日志 `接管桌面图标：已隐藏系统桌面图标视图`；DB `desktop_icons_hidden=1`/`desktop_takeover=1`）。**B 方案 Step 4+5（`ba78b36`）与 V102.1–V102.5 摆位实验全部作废**；分支 `b-plan` 已推 origin。⚠️ `NoteWindow.tsx`（`App.tsx:111`）与 `shell_menu.rs`（格子条目右键）都是**活的**，禁删。守卫基线：shell-menu **164** / drag-pointer 163 / icon-control 83；cargo 90；变异 4 守卫 **114** 用例全捕获。
+- ★★ **接管模式的天花板**（10-11 用户：「为什么我们现在所有的还不是原始功能呢？」）：藏了 `SysListView32` ⇒ 桌面/格子里全是自绘 DOM ⇒ 右键·删除·改名·拖拽只能一条条复刻，永远差一层（360压缩那类只认 `explorer.exe` 的扩展永远拿不到）。出路只有「不接管」= B 方案，它撞 Win11 槽位吸附（§3）。**待用户拍板路线。**
+- **V102.7 幽灵条目**（10-11）：格子条目指向的文件已被删 ⇒ 右键**毫无反应**（`SHCreateItemFromParsingName` → 0x80070002；失败在 `run_on_main_thread` 闭包里、前端收不到）。修：① `shell_context_menu` 投递前探路径回人话；② 前端 `.catch` 里 refresh 摘登记；③ `onDesktopChanged` 加 `added.length===0` 对账（原来只看竖条）。★ **教训：登记式格子 ⇒ 外部删除靠「变化事件 + 对账」兜，别等 15s 轮询。**
 - ⚠️ agent 会话启动不了本 GUI ⇒ 打包 + 装机即止，**不代启动**。
 
 ## 5. 协作与操作约定
