@@ -154,6 +154,37 @@ fn apply_layout(conn: &Connection, app: &AppHandle) -> Result<(usize, usize), St
     let arg = crate::commands::grid::b_icon_arg_for_spacing(spacing.1);
     let names = di::item_names(list)?;
 
+    // —— 2026-10-11 深夜追加：摆位坐标必须**量化到 Explorer 的槽位网格** ——
+    //
+    // 真机实测（Win11，125%）：`LVM_SETITEMPOSITION` 发任意坐标，Explorer 会在
+    // 0.3s 内把图标吸到最近的槽位（步长 = 图标间距 × DPI，相位 = 现有槽位坐标
+    // mod 步长）——清 `LVS_EX_SNAPTOGRID`、清 FFlags、关自动排列都拦不住。
+    // 摆到**精确槽位**则稳定（探针 0.8s 不动）。于是：目标坐标 × DPI 变物理后
+    // 四舍五入到槽位。cell_h(88 逻辑)×1.25 恰好 = 槽位步长 110 ⇒ 行结构天然
+    // 对齐；cell_w(84)→105 vs 95 有半格内偏差，量化后每格内仍是规则网格
+    // （腾讯桌面整理同样存在半格内偏移）。
+    let scale = app
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .map(|m| m.scale_factor())
+        .unwrap_or(1.0);
+    let sx_phys = (f64::from(spacing.0) * scale).round().max(1.0);
+    let sy_phys = (f64::from(spacing.1) * scale).round().max(1.0);
+    // 槽位相位：任何现有图标坐标 mod 步长都等于相位（所有槽位同相位），取第一个即可。
+    let (phase_x, phase_y) = match di::positions(list) {
+        Ok(pos) if !pos.is_empty() => (
+            f64::from(pos[0].0.rem_euclid(sx_phys as i32)),
+            f64::from(pos[0].1.rem_euclid(sy_phys as i32)),
+        ),
+        _ => (0.0, 0.0),
+    };
+    let quantize = |logic: i64, step: f64, phase: f64| -> i32 {
+        let phys = logic as f64 * scale;
+        let slot = ((phys - phase) / step).round();
+        (phase + slot * step).round() as i32
+    };
+
     // 显示名 → 下标。桌面上显示名就是文件名（带不带扩展名取决于用户偏好），
     // 所以两种形式都登记；同名冲突时保留先出现的那个。
     let mut index_of: HashMap<String, usize> = HashMap::with_capacity(names.len());
@@ -165,18 +196,19 @@ fn apply_layout(conn: &Connection, app: &AppHandle) -> Result<(usize, usize), St
         }
     }
 
-    // 工作区原点（物理像素）—— 格子坐标是相对工作区的。
+    // 工作区原点（**逻辑**像素）—— 格子坐标是逻辑，统一到逻辑再乘 scale。
     let (work_x, work_y) = app
         .primary_monitor()
         .ok()
         .flatten()
         .map(|m| {
             let p = m.work_area().position;
-            (p.x, p.y)
+            let l = p.to_logical::<i32>(m.scale_factor());
+            (i64::from(l.x), i64::from(l.y))
         })
         .unwrap_or((0, 0));
 
-    // 桌面列表框客户区原点（屏幕坐标）—— 图标坐标是相对它的。
+    // 桌面列表框客户区原点（**物理**屏幕坐标）—— 图标坐标是相对它的。
     let (client_x, client_y) = crate::commands::grid::window_client_origin(list);
 
     let boxes: Vec<(i64, i64, i64, i64, i64)> = {
@@ -242,10 +274,13 @@ fn apply_layout(conn: &Connection, app: &AppHandle) -> Result<(usize, usize), St
                 i64::from(work_x) + bx + frame.origin_dx + col * frame.cell_w;
             let screen_y =
                 i64::from(work_y) + by + frame.origin_dy + row * frame.cell_h;
+            // 逻辑 → 物理 → 量化到 Explorer 槽位（吸附网格），见函数头注释。
+            let slot_x = quantize(screen_x, sx_phys, phase_x);
+            let slot_y = quantize(screen_y, sy_phys, phase_y);
             placements.push((
                 index,
-                (screen_x - i64::from(client_x)) as i32,
-                (screen_y - i64::from(client_y)) as i32,
+                slot_x - client_x,
+                slot_y - client_y,
             ));
         }
     }

@@ -1125,6 +1125,37 @@ MUTATIONS: dict[str, _M] = {
             "关掉自动排列不会重新摆放图标 —— 它们停在关掉那一刻的位置。启动不摆位 ⇒ "
             "从启动到第一次重排之间，桌面永远是「空格子底板 + 密集网格图标」两张皮",
         ),
+        # —— V102.3（10-11 深夜）：摆位必须量化到 Explorer 槽位网格 ——
+        (
+            "摆位坐标不再量化（发任意像素 ⇒ Explorer 0.3s 内把图标吸到别处）",
+            "src-tauri/src/commands/grid_icons.rs",
+            "            let slot_x = quantize(screen_x, sx_phys, phase_x);\n"
+            "            let slot_y = quantize(screen_y, sy_phys, phase_y);\n"
+            "            placements.push((\n"
+            "                index,\n"
+            "                slot_x - client_x,\n"
+            "                slot_y - client_y,\n"
+            "            ));",
+            "            placements.push((\n"
+            "                index,\n"
+            "                screen_x as i32 - client_x,\n"
+            "                screen_y as i32 - client_y,\n"
+            "            ));",
+            "真机实测（Win11 125%）：Explorer 会把非槽位坐标 0.3s 内吸到最近槽位 —— "
+            "清 LVS_EX_SNAPTOGRID / FFlags / 自动排列都拦不住；表现就是用户 12:45 的截图："
+            "「格子底板在、图标全散成密集网格」",
+        ),
+        (
+            "槽位相位写死 0（不按现有图标反推 ⇒ 整体偏半格）",
+            "src-tauri/src/commands/grid_icons.rs",
+            "        Ok(pos) if !pos.is_empty() => (\n"
+            "            f64::from(pos[0].0.rem_euclid(sx_phys as i32)),\n"
+            "            f64::from(pos[0].1.rem_euclid(sy_phys as i32)),\n"
+            "        ),",
+            "        Ok(_pos) => (0.0, 0.0),",
+            "槽位网格有相位（本机实测 (27,2) 物理）——写死 0 会让整列图标偏到格子外面，"
+            "而「偏差一致」还会让它看起来不像 bug、像设计",
+        ),
     ],
 }
 

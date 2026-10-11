@@ -288,7 +288,8 @@ ok('图标坐标 = 工作区 + 格子位置 + 内容原点（与底板同一条�
   /i64::from\(work_x\) \+ bx \+ frame\.origin_dx \+ col \* frame\.cell_w/.test(giSrc) &&
     /i64::from\(work_y\) \+ by \+ frame\.origin_dy \+ row \* frame\.cell_h/.test(giSrc));
 ok('图标坐标换算到列表框客户区（图标坐标是相对它的）',
-  /screen_x - i64::from\(client_x\)/.test(giSrc) && /window_client_origin\(list\)/.test(giSrc));
+  /slot_x - client_x/.test(giSrc) && /slot_y - client_y/.test(giSrc) &&
+    /window_client_origin\(list\)/.test(giSrc));
 ok('布局引擎真的读了 B 模式的 icon 基准（否则底板与图标两套尺寸）',
   /b_icon_arg\(conn\)/.test(cmdSrc));
 ok('b_icon_arg **不再**看 `icon_control`（开关退场，只看「间距测到没有」）',
@@ -312,6 +313,26 @@ ok('还原的是**备份的原值**（不是硬编码 true —— 决策 3：原
   /set_autoarrange\(list, di::flags_autoarrange_on\(flags\)\)/.test(giSrc) &&
     /fn flags_autoarrange_on\(/.test(diSrc),
   '硬编码 `true` 会把「本来就没开自动排列」的用户改成开着');
+// —— V102.3（2026-10-11 深夜）：摆位坐标必须量化到 Explorer 槽位网格 ——
+// 真机实测（Win11 125%）：LVM_SETITEMPOSITION 发任意坐标，Explorer 0.3s 内吸到最近
+// 槽位（步长 = spacing×DPI = 95×110 物理、相位 = 现有槽位 mod 步长）；清
+// LVS_EX_SNAPTOGRID / FFlags / 自动排列都拦不住；摆到精确槽位则稳定。
+// SETICONSPACING 会引发全桌面重排，不能用 ⇒ 只能「坐标跟着槽位走」。
+{
+  ok('摆位先测 DPI（scale_factor）——量化在物理像素上做',
+    /apply_layout[\s\S]{0,2500}?scale_factor\(\)/.test(giSrc));
+  ok('槽位步长 = spacing × scale（逻辑间距换算物理网格）',
+    /f64::from\(spacing\.0\) \* scale/.test(giSrc) && /f64::from\(spacing\.1\) \* scale/.test(giSrc));
+  ok('槽位相位从现有图标坐标反推（mod 步长）——不写死像素',
+    /rem_euclid\(/.test(giSrc) && /positions\(list\)/.test(giSrc));
+  ok('坐标发送前经过 quantize（round 到槽位）——不发任意像素',
+    /let slot_x = quantize\(screen_x/.test(giSrc) && /let slot_y = quantize\(screen_y/.test(giSrc));
+  ok('work_area 原点转逻辑（bx 是逻辑 —— 不许物理逻辑混算）',
+    /to_logical::<i32>\(m\.scale_factor\(\)\)/.test(giSrc));
+  ok('摆位日志带未匹配计数（静默 = 零取证）',
+    /图标摆位：成功 \{placed\} 个 \/ 未匹配 \{unmatched\} 个/.test(giSrc));
+}
+
 ok('名字匹配同时登记「带扩展名」与「不带扩展名」（显示名取决于用户偏好）',
   /if let Some\(\(stem, _\)\) = key\.rsplit_once\('\.'\)/.test(giSrc) &&
     /key\.rsplit_once\('\.'\)[\s\S]{0,300}?index_of\.get\(stem\)/.test(giSrc));
