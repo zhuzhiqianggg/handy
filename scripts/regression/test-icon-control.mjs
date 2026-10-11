@@ -315,24 +315,54 @@ ok('还原的是**备份的原值**（不是硬编码 true —— 决策 3：原
   /set_autoarrange\(list, di::flags_autoarrange_on\(flags\)\)/.test(giSrc) &&
     /fn flags_autoarrange_on\(/.test(diSrc),
   '硬编码 `true` 会把「本来就没开自动排列」的用户改成开着');
-// —— V102.3（2026-10-11 深夜）：摆位坐标必须量化到 Explorer 槽位网格 ——
-// 真机实测（Win11 125%）：LVM_SETITEMPOSITION 发任意坐标，Explorer 0.3s 内吸到最近
-// 槽位（步长 = spacing×DPI = 95×110 物理、相位 = 现有槽位 mod 步长）；清
-// LVS_EX_SNAPTOGRID / FFlags / 自动排列都拦不住；摆到精确槽位则稳定。
-// SETICONSPACING 会引发全桌面重排，不能用 ⇒ 只能「坐标跟着槽位走」。
+// —— V102.3（10-11 深夜）量化到槽位网格；★ V102.9（10-11 深夜）锚点改为实测 ——
+// 真机实测：`LVM_SETITEMPOSITION` 的落点行为随视图状态变化（本机三个不同时刻分别测到
+// (0,5) / (27,2) / (0,0) 三种锚点），**锚点不是常量**，只能现场实测。
+// ⇒ 摆位前先 `set_snap_to_grid(false)` + `snap_grid()` 实测，拿到锚点与步长再量化。
 {
   ok('摆位先测 DPI（scale_factor）——量化在物理像素上做',
     /apply_layout[\s\S]{0,2500}?scale_factor\(\)/.test(giSrc));
   ok('槽位步长 = spacing × scale（逻辑间距换算物理网格）',
     /f64::from\(spacing\.0\) \* scale/.test(giSrc) && /f64::from\(spacing\.1\) \* scale/.test(giSrc));
-  ok('槽位相位从现有图标坐标反推（mod 步长）——不写死像素',
-    /rem_euclid\(/.test(giSrc) && /positions\(list\)/.test(giSrc));
+  ok('★★ 槽位锚点**实测**（`di::snap_grid`），不许从现有图标坐标反推',
+    /di::snap_grid\(list\)/.test(giSrc),
+    '反推得 (0,5)、实测是别的值 —— 每列偏 18 物理像素，用户看到的就是「图标没进格子」。' +
+    '图标坐标里还叠着一层与槽位无关的偏移，拿它取模得不到相位');
+  ok('★★ 量化前先关「对齐到网格」扩展样式（与注册表 FFlags 是两套东西）',
+    /di::set_snap_to_grid\(list, false\)/.test(giSrc),
+    '只清 FFlags + 关自动排列不够 —— LVS_EX_SNAPTOGRID 是**视图扩展样式**，另一条路');
+  ok('★ 实测失败必须退回 + 记日志（静默退 = 出事时零取证）',
+    /槽位实测失败，退回坐标反推/.test(giSrc));
+  ok('★ 实测结果记日志（锚点 / 步长可对账）',
+    /槽位网格实测：锚点 \(\{anchor_x\},\{anchor_y\}\)/.test(giSrc));
   ok('坐标发送前经过 quantize（round 到槽位）——不发任意像素',
     /let slot_x = quantize\(screen_x/.test(giSrc) && /let slot_y = quantize\(screen_y/.test(giSrc));
   ok('work_area 原点转逻辑（bx 是逻辑 —— 不许物理逻辑混算）',
     /to_logical::<i32>\(m\.scale_factor\(\)\)/.test(giSrc));
   ok('摆位日志带未匹配计数（静默 = 零取证）',
     /图标摆位：成功 \{placed\} 个 \/ 未匹配 \{unmatched\} 个/.test(giSrc));
+}
+
+// —— V102.9：摆位不许把图标摆到格子外（B 模式图标不会滚）——
+// 真机实测：50/75 个条目的坐标落在物理 y = 1200~2400，而屏幕只有 1080 ——
+// 用户看到的就是「图标压根没进格子」。格子装不下时**宁可少摆**，也不许摆到看不见的地方。
+{
+  ok('★★ 摆位按 `b_content_frame` 的 max_rows 截断（不许溢出格底）',
+    /let capacity = \(frame\.cols \* frame\.max_rows\)/.test(giSrc) &&
+      /items\.iter\(\)\.take\(capacity\)/.test(giSrc),
+    'B 模式下图标是 Explorer 画的、**不随格子滚动** —— 溢出就是永久看不见');
+  ok('★★ 因格子装不下而未摆的条目要**计数并记日志**（静默截断 = 用户永远不知道为什么少图标）',
+    /clipped \+= items\.len\(\) - capacity/.test(giSrc) &&
+      /个条目因\*\*格子装不下\*\*未摆/.test(giSrc));
+  ok('★★ `box_height_needed` 与 `box_height_at` 分开（夹紧后的值不许当可行性判据）',
+    /pub\(crate\) fn box_height_needed\(/.test(cmdSrc) &&
+      /box_height_needed\(items, w, cell\)\.clamp\(MIN_BOX_H, max_h\.max\(MIN_BOX_H\)\)/.test(cmdSrc),
+    '真机上 `box_height_at` 把 2520 的需求夹成 752 ⇒ `tallest > zone_h` 的越界检查形同虚设 ⇒ ' +
+    '「214 宽 1 列装 34 条」这种根本装不下的解被判为可行');
+  ok('★★ `capped_at` 的候选高度用**真实需求**（不许用夹紧值）',
+    /hs\.push\(box_height_needed\(items\[i\], cap, cell\)\)/.test(cmdSrc));
+  ok('★★ `box_own_size` 的自然高度也用**真实需求**',
+    /\(w, box_height_needed\(items, w, cell\)\)/.test(cmdSrc));
 }
 
 ok('名字匹配同时登记「带扩展名」与「不带扩展名」（显示名取决于用户偏好）',

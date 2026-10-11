@@ -47,6 +47,22 @@ const LVM_GETITEMPOSITION: u32 = LVM_FIRST + 16; // 0x1010，lParam = POINT*
 const LVM_GETITEMSPACING: u32 = LVM_FIRST + 51; // 0x1033
 const LVM_GETITEMTEXTW: u32 = LVM_FIRST + 115; // 0x1073，lParam = LVITEMW*
 
+/// 视图层「对齐到网格」扩展样式位（commctrl.h 的 `LVS_EX_SNAPTOGRID`）。
+///
+/// ⚠️ 这个位**不是** `FFlags` 里的 `FWF_SNAPTOGRID`（那个是注册表偏好），它是当前运行
+/// 视图的扩展样式 —— 两者互不相干，Explorer 会各自维护。真机实测（V102.9）把 `FFlags`
+/// 清干净 + 关掉 `LVS_AUTOARRANGE` 之后，`LVM_SETITEMPOSITION` 发任意坐标**仍然**会在
+/// 0.3s 内被吸到最近槽位，就是它在起作用。
+pub const LVS_EX_SNAPTOGRID: u32 = 0x0000_8000;
+
+/// `LVM_SETEXTENDEDLISTVIEWSTYLE`（= `LVM_FIRST + 54`）。
+///
+/// `wParam` = 要置的位，`lParam` = 要清的位（传 `0` 表示只置不清）。
+const LVM_SETEXTENDEDLISTVIEWSTYLE: u32 = LVM_FIRST + 54; // 0x1036
+
+/// `LVM_GETEXTENDEDLISTVIEWSTYLE`（= `LVM_FIRST + 55`）。
+const LVM_GETEXTENDEDLISTVIEWSTYLE: u32 = LVM_FIRST + 55; // 0x1037
+
 /// `LVIF_TEXT`：让 `LVM_GETITEMTEXTW` 回填 `pszText`。
 const LVIF_TEXT: u32 = 0x0001;
 
@@ -256,10 +272,154 @@ mod imp {
         }
     }
 
+    /// 桌面列表框当前所在的 DPI 缩放比（拿不到退 1.0）。
+    ///
+    /// 不经过 Tauri —— 这一层是纯 Win32 封装，调用方（`grid_icons`）自己算逻辑坐标，
+    /// 这里只负责把「逻辑间距」换成「物理步长」。
+    fn window_scale(hwnd: HWND) -> f64 {
+        use windows::Win32::UI::HiDpi::{GetDpiForWindow, GetDpiForSystem};
+        let dpi = unsafe {
+            let d = GetDpiForWindow(hwnd);
+            if d > 0 {
+                d
+            } else {
+                GetDpiForSystem()
+            }
+        };
+        if dpi > 0 {
+            f64::from(dpi) / 96.0
+        } else {
+            1.0
+        }
+    }
+
     /// 当前运行的视图是否开着「自动排列」。
     pub fn autoarrange_on(list: HWND) -> bool {
         let style = unsafe { GetWindowLongPtrW(list, GWL_STYLE) } as u32;
         style & LVS_AUTOARRANGE != 0
+    }
+
+    /// 当前运行的视图是否开着「对齐到网格」（扩展样式 `LVS_EX_SNAPTOGRID`）。
+    pub fn snap_to_grid_on(list: HWND) -> bool {
+        let ext = send(
+            list,
+            LVM_GETEXTENDEDLISTVIEWSTYLE,
+            WPARAM(0),
+            LPARAM(0),
+        )
+        .unwrap_or(0) as u32;
+        ext & LVS_EX_SNAPTOGRID != 0
+    }
+
+    /// 关掉「对齐到网格」（**只动当前运行的视图**，不写注册表）。
+    ///
+    /// 这是 [`snap_grid`] 能测出真实锚点的前提，也是「摆位能不能落到指定槽位」的前提。
+    /// 返回关掉之后该位是否确实为 0。
+    pub fn set_snap_to_grid(list: HWND, on: bool) -> bool {
+        // wParam = 要置的位，lParam = 要清的位。
+        let (set, clear) = if on {
+            (LVS_EX_SNAPTOGRID, 0)
+        } else {
+            (0, LVS_EX_SNAPTOGRID)
+        };
+        let _ = send(
+            list,
+            LVM_SETEXTENDEDLISTVIEWSTYLE,
+            WPARAM(set as usize),
+            LPARAM(clear as isize),
+        );
+        snap_to_grid_on(list) == on
+    }
+
+    /// ★ **实测 Explorer 的吸附槽位网格**：返回 `((锚点 x, 锚点 y), (步长 x, 步长 y))`，
+    /// 单位是**物理屏幕像素**（listview 客户区相对坐标）。
+    ///
+    /// # 为什么必须实测（V102.9 真机事故）
+    ///
+    /// 之前从「现有图标坐标 `mod` 步长」反推相位，得到 `(0, 5)`；而实测真值是 `(27, 2)`
+    /// —— 每列偏 18 物理像素。**「所有槽位同相位」这个假设是错的**：图标坐标还含有一层
+    /// 与槽位无关的偏移（图标自身对齐 / 文本布局），拿它 `mod` 只会得到一个看起来像相位、
+    /// 其实毫无意义的数。
+    ///
+    /// 做法：挑**最后一个**图标，记下原位 → 把它写到 `(0, 0)` → 读回它被吸附到的坐标，
+    /// 那就是锚点 → 再写到一个「偏一格」的坐标 → 读回来的差就是步长 → **复位**。
+    ///
+    /// 用「最后一个」是为了最不容易被用户看见（它通常在末尾），并且**无论成败都复位**。
+    ///
+    /// 任何一步失败都返回 `None`，调用方退回「按 `mod` 反推锚点」的老路（等价于关掉量化，
+    /// 至少不比原来差）。
+    pub fn snap_grid(list: HWND) -> Option<((i32, i32), (i32, i32))> {
+        let count = item_count(list);
+        if count == 0 {
+            return None;
+        }
+        let index = count - 1;
+        let before = positions(list).ok()?;
+        let origin = *before.get(index)?;
+
+        let read_pos = |idx: usize| -> Option<(i32, i32)> {
+            let mem = RemoteMem::new(window_pid(list).ok()?).ok()?;
+            mem.write(0, &[0u8; 8]).ok()?;
+            send(
+                list,
+                LVM_GETITEMPOSITION,
+                WPARAM(idx),
+                LPARAM(mem.base() as isize),
+            )?;
+            let raw = mem.read(0, 8).ok()?;
+            Some((
+                i32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]),
+                i32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]),
+            ))
+        };
+        let place = |idx: usize, x: i32, y: i32| {
+            let packed = pack_point(x, y);
+            send(list, LVM_SETITEMPOSITION, WPARAM(idx), LPARAM(packed as isize))
+        };
+
+        // ① 写 (0,0) —— 读回来的就是锚点（Explorer 会把它吸到最近槽位，而 (0,0) 的最近槽位
+        //    就是第一个槽位）。
+        place(index, 0, 0);
+        // 吸附要等一次刷新：Explorer 是在 `WM_TIMER` 里做这件事的（真机实测 0.3s 内完成）。
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        let anchor = read_pos(index);
+
+        // ② 写「锚点 + 一整个间距」—— 读回来的差才是真步长（间距是逻辑值，要乘 DPI）。
+        let (step_x, step_y) = icon_spacing(list);
+        let scale = window_scale(list);
+        let probe = anchor.map(|(ax, ay)| {
+            (
+                ax + (f64::from(step_x) * scale).round().max(1.0) as i32,
+                ay + (f64::from(step_y) * scale).round().max(1.0) as i32,
+            )
+        });
+        if let Some((px, py)) = probe {
+            place(index, px, py);
+            std::thread::sleep(std::time::Duration::from_millis(400));
+        }
+        let second = read_pos(index);
+
+        // ③ 复位（无论成败）—— 不能把一个实测用的探针留在用户桌面上。
+        place(index, origin.0, origin.1);
+        std::thread::sleep(std::time::Duration::from_millis(120));
+
+        let (ax, ay) = anchor?;
+        let (bx, by) = second?;
+        // 第二次写入应落在「锚点 + 一个步长」上；差值就是实测步长。
+        let dx = (bx - ax).abs();
+        let dy = (by - ay).abs();
+        let sx = if dx > 0 { dx } else { 0 };
+        let sy = if dy > 0 { dy } else { 0 };
+        if sx <= 0 && sy <= 0 {
+            return None;
+        }
+        Some((
+            (ax, ay),
+            (
+                if sx > 0 { sx } else { (f64::from(step_x) * scale).round() as i32 },
+                if sy > 0 { sy } else { (f64::from(step_y) * scale).round() as i32 },
+            ),
+        ))
     }
 
     /// 关 / 开「自动排列」（**只动当前运行的视图**，不写注册表）。
@@ -466,6 +626,15 @@ mod imp {
     }
     pub fn set_autoarrange(_list: HWND, _on: bool) -> bool {
         false
+    }
+    pub fn snap_to_grid_on(_list: HWND) -> bool {
+        false
+    }
+    pub fn set_snap_to_grid(_list: HWND, _on: bool) -> bool {
+        false
+    }
+    pub fn snap_grid(_list: HWND) -> Option<((i32, i32), (i32, i32))> {
+        None
     }
     pub fn positions(_list: HWND) -> Result<Vec<(i32, i32)>, String> {
         Err("桌面图标遥控仅支持 Windows".to_string())

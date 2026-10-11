@@ -65,6 +65,9 @@ windows = { version = "0.58", features = [
   "Win32_System_Threading",
   "Win32_UI_Accessibility",
   "Win32_UI_Controls",
+  # Win32_UI_HiDpi（V102.9 追加）：槽位网格实测要按 DPI 把「逻辑间距」换成「物理步长」，
+  # GetDpiForWindow / GetDpiForSystem 被这道 feature 门锁着。
+  "Win32_UI_HiDpi",
   "Win32_UI_Shell",
   "Win32_UI_Shell_Common",
   "Win32_UI_WindowsAndMessaging",

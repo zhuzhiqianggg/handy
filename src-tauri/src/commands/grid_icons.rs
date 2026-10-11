@@ -169,19 +169,17 @@ fn apply_layout(conn: &Connection, app: &AppHandle) -> Result<(usize, usize), St
     };
     let names = di::item_names(list)?;
 
-    // —— 2026-10-11 深夜追加：摆位坐标必须**量化到 Explorer 的槽位网格** ——
+    // —— 摆位坐标必须**量化到 Explorer 的槽位网格** ——
     //
     // 真机实测（Win11，125%）：`LVM_SETITEMPOSITION` 发任意坐标，Explorer 会在
-    // 0.3s 内把图标吸到最近的槽位（步长 = 图标间距 × DPI，相位 = 现有槽位坐标
-    // mod 步长）——清 `LVS_EX_SNAPTOGRID`、清 FFlags、关自动排列都拦不住。
-    // 摆到**精确槽位**则稳定（探针 0.8s 不动）。
+    // 0.3s 内把图标吸到最近的槽位（步长 = 图标间距 × DPI）。摆到**精确槽位**才稳定。
     //
-    // ★ V102.8 起这一步退化成**纯保险**：`cell` 就是 Explorer 的间距本身（上面
-    // `spacing` 直接构造），于是 cell_w(76)×1.25 = 95、cell_h(88)×1.25 = 110，
-    // **横向、纵向都恰好等于槽位步长**，算出来的目标本就是精确槽位，量化只是把
-    // 浮点舍入钉死。V102.3 之所以需要它兜底，是因为那时 cell_w 是反推来的 84
-    // （→105 vs 95）——每列差 10px，量化后每格内仍残留半格内偏移，正是用户看到的
-    // 「图标散成密集网格」。**根因在间距不同源，量化不是解法。**
+    // ★ V102.9：**锚点改为实测**（[`di::snap_grid`]），不再从现有坐标反推 ——
+    // 真机反推得 `(0,5)`、实测是 `(27,2)`，每列偏 18 物理像素。理由写在
+    // `desktop_icons::snap_grid` 的文档里。
+    //
+    // ★ 同时把「对齐到网格」这个**视图扩展样式**关掉（`LVS_EX_SNAPTOGRID`）——
+    // 它和注册表 `FFlags` 的 `FWF_SNAPTOGRID` 是两套东西，之前只清了后者。
     let scale = app
         .primary_monitor()
         .ok()
@@ -190,14 +188,52 @@ fn apply_layout(conn: &Connection, app: &AppHandle) -> Result<(usize, usize), St
         .unwrap_or(1.0);
     let sx_phys = (f64::from(spacing.0) * scale).round().max(1.0);
     let sy_phys = (f64::from(spacing.1) * scale).round().max(1.0);
-    // 槽位相位：任何现有图标坐标 mod 步长都等于相位（所有槽位同相位），取第一个即可。
-    let (phase_x, phase_y) = match di::positions(list) {
-        Ok(pos) if !pos.is_empty() => (
-            f64::from(pos[0].0.rem_euclid(sx_phys as i32)),
-            f64::from(pos[0].1.rem_euclid(sy_phys as i32)),
-        ),
-        _ => (0.0, 0.0),
+
+    // ★★ V102.9：槽位的**锚点必须实测**，不许从现有图标坐标反推。
+    //
+    // 旧写法取 `pos[0] mod 步长` 当相位，真机上得到 `(0, 5)`，而实测锚点是 `(27, 2)` ——
+    // 每列偏 18 物理像素，用户看到的就是「图标停在密集网格上、没进格子」。
+    // 「所有槽位同相位」这个假设本身就不成立：图标坐标里还叠着一层与槽位无关的偏移
+    // （图标相对单元格的对齐 + 文本行高），拿它取模得到的数毫无意义。
+    //
+    // 顺带把「对齐到网格」这个视图扩展样式关掉 —— 它和 `FFlags` 是两套东西，
+    // 真机上只清 `FFlags` + 关自动排列并不能让 `LVM_SETITEMPOSITION` 稳定落点。
+    di::set_snap_to_grid(list, false);
+    let snapped = di::snap_grid(list);
+    let ((anchor_x, anchor_y), (step_x, step_y)) = match snapped {
+        Some((anchor, step)) => (anchor, step),
+        None => {
+            // 实测失败（Explorer 忙 / 没有图标）：退回「按现有坐标反推」的老路，
+            // 至少不比改之前差；步长仍用「间距 × DPI」。
+            let (ax, ay) = match di::positions(list) {
+                Ok(pos) if !pos.is_empty() => (
+                    pos[0].0.rem_euclid(sx_phys as i32),
+                    pos[0].1.rem_euclid(sy_phys as i32),
+                ),
+                _ => (0, 0),
+            };
+            crate::logging::write_line(
+                "grid",
+                &format!("槽位实测失败，退回坐标反推：锚点 ({ax},{ay})、步长 ({sx_phys:.0},{sy_phys:.0})"),
+            );
+            (
+                (ax, ay),
+                (
+                    sx_phys.round() as i32,
+                    sy_phys.round() as i32,
+                ),
+            )
+        }
     };
+    crate::logging::write_line(
+        "grid",
+        &format!(
+            "槽位网格实测：锚点 ({anchor_x},{anchor_y})、步长 ({step_x},{step_y})（逻辑间距 {}×{}，缩放 {scale}）",
+            spacing.0, spacing.1
+        ),
+    );
+    let (phase_x, phase_y) = (f64::from(anchor_x), f64::from(anchor_y));
+    let (step_x, step_y) = (f64::from(step_x.max(1)), f64::from(step_y.max(1)));
     let quantize = |logic: i64, step: f64, phase: f64| -> i32 {
         let phys = logic as f64 * scale;
         let slot = ((phys - phase) / step).round();
@@ -256,6 +292,8 @@ fn apply_layout(conn: &Connection, app: &AppHandle) -> Result<(usize, usize), St
 
     let mut placements: Vec<(usize, i32, i32)> = Vec::new();
     let mut unmatched = 0usize;
+    // ★ V102.9：因为**格子装不下**而没摆的条目数（见下面的容量硬上限）。
+    let mut clipped = 0usize;
 
     for (box_id, bx, by, bw, bh) in boxes {
         let items: Vec<(String, String)> = {
@@ -276,8 +314,18 @@ fn apply_layout(conn: &Connection, app: &AppHandle) -> Result<(usize, usize), St
             continue;
         }
         let frame = crate::commands::grid::b_content_frame(bw, bh, cell);
+        // ★ V102.9：容量硬上限 = 列 × 行。超出的一律**不摆**。
+        //
+        // B 模式下图标由 Explorer 画、**不随格子滚动**：一旦摆到格底之外，它就停在
+        // 桌面上某处（真机实测有 50 个落到物理 y = 1200~2400，而屏幕只有 1080）——
+        // 用户看到的就是「图标压根没进格子」。宁可少摆几个、并如实记日志，
+        // 也不许把图标摆到看不见的地方。
+        let capacity = (frame.cols * frame.max_rows).max(0) as usize;
+        if items.len() > capacity {
+            clipped += items.len() - capacity;
+        }
 
-        for (i, (_path, display)) in items.iter().enumerate() {
+        for (i, (_path, display)) in items.iter().take(capacity).enumerate() {
             let key = display.trim().to_lowercase();
             let found = index_of.get(&key).copied().or_else(|| {
                 key.rsplit_once('.')
@@ -294,8 +342,8 @@ fn apply_layout(conn: &Connection, app: &AppHandle) -> Result<(usize, usize), St
             let screen_y =
                 i64::from(work_y) + by + frame.origin_dy + row * frame.cell_h;
             // 逻辑 → 物理 → 量化到 Explorer 槽位（吸附网格），见函数头注释。
-            let slot_x = quantize(screen_x, sx_phys, phase_x);
-            let slot_y = quantize(screen_y, sy_phys, phase_y);
+            let slot_x = quantize(screen_x, step_x, phase_x);
+            let slot_y = quantize(screen_y, step_y, phase_y);
             placements.push((
                 index,
                 slot_x - client_x,
@@ -305,6 +353,15 @@ fn apply_layout(conn: &Connection, app: &AppHandle) -> Result<(usize, usize), St
     }
 
     let placed = di::set_positions(list, &placements);
+    if clipped > 0 {
+        crate::logging::write_line(
+            "grid",
+            &format!(
+                "图标摆位：{clipped} 个条目因**格子装不下**未摆（留在桌面原处）—— \
+                 格子数量不足或某类内容过多，建议「重置整理」或减少该类文件"
+            ),
+        );
+    }
     Ok((placed, unmatched))
 }
 

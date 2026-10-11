@@ -4241,16 +4241,36 @@ fn item_columns_at(w: i64, cell: Cell) -> i64 {
 /// 全见」，「真挤不下 ⇒ 交给压缩 / 内部滚」。上限仍然存在（就是桌面本身有多高），
 /// 只是不再用一个与可用空间无关的常数把它锁死。
 fn box_height_at(items: usize, w: i64, cell: Cell, max_h: i64) -> i64 {
+    box_height_needed(items, w, cell).clamp(MIN_BOX_H, max_h.max(MIN_BOX_H))
+}
+
+/// 一个格子装下 `items` 个条目**真正需要的高度**（不夹紧、不限上限）。
+///
+/// # 为什么必须与 [`box_height_at`] 分开（V102.9 真机事故）
+///
+/// 真机上「文档」格 28 条被排成 **1 列**（宽 173），需求高 2520；`box_height_at` 把它
+/// 夹到 `zone_h = 752` 之后**返回 752** —— 于是调用方 [`pick_columns`] 里那句
+/// `tallest > zone_h` 的越界检查**形同虚设**：它拿到的永远是「刚好不越界」的高度，
+/// 于是「夹到 173 宽」这个根本装不下的解被判定为**可行**并被选中。
+///
+/// 结果就是用户截图里那样：**50 个图标的坐标被摆到格子底之外**（物理 y 一路到 2400+，
+/// 而屏幕只有 1080）—— 桌面上看起来「图标压根没进格子」。
+///
+/// 教训：**「夹紧」与「判断能不能装下」必须用两个不同的值**。夹紧后的值只能用来落库，
+/// 不能拿来当可行性判据（那叫谎报）。
+///
+/// ⚠️ B 模式下这一条尤其致命：接管模式里格子内部是 DOM、装不下可以滚；B 模式里图标是
+/// **Explorer 画的**，格子**没有滚动能力** —— 高度一旦小于需求，图标就真的跑到格子外面。
+pub(crate) fn box_height_needed(items: usize, w: i64, cell: Cell) -> i64 {
     let cols = item_columns_at(w, cell);
     let n = items.max(1) as i64;
     let rows = (n + cols - 1) / cols;
-    let h = BOX_HEADER_H
+    BOX_HEADER_H
         + BOX_BORDER_H
         + rows * cell.h
         + (rows - 1) * cell.gap
         + 2 * GRID_PAD_Y
-        + BOX_FIT_SLACK;
-    h.clamp(MIN_BOX_H, max_h.max(MIN_BOX_H))
+        + BOX_FIT_SLACK
 }
 
 /// 单个格子的尺寸（宽度按内容、高度按该宽度）—— 给「新建格子」等**还没有整批**的场合用。
@@ -4305,16 +4325,30 @@ pub(crate) struct BFrame {
     /// 内容原点相对格子左上角的偏移
     pub origin_dx: i64,
     pub origin_dy: i64,
+    /// ★ V102.9：格子里**摆得下几行**（由格子实际高度算）。
+    ///
+    /// B 模式下图标是 Explorer 画的、**不会随格子滚动**，所以超出行数的图标一旦摆出去
+    /// 就是「跑到格子外面 / 屏幕外面」（真机实测：50 个图标的坐标落在 y = 1200~2400，
+    /// 而屏幕只有 1080 —— 用户看到的就是「图标压根没进格子」）。
+    ///
+    /// 摆位方据此**截断**：[`cols × max_rows`] 之后的条目不摆（留在原处），并记日志。
+    /// 这是「宁可少摆几个，也不许摆到看不见的地方」。
+    pub max_rows: i64,
 }
 
 /// B 模式的内容区几何 —— 前端「装饰底板」与 Rust「图标摆位」都读这一份。
-pub(crate) fn b_content_frame(box_w: i64, _box_h: i64, cell: Cell) -> BFrame {
+pub(crate) fn b_content_frame(box_w: i64, box_h: i64, cell: Cell) -> BFrame {
+    // 行高 = cell.h + cell.gap（B 模式 gap = 0，行高就是 Explorer 的纵向间距）。
+    // 至少给 1 行 —— 空格子 / 极矮格子不该被判成「一行都放不下」而完全不摆。
+    let row_step = (cell.h + cell.gap).max(1);
+    let body_h = (box_h - (BOX_HEADER_H + BOX_BORDER_H + GRID_PAD_Y) - GRID_PAD_Y).max(0);
     BFrame {
         cols: item_columns_at(box_w, cell).max(1),
         cell_w: cell.w,
         cell_h: cell.h,
         origin_dx: BOX_BORDER_H + GRID_PAD_X,
         origin_dy: BOX_HEADER_H + BOX_BORDER_H + GRID_PAD_Y,
+        max_rows: (body_h / row_step).max(1),
     }
 }
 
@@ -5138,13 +5172,18 @@ fn needs_placement(
 ///
 /// ⚠️ V70：高度上限从「固定 460」变成**本带可用高**（`zone_h`）—— 见 [`box_height_at`]
 /// 上面那段。宽度上限仍是 [`AUTO_MAX_W`]（宽度一旦不设上限，一个格子就会横向吃掉整条带）。
+///
+/// ★ V102.9：这里返回的高度是**真实需求**（[`box_height_needed`]），**不夹紧** ——
+/// 它是「可行性判据」用的（[`pick_columns`] 拿 `tallest` 与 `zone_h` 比）。
+/// 夹紧只在最终落库那一步（[`content_plan_in`] 的落位段）做。
 fn box_own_size(items: usize, zone_w: i64, zone_h: i64, cell: Cell) -> (i64, i64) {
+    let _ = zone_h; // 保留参数：调用方口径不变（原先它只影响夹紧上限）
     let max_w = zone_w.max(MIN_BOX_W);
     let w = desired_box_width(items, cell)
         .min(AUTO_MAX_W)
         .min(max_w)
         .max(MIN_BOX_W);
-    (w, box_height_at(items, w, cell, zone_h))
+    (w, box_height_needed(items, w, cell))
 }
 
 /// 收纳区整张落位表（V66）：**一段一列，列内自上而下紧挨着摞**。
@@ -5454,6 +5493,12 @@ fn content_plan_in(order: &[usize], items: &[usize], band: SlotRect, cell: Cell)
     //
     // ⚠️ 夹宽度必须**同时按新宽度重算高度**（`box_height_at`）—— 前端就是按这个宽度渲染的，
     // 宽度变了行数就变；几何不自洽的话「后端算得下、前端还是滚」。
+    //
+    // ★★ V102.9 修：这里给的高度必须是**真实需求**（[`box_height_needed`]），**不许夹紧**。
+    // 夹紧会让 [`pick_columns`] 的 `tallest > zone_h` 越界检查形同虚设 —— 拿到的永远
+    // 「刚好不越界」，于是「214 宽 1 列装 34 条」这种根本装不下的解被判为可行。
+    // 真机上就是这一条让 50 个图标的坐标被摆到屏幕外（见 [`box_height_needed`] 的文档）。
+    // 夹紧（`box_height_at`）只在**最终落库**那一步做。
     let capped_at = |k: usize| -> (Vec<i64>, Vec<i64>) {
         let cap = ((zone_w - (k as i64 - 1) * ARRANGE_GAP_X) / k as i64)
             .clamp(MIN_BOX_W, AUTO_MAX_W);
@@ -5463,8 +5508,7 @@ fn content_plan_in(order: &[usize], items: &[usize], band: SlotRect, cell: Cell)
             let (bw, bh) = base[i];
             if bw > cap {
                 ws.push(cap);
-                // V70：上限是**这条带的可用高**（不再是与空间无关的固定 460）
-                hs.push(box_height_at(items[i], cap, cell, zone_h));
+                hs.push(box_height_needed(items[i], cap, cell));
             } else {
                 ws.push(bw);
                 hs.push(bh);

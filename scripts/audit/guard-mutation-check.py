@@ -1151,11 +1151,13 @@ MUTATIONS: dict[str, _M] = {
             "从启动到第一次重排之间，桌面永远是「空格子底板 + 密集网格图标」两张皮",
         ),
         # —— V102.3（10-11 深夜）：摆位必须量化到 Explorer 槽位网格 ——
+        # ★ V102.9 更新：量化用的「步长 / 锚点」改名为 `step_x/step_y`、`phase_x/phase_y`，
+        #   锚点不再从现有图标反推而是实测（`di::snap_grid`）。替身字符串同步。
         (
             "摆位坐标不再量化（发任意像素 ⇒ Explorer 0.3s 内把图标吸到别处）",
             "src-tauri/src/commands/grid_icons.rs",
-            "            let slot_x = quantize(screen_x, sx_phys, phase_x);\n"
-            "            let slot_y = quantize(screen_y, sy_phys, phase_y);\n"
+            "            let slot_x = quantize(screen_x, step_x, phase_x);\n"
+            "            let slot_y = quantize(screen_y, step_y, phase_y);\n"
             "            placements.push((\n"
             "                index,\n"
             "                slot_x - client_x,\n"
@@ -1166,20 +1168,33 @@ MUTATIONS: dict[str, _M] = {
             "                screen_x as i32 - client_x,\n"
             "                screen_y as i32 - client_y,\n"
             "            ));",
-            "真机实测（Win11 125%）：Explorer 会把非槽位坐标 0.3s 内吸到最近槽位 —— "
-            "清 LVS_EX_SNAPTOGRID / FFlags / 自动排列都拦不住；表现就是用户 12:45 的截图："
+            "真机实测（Win11 125%）：Explorer 会把非槽位坐标吸到最近槽位；表现就是用户截图里"
             "「格子底板在、图标全散成密集网格」",
         ),
         (
-            "槽位相位写死 0（不按现有图标反推 ⇒ 整体偏半格）",
+            "槽位锚点不再实测（退回按现有图标坐标反推 ⇒ 整体偏一格）",
             "src-tauri/src/commands/grid_icons.rs",
-            "        Ok(pos) if !pos.is_empty() => (\n"
-            "            f64::from(pos[0].0.rem_euclid(sx_phys as i32)),\n"
-            "            f64::from(pos[0].1.rem_euclid(sy_phys as i32)),\n"
-            "        ),",
-            "        Ok(_pos) => (0.0, 0.0),",
-            "槽位网格有相位（本机实测 (27,2) 物理）——写死 0 会让整列图标偏到格子外面，"
-            "而「偏差一致」还会让它看起来不像 bug、像设计",
+            "    let snapped = di::snap_grid(list);",
+            "    let snapped: Option<((i32, i32), (i32, i32))> = None;",
+            "锚点**必须实测**：真机上「按现有图标坐标 mod 步长」推得 (0,5)，而实测是别的值 —— "
+            "每列偏 18 物理像素，用户看到的就是「图标没进格子」。"
+            "反推之所以不成立，是因为图标坐标里还叠着一层与槽位无关的偏移",
+        ),
+        (
+            "摆位不再按格内容量截断（图标被摆到格子外 / 屏幕外）",
+            "src-tauri/src/commands/grid_icons.rs",
+            "        let capacity = (frame.cols * frame.max_rows).max(0) as usize;",
+            "        let capacity = usize::MAX;",
+            "B 模式下图标是 Explorer 画的、**不随格子滚动** —— 溢出格底就是永久看不见。"
+            "真机实测 50/75 个条目的坐标落在物理 y = 1200~2400，而屏幕只有 1080",
+        ),
+        (
+            "box_height_at 又开始谎报（夹紧值当可行性判据）",
+            "src-tauri/src/commands/grid.rs",
+            "    box_height_needed(items, w, cell).clamp(MIN_BOX_H, max_h.max(MIN_BOX_H))",
+            "    let _ = max_h;\n    box_height_needed(items, w, cell)",
+            "夹紧后的值只能用来落库，不能拿来判可行性 —— 一旦谎报，"
+            "`tallest > zone_h` 永远不触发，「1 列装 34 条」这种解会被选中，图标全摆到屏幕外",
         ),
     ],
 }
