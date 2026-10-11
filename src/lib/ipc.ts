@@ -1,6 +1,13 @@
 import { invoke } from '@tauri-apps/api/core';
 import { isTauri } from '@/platform/detect';
 import { diagLog } from '@/lib/diag';
+
+/**
+ * 哨兵错误：Rust 侧已经用 **Windows 原生对话框**提示过了（如改名撞名，
+ * `platform/native_ui.rs::ERR_NATIVE_SHOWN`）—— 前端不要再叠一条 Handy toast，
+ * 该做的是自己的收尾（如保持改名输入框打开）。
+ */
+export const ERR_NATIVE_DIALOG_SHOWN = '__native_dialog_shown__';
 import type { PlatformInfo } from '@/types/platform';
 import type { OrganizerScanResult } from '@/types/organizer';
 import type { BackupReport, ImportOutcome } from '@/types/backup';
@@ -274,6 +281,13 @@ export const ipc = {
   /** 把条目移出格子：**文件移回桌面根目录**（不是删除），随后清掉登记 */
   gridItemDelete: (itemId: number, dismiss?: boolean): Promise<void> =>
     call<void>('grid_item_delete', { itemId, dismiss: dismiss ?? null }),
+  /**
+   * 删除文件本身 —— **Windows 原生链路**（用户 10-11 拍板）：
+   * `SHFileOperationW(FO_DELETE, FOF_ALLOWUNDO)`，系统开了「删除确认」就弹系统确认框，
+   * 删掉的进回收站可还原。返回 `false` = 用户在原生对话框里取消。
+   */
+  gridItemDeleteFile: (filePath: string): Promise<boolean> =>
+    call<boolean>('grid_item_delete_file', { path: filePath }),
   /** 移动条目到另一个格子 = 真的把文件移到目标格子的收纳目录 */
   gridItemMove: (itemId: number, targetBoxId: number): Promise<void> =>
     call<void>('grid_item_move', { itemId, targetBoxId }),

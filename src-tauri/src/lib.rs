@@ -213,6 +213,7 @@ pub fn run() {
             commands::grid::grid_box_set_content,
             commands::grid::grid_item_add,
             commands::grid::grid_item_delete,
+            commands::grid::grid_item_delete_file,
             commands::grid::grid_item_move,
             commands::grid::grid_item_rename,
             commands::grid::grid_item_list,

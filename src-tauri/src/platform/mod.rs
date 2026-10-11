@@ -20,6 +20,9 @@ pub mod desktop_menu;
 /// 见 `docs/04-review/PLAN-B-PHASED.md`。
 pub mod desktop_icons;
 
+/// Windows 原生 UI 交互（用户 10-11 拍板）：改名撞名的原生对话框 + 回收站原生删除。
+pub mod native_ui;
+
 /// 系统菜单期间把桌面「暂时还给系统」（V81）：旁听菜单弹出 / 收起，不改鼠标路由。
 #[cfg(target_os = "windows")]
 pub mod desktop_handoff;

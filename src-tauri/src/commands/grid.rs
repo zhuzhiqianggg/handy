@@ -1130,6 +1130,40 @@ pub async fn grid_item_delete(
     Ok(())
 }
 
+/// 删除文件本身 —— **走 Windows 原生链路**（用户 10-11 拍板：「删除行为应该使用
+/// Windows 原生的」）。
+///
+/// `SHFileOperationW(FO_DELETE, FOF_ALLOWUNDO)` 与 Explorer 完全同源：系统开了
+/// 「显示删除确认对话框」就由 Windows 弹确认框，删掉的进回收站（可还原）。
+/// 返回 `Ok(false)` = 用户在原生对话框里取消，什么都没发生。
+///
+/// 成功后必须清 `grid_items` 登记（文件已不在，留着就是幽灵条目），并把路径从
+/// 「不要它」名单摘掉 —— 回收站还原文件后还能再拖回格子。
+#[tauri::command]
+pub async fn grid_item_delete_file(app: AppHandle, path: String) -> Result<bool, String> {
+    let source = Path::new(&path);
+    if !source.exists() {
+        return Err("文件已不在原位置了".to_string());
+    }
+    let deleted = crate::platform::native_ui::delete_to_recycle_bin(source)?;
+    if !deleted {
+        return Ok(false);
+    }
+    let conn = connect(&app)?;
+    conn.execute("DELETE FROM grid_items WHERE file_path = ?1", params![path])
+        .map_err(|err| format!("清理条目登记失败：{err}"))?;
+    let mut set = read_dismissed(&conn)?;
+    if set.remove(&path) {
+        let _ = write_dismissed(&conn, &set);
+    }
+    let short = source
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.clone());
+    grid_log(&format!("删除「{short}」：已进回收站（Windows 原生链路），登记已清理"));
+    Ok(true)
+}
+
 /// 把一个条目挪到另一个格子 —— **只改归属，文件原位不动**（V37 起）。
 #[tauri::command]
 pub async fn grid_item_move(
@@ -1227,7 +1261,10 @@ pub async fn grid_item_rename(
     };
     let target = parent.join(&trimmed);
     if target != source && target.exists() {
-        return Err(format!("已经有一个「{trimmed}」了"));
+        // 用户 10-11 拍板：「名称重复提示应该是 Windows 的提示」——弹原生对话框
+        // （Explorer 同款文案），返回哨兵让前端保持输入框打开；不再走 Handy toast。
+        crate::platform::native_ui::rename_conflict_dialog(&trimmed, source.is_dir());
+        return Err(crate::platform::native_ui::ERR_NATIVE_SHOWN.to_string());
     }
 
     if let Err(err) = std::fs::rename(source, &target) {

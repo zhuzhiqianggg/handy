@@ -40,7 +40,7 @@ import {
 import { ACTION_ICONS } from '@/modules/workstation/QuickActionsRail';
 import { useAppStore } from '@/stores/useAppStore';
 import type { SysAction } from '@/types/sys';
-import { ipc } from '@/lib/ipc';
+import { ERR_NATIVE_DIALOG_SHOWN, ipc } from '@/lib/ipc';
 import { reportOperation } from '@/lib/errorSink';
 import { isTauri } from '@/platform/detect';
 import { cn } from '@/lib/utils';
@@ -1646,7 +1646,17 @@ export function GridOverlay(): React.JSX.Element {
         void refresh().catch(() => undefined);
         refreshLoose();
       })
-      .catch((error: Error) => showHint(error.message));
+      .catch((error: Error) => {
+        if (error.message === ERR_NATIVE_DIALOG_SHOWN) {
+          // 改名撞名（用户 10-11 拍板）：Rust 已弹 Windows 原生对话框，这里**不再 toast**，
+          // 做前端收尾 —— Explorer 同款交互：输入框保持打开、文字全选
+          // （重新挂载 autoFocus + onFocus select() 即全选），换个没冲突的名字就能提交。
+          setRenamingItemPath(path);
+          setItemRenameDraft(itemRenameDraft.trim());
+          return;
+        }
+        showHint(error.message);
+      });
   }, [
     renamingItemPath,
     itemRenameDraft,
@@ -2615,6 +2625,33 @@ export function GridOverlay(): React.JSX.Element {
           // V66：条目少了 → 该格子该变矮，重排一次
           relayoutSoon();
           showHint(`已移出格子：${item.displayName}（回到左侧「未归类」竖条）`);
+        })
+        .catch((error: Error) => showHint(error.message));
+    },
+    [refreshLoose, relayoutSoon, showHint],
+  );
+
+  /**
+   * 删除文件本身 —— **Windows 原生链路**（用户 10-11 拍板「删除行为应该使用
+   * Windows 原生的」）：`SHFileOperationW(FO_DELETE, FOF_ALLOWUNDO)`，与 Explorer
+   * 同源 —— 系统开了「删除确认」就弹系统确认框，删掉的进回收站可还原。
+   * 返回 `false` = 用户在原生对话框里取消，什么都不动。
+   */
+  const deleteItemFile = useCallback(
+    (item: GridItem): void => {
+      void ipc
+        .gridItemDeleteFile(item.filePath)
+        .then((deleted: boolean) => {
+          if (!deleted) {
+            return; // 原生确认框里点了取消 —— 保持原样
+          }
+          // 文件已经不在了，登记由后端清掉；这里把行从格子里摘掉 + 重排
+          setItems((prev) => ({
+            ...prev,
+            [item.boxId]: (prev[item.boxId] ?? []).filter((i) => i.id !== item.id),
+          }));
+          refreshLoose();
+          relayoutSoon();
         })
         .catch((error: Error) => showHint(error.message));
     },
@@ -4754,6 +4791,22 @@ export function GridOverlay(): React.JSX.Element {
           </button>
           <p className="px-2.5 pb-1 pt-0.5 text-[10px] leading-relaxed text-neutral-500">
             只删登记不删文件；它会在左侧「未归类」竖条
+          </p>
+          <div className="my-1 h-px bg-white/10" />
+          <button
+            type="button"
+            className={`${menuItemRowClass} text-amber-200`}
+            title="删除文件本身：Windows 原生确认后进回收站（可还原）"
+            onClick={() => {
+              const target = menuItem.item;
+              setMenuItem(null);
+              deleteItemFile(target);
+            }}
+          >
+            删除
+          </button>
+          <p className="px-2.5 pb-1 pt-0.5 text-[10px] leading-relaxed text-neutral-500">
+            进回收站（Windows 原生删除，可还原）
           </p>
         </div>
       )}

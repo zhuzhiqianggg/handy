@@ -662,6 +662,31 @@ MUTATIONS: dict[str, _M] = {
     # 另一套守卫，结果是「改了源码守卫仍然全绿」的假通过（自检会直接点名它没判别力）。
     "scripts/regression/test-shell-menu.mjs": [
         (
+            "改名撞名又弹回 Handy toast（原生对话框被摘掉）",
+            "src-tauri/src/commands/grid.rs",
+            "        crate::platform::native_ui::rename_conflict_dialog(&trimmed, source.is_dir());\n"
+            "        return Err(crate::platform::native_ui::ERR_NATIVE_SHOWN.to_string());",
+            '        return Err(format!("已经有一个「{trimmed}」了"));',
+            "用户 10-11 拍板「名称重复提示应该是 Windows 的提示」—— 自绘 toast 那条路"
+            "已经撤了，摘掉原生对话框调用 = 退回用户点名的旧体验",
+        ),
+        (
+            "原生删除被改成不进回收站（FOF_NOCONFIRMATION = 无确认 + 不保撤销）",
+            "src-tauri/src/platform/native_ui.rs",
+            "        fFlags: FOF_ALLOWUNDO.0 as u16,",
+            "        fFlags: (FOF_ALLOWUNDO.0 | FOF_NOCONFIRMATION.0) as u16,",
+            "用户 10-11 拍板「删除行为应该使用 Windows 原生的」—— 加 NOCONFIRMATION "
+            "等于绕开系统确认框且失去可还原语义",
+        ),
+        (
+            "前端撞名时不再保持输入框打开（Explorer 同款交互被拆）",
+            "src/modules/desktop-grid/GridOverlay.tsx",
+            "          setRenamingItemPath(path);\n"
+            "          setItemRenameDraft(itemRenameDraft.trim());",
+            "          // mutation: 输入框被拆掉\n",
+            "撞名后输入框关闭 = 用户得重新 F2 打一遍名字，与资源管理器行为不一致",
+        ),
+        (
             "V99 枚举数据源退回纯注册表全量扫（与原生「新建」列表对不上）",
             "src-tauri/src/platform/shell_menu.rs",
             "    let mut exts = read_discardable_shell_new_classes();",

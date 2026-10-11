@@ -66,6 +66,7 @@ const ipcSrc = read(IPC);
 const overlaySrc = read(OVERLAY);
 const libSrc = read(LIB_RS);
 const handoffSrc = read(DESKTOP_HANDOFF);
+const nativeUiSrc = read('src-tauri/src/platform/native_ui.rs');
 
 /* ================================================================== *
  * ① 标志位：按 Explorer 的口径传，且不许谎报能改名
@@ -309,6 +310,37 @@ ok('改名后同步更新 grid_items 登记（否则出现幽灵条目）',
 ok('前端有 F2 改名', /event\.key !== 'F2'/.test(overlaySrc));
 ok('前端有「单击两次」改名（间隔 > 350ms 且 < 1500ms）',
   /now - last\.at > 350 && now - last\.at < 1500/.test(overlaySrc));
+
+/** 10-11 用户拍板：改名撞名弹 Windows 原生对话框，不再走 Handy toast */
+ok('撞名走原生对话框（rename_conflict_dialog），不再返回自绘文案',
+  /if target != source && target\.exists\(\) \{[\s\S]{0,200}?rename_conflict_dialog\(&trimmed, source\.is_dir\(\)\)/.test(rustCmdSrc) &&
+    !/已经有一个「/.test(rustCmdSrc));
+ok('撞名返回「已原生提示」哨兵（前端据此保持输入框打开、不再 toast）',
+  /rename_conflict_dialog\(&trimmed, source\.is_dir\(\)\);\s*\n\s*return Err\(crate::platform::native_ui::ERR_NATIVE_SHOWN\.to_string\(\)\)/.test(rustCmdSrc));
+ok('ipc.ts 有 ERR_NATIVE_DIALOG_SHOWN 哨兵且与 Rust 约定一致',
+  /export const ERR_NATIVE_DIALOG_SHOWN = '__native_dialog_shown__';/.test(ipcSrc));
+ok('前端改名失败遇哨兵：输入框保持打开（重新挂载），不弹 toast',
+  /if \(error\.message === ERR_NATIVE_DIALOG_SHOWN\) \{[\s\S]{0,400}?setRenamingItemPath\(path\);[\s\S]{0,120}?setItemRenameDraft\(itemRenameDraft\.trim\(\)\)/.test(overlaySrc));
+
+/** 10-11 用户拍板：删除文件本身走 Windows 原生（SHFileOperationW → 回收站） */
+ok('Rust 命令 grid_item_delete_file 存在且已注册',
+  /pub async fn grid_item_delete_file\(/.test(rustCmdSrc) &&
+    /commands::grid::grid_item_delete_file,/.test(libSrc));
+ok('原生删除走 FO_DELETE + FOF_ALLOWUNDO，且**不许**吞掉系统确认框（FOF_NOCONFIRMATION）',
+  /wFunc: FO_DELETE,/.test(nativeUiSrc) &&
+    /fFlags: FOF_ALLOWUNDO\.0 as u16,/.test(nativeUiSrc) &&
+    // 只看 fFlags 代码行 —— 模块注释里解释「故意不带 NOCONFIRMATION」会命中全文匹配
+    !/fFlags:[^\n]*FOF_NOCONFIRMATION/.test(nativeUiSrc));
+ok('用户取消原生确认框 = Ok(false)（前端保持原样），成功才清 grid_items 登记与「不要它」名单',
+  /if !deleted \{\s*\n\s*return Ok\(false\);/.test(rustCmdSrc) &&
+    /DELETE FROM grid_items WHERE file_path = \?1/.test(rustCmdSrc) &&
+    /set\.remove\(&path\)/.test(rustCmdSrc));
+ok('ipc.ts 暴露 gridItemDeleteFile（boolean = 是否真的删了）',
+  /gridItemDeleteFile: \(filePath: string\): Promise<boolean>/.test(ipcSrc));
+ok('前端条目菜单有「删除」行并接 deleteItemFile（文件没了才摘行 + 重排）',
+  /deleteItemFile\(target\);/.test(overlaySrc) &&
+    /title="删除文件本身：Windows 原生确认后进回收站（可还原）"/.test(overlaySrc) &&
+    /if \(!deleted\) \{\s*\n\s*return; \/\/ 原生确认框里点了取消/.test(overlaySrc));
 ok('新诊断 example bg_menu_dump.rs 仍在',
   fs.existsSync(path.join(root, 'src-tauri/examples/bg_menu_dump.rs')));
 
