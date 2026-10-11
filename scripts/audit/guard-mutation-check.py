@@ -1039,12 +1039,13 @@ MUTATIONS: dict[str, _M] = {
             "看到、却最难归因的那种坏",
         ),
         (
-            "摆位不再挂在重排之后（按新格子算坐标、按旧底板放图标）",
+            "重排后又自动摆位（V102.4 已拆的链路被接回）",
             "src/modules/desktop-grid/GridOverlay.tsx",
-            "        .then(() => ipc.desktopIconLayoutApply())",
-            "        .then(() => null)",
-            "少了这一脚，拖动格子之后底板挪了、图标还停在旧位置 —— 直到下一次偶然的重排才"
-            "跟上。表现为「拖完格子图标乱飞一下又回到原位」",
+            "      void ipc.gridRelayout().then(() => refresh()).catch(() => undefined);",
+            "      void ipc.gridRelayout().then(() => refresh()).catch(() => undefined);\n"
+            "      void ipc.gridRelayout().then(() => ipc.desktopIconLayoutApply()).catch(() => undefined);",
+            "V102.2/V102.3 的摆位实验被 Win11 槽位吸附打散（任意坐标留不住），用户拍板回退。"
+            "只要这条自动摆位回来，一次重排就会把还原好的桌面图标重新拖进格子再散掉",
         ),
         (
             "还原入口摆到快照判断之外（没快照也显示）",
@@ -1091,70 +1092,6 @@ MUTATIONS: dict[str, _M] = {
             "v12 的职责只有一个：清掉**接管时代**的键。`overlay_visible` 是显隐的唯一真源"
             "（V79：谁写谁广播，前端 fail-closed 依赖它）、`icon_pos_backup` 是「还原图标布局」"
             "的凭据、`fflags_backup` 是自动排列的原值 —— 顺手清掉其中之一，功能就静默少一块",
-        ),
-        # —— V102.2「整理失效」（2026-10-11）：摆位必须有 Rust 端这条腿 ——
-        (
-            "一键整理又不含摆位（底板重排了、图标原地不动）",
-            "src-tauri/src/commands/grid.rs",
-            "    crate::commands::grid_icons::apply_after_relayout(&app);\n    Ok(report)",
-            "    Ok(report)",
-            "2026-10-11 事故本体：摆位只靠前端 relayoutSoon 那条链，一键整理跑完格子重排、"
-            "图标却停在自动排列时代的密集网格位置 —— 用户看到的就是「整理失效」，且零报错",
-        ),
-        (
-            "增量重排又不含摆位（便签一加、图标就跟格子对不齐）",
-            "src-tauri/src/commands/grid.rs",
-            "        \"重排（不扫描·增量）：挪动 {} 个 / 按内容调整 {} 个尺寸 / 挂件归位 {} 个 / 空间不足 {} 个\",\n"
-            "        outcome.moved, outcome.resized, outcome.anchored, outcome.overflowed\n"
-            "    ));\n"
-            "    crate::commands::grid_icons::apply_after_relayout(&app);",
-            "        \"重排（不扫描·增量）：挪动 {} 个 / 按内容调整 {} 个尺寸 / 挂件归位 {} 个 / 空间不足 {} 个\",\n"
-            "        outcome.moved, outcome.resized, outcome.anchored, outcome.overflowed\n"
-            "    ));",
-            "grid_relayout 是挂件 / 新格子 / 拖动后最常走的重排路 —— 少这一脚，"
-            "每次增量重排都让底板与图标错开一点，攒几次就「看着不对却说不出哪次开始错的」",
-        ),
-        (
-            "启动装配的最后一脚摆位被拿掉（开机后图标停回密集网格）",
-            "src-tauri/src/commands/grid_icons.rs",
-            "    // ⑤ 启动即摆位：自动排列已经关掉，图标停在关掉那一刻的密集网格位置 ——\n"
-            "    //    不在这里摆一次，格子底板和图标就一直是两张皮，直到用户碰巧触发一次重排\n"
-            "    //    （2026-10-11「整理失效」事故的另一半根因）。\n"
-            "    apply_after_relayout(app);",
-            "    let _ = app;",
-            "关掉自动排列不会重新摆放图标 —— 它们停在关掉那一刻的位置。启动不摆位 ⇒ "
-            "从启动到第一次重排之间，桌面永远是「空格子底板 + 密集网格图标」两张皮",
-        ),
-        # —— V102.3（10-11 深夜）：摆位必须量化到 Explorer 槽位网格 ——
-        (
-            "摆位坐标不再量化（发任意像素 ⇒ Explorer 0.3s 内把图标吸到别处）",
-            "src-tauri/src/commands/grid_icons.rs",
-            "            let slot_x = quantize(screen_x, sx_phys, phase_x);\n"
-            "            let slot_y = quantize(screen_y, sy_phys, phase_y);\n"
-            "            placements.push((\n"
-            "                index,\n"
-            "                slot_x - client_x,\n"
-            "                slot_y - client_y,\n"
-            "            ));",
-            "            placements.push((\n"
-            "                index,\n"
-            "                screen_x as i32 - client_x,\n"
-            "                screen_y as i32 - client_y,\n"
-            "            ));",
-            "真机实测（Win11 125%）：Explorer 会把非槽位坐标 0.3s 内吸到最近槽位 —— "
-            "清 LVS_EX_SNAPTOGRID / FFlags / 自动排列都拦不住；表现就是用户 12:45 的截图："
-            "「格子底板在、图标全散成密集网格」",
-        ),
-        (
-            "槽位相位写死 0（不按现有图标反推 ⇒ 整体偏半格）",
-            "src-tauri/src/commands/grid_icons.rs",
-            "        Ok(pos) if !pos.is_empty() => (\n"
-            "            f64::from(pos[0].0.rem_euclid(sx_phys as i32)),\n"
-            "            f64::from(pos[0].1.rem_euclid(sy_phys as i32)),\n"
-            "        ),",
-            "        Ok(_pos) => (0.0, 0.0),",
-            "槽位网格有相位（本机实测 (27,2) 物理）——写死 0 会让整列图标偏到格子外面，"
-            "而「偏差一致」还会让它看起来不像 bug、像设计",
         ),
     ],
 }

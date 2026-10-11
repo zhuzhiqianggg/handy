@@ -1417,13 +1417,11 @@ export function GridOverlay(): React.JSX.Element {
     }
     relayoutTimer.current = window.setTimeout(() => {
       relayoutTimer.current = null;
-      void ipc
-        .gridRelayout()
-        .then(() => refresh())
-        // 摆位：格子几何变了，把原生图标按新网格**重摆一次** —— 否则底板挪了、
-        // 图标还停在旧位置（Step 4 起 B 模式是唯一路径，这条恒执行）。
-        .then(() => ipc.desktopIconLayoutApply())
-        .catch(() => undefined);
+      void ipc.gridRelayout().then(() => refresh()).catch(() => undefined);
+      // V102.4 回退：不再自动摆位。V102.2/V102.3 的摆位实验在真机上被 Win11 槽位吸附
+      // 打散（任意坐标留不住），用户拍板「回退到之前的已经做好的位置」——桌面图标
+      // 交还 Explorer 原位保持，格子只当装饰底板。手动能力仍保留：
+      // `desktop_icon_layout_apply`（手动/调试）与「还原图标布局」按钮（restore）。
     }, RELAYOUT_DEBOUNCE_MS);
   }, [holdQuiet, isQuiet, refresh]);
 
@@ -3315,10 +3313,11 @@ export function GridOverlay(): React.JSX.Element {
           );
           return;
         }
-        // B 方案（Step 4）起图标永远由 Explorer 绘制并摆进格子，「接管/隐藏」不存在了；
-        // 旧文案「本机不支持自动隐藏图标，建议手动切换为接管」会在这条恒 false 分支上
-        // 每次整理都误导用户（2026-10-11 截图顶部那条 toast 就是它）。
-        showHint(`整理完成：${parts.join('、')}`);
+        showHint(
+          report.iconsHidden
+            ? `整理完成：${parts.join('、')}；桌面图标已交由格子接管`
+            : `整理完成：${parts.join('、')}；本机不支持自动隐藏图标，建议手动切换为接管`,
+        );
       })
       .catch((error: Error) => {
         reportOperation('整理桌面', error);

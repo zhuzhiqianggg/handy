@@ -288,8 +288,7 @@ ok('图标坐标 = 工作区 + 格子位置 + 内容原点（与底板同一条�
   /i64::from\(work_x\) \+ bx \+ frame\.origin_dx \+ col \* frame\.cell_w/.test(giSrc) &&
     /i64::from\(work_y\) \+ by \+ frame\.origin_dy \+ row \* frame\.cell_h/.test(giSrc));
 ok('图标坐标换算到列表框客户区（图标坐标是相对它的）',
-  /slot_x - client_x/.test(giSrc) && /slot_y - client_y/.test(giSrc) &&
-    /window_client_origin\(list\)/.test(giSrc));
+  /screen_x - i64::from\(client_x\)/.test(giSrc) && /window_client_origin\(list\)/.test(giSrc));
 ok('布局引擎真的读了 B 模式的 icon 基准（否则底板与图标两套尺寸）',
   /b_icon_arg\(conn\)/.test(cmdSrc));
 ok('b_icon_arg **不再**看 `icon_control`（开关退场，只看「间距测到没有」）',
@@ -313,52 +312,11 @@ ok('还原的是**备份的原值**（不是硬编码 true —— 决策 3：原
   /set_autoarrange\(list, di::flags_autoarrange_on\(flags\)\)/.test(giSrc) &&
     /fn flags_autoarrange_on\(/.test(diSrc),
   '硬编码 `true` 会把「本来就没开自动排列」的用户改成开着');
-// —— V102.3（2026-10-11 深夜）：摆位坐标必须量化到 Explorer 槽位网格 ——
-// 真机实测（Win11 125%）：LVM_SETITEMPOSITION 发任意坐标，Explorer 0.3s 内吸到最近
-// 槽位（步长 = spacing×DPI = 95×110 物理、相位 = 现有槽位 mod 步长）；清
-// LVS_EX_SNAPTOGRID / FFlags / 自动排列都拦不住；摆到精确槽位则稳定。
-// SETICONSPACING 会引发全桌面重排，不能用 ⇒ 只能「坐标跟着槽位走」。
-{
-  ok('摆位先测 DPI（scale_factor）——量化在物理像素上做',
-    /apply_layout[\s\S]{0,2500}?scale_factor\(\)/.test(giSrc));
-  ok('槽位步长 = spacing × scale（逻辑间距换算物理网格）',
-    /f64::from\(spacing\.0\) \* scale/.test(giSrc) && /f64::from\(spacing\.1\) \* scale/.test(giSrc));
-  ok('槽位相位从现有图标坐标反推（mod 步长）——不写死像素',
-    /rem_euclid\(/.test(giSrc) && /positions\(list\)/.test(giSrc));
-  ok('坐标发送前经过 quantize（round 到槽位）——不发任意像素',
-    /let slot_x = quantize\(screen_x/.test(giSrc) && /let slot_y = quantize\(screen_y/.test(giSrc));
-  ok('work_area 原点转逻辑（bx 是逻辑 —— 不许物理逻辑混算）',
-    /to_logical::<i32>\(m\.scale_factor\(\)\)/.test(giSrc));
-  ok('摆位日志带未匹配计数（静默 = 零取证）',
-    /图标摆位：成功 \{placed\} 个 \/ 未匹配 \{unmatched\} 个/.test(giSrc));
-}
-
 ok('名字匹配同时登记「带扩展名」与「不带扩展名」（显示名取决于用户偏好）',
   /if let Some\(\(stem, _\)\) = key\.rsplit_once\('\.'\)/.test(giSrc) &&
     /key\.rsplit_once\('\.'\)[\s\S]{0,300}?index_of\.get\(stem\)/.test(giSrc));
 ok('对不上的条目只计数、不算失败（`unmatched` 透给 UI 说实话）',
   /unmatched \+= 1;\s*continue;/.test(giSrc) && /unmatched/.test(typesSrc));
-
-// —— V102.2「整理失效」事故（2026-10-11）：摆位不能只靠前端 relayoutSoon 那条链 ——
-// 启动装配关掉自动排列后没人摆图标 + 一键整理/重排/重置都不摆 ⇒ 底板与图标两张皮。
-// Rust 端必须有 `apply_after_relayout` 这条腿，且三个重排命令 + 启动装配都要挂上。
-{
-  ok('Rust 端有独立摆位入口 apply_after_relayout（不依赖前端发 IPC）',
-    /pub fn apply_after_relayout\(app: &AppHandle\)/.test(giSrc),
-    '前端那条链会静默吞错（`.catch(() => undefined)`），且启动 / 一键整理根本不走它');
-  const rustHooks = cmdSrc.split('crate::commands::grid_icons::apply_after_relayout(&app)').length - 1;
-  ok('三个重排命令都挂了 Rust 端摆位（auto_arrange / relayout / layout_reset）',
-    rustHooks === 3,
-    `实际挂了 ${rustHooks} 处，缺任何一处 = 那条路径上底板重排了、图标原地不动`);
-  ok('启动装配的最后一步就是摆位（不摆 = 图标停在自动排列时代的密集网格）',
-    /restore_desktop_icons\(app\);[\s\S]{0,400}?apply_after_relayout\(app\);/.test(giSrc));
-  ok('摆位失败打日志（不许再静默 —— 静默 = 用户报障时零取证）',
-    /图标摆位失败/.test(giSrc));
-  ok('整理完成 toast 不再走「iconsHidden 三元」（旧 false 分支会把误导文案顶给用户）',
-    !/showHint\(\s*report\.iconsHidden/.test(overlaySrc) &&
-      !/建议手动切换为接管/.test(overlaySrc.replace(/\/\/[^\n]*/g, '')),
-    'iconsHidden 恒 false ⇒ 旧三元每次整理都把「本机不支持自动隐藏图标」这句误导顶给用户');
-}
 
 /* ================================================================== *
  * ⑦ 命令注册与前端接线
@@ -447,14 +405,16 @@ ok('命中区外扩 HIT_PADDING 小于内容区上内边距 GRID_PAD_Y（否则�
 ok('Rust 侧确实还在用外扩矩形做命中测试（说明上一条不是空断言）',
   /rel_x >= r\.x - HIT_PADDING[\s\S]{0,200}?rel_y <= r\.y \+ r\.height \+ HIT_PADDING/.test(cmdSrc));
 {
-  // 摆位必须**挂在重排之后** —— 反过来就是「按新格子算坐标、按旧格子画底板」。
-  const idx = overlaySrc.indexOf('desktopIconLayoutApply()');
-  const thenIdx = overlaySrc.lastIndexOf('.then(', idx);
-  ok('摆位调用挂在上次重排（relayoutSoon）之后',
-    idx > 0 && thenIdx > 0 && idx - thenIdx < 200,
-    `then@${thenIdx} apply@${idx}`);
-  ok('摆位**无条件**调用（不再有 `iconControl ? … : Promise.resolve(null)` 的三元）',
-    /\.then\(\(\) => ipc\.desktopIconLayoutApply\(\)\)/.test(overlaySrc));
+  // V102.4 回退：摆位**自动链路已拆**（Win11 槽位吸附打散布局，用户拍板回退）。
+  // 锁「不再自动摆位」：relayoutSoon 里不许再出现 `.then(() => ipc.desktopIconLayoutApply())`
+  // —— 否则一次重排就把刚还原的桌面图标重新拖进格子（被吸附后散成密集网格）。
+  ok('重排后不再自动摆位（自动链路已拆，V102.4）',
+    !/\.then\(\(\) => ipc\.desktopIconLayoutApply\(\)\)/.test(overlaySrc),
+    '若要恢复摆位必须连同量化/吸附对策一起回来，不许只接回这一条');
+  // 摆位的**手动能力**仍在：命令注册（lib.rs）+ ipc 导出 + 还原按钮，一个都不能少。
+  ok('desktopIconLayoutApply 手动能力保留（命令仍注册）',
+    /desktop_icon_layout_apply/.test(libSrc),
+    'lib.rs 必须仍注册 desktop_icon_layout_apply —— 「还原图标布局」之外的手动入口');
 }
 
 /* ================================================================== *

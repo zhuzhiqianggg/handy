@@ -154,37 +154,6 @@ fn apply_layout(conn: &Connection, app: &AppHandle) -> Result<(usize, usize), St
     let arg = crate::commands::grid::b_icon_arg_for_spacing(spacing.1);
     let names = di::item_names(list)?;
 
-    // —— 2026-10-11 深夜追加：摆位坐标必须**量化到 Explorer 的槽位网格** ——
-    //
-    // 真机实测（Win11，125%）：`LVM_SETITEMPOSITION` 发任意坐标，Explorer 会在
-    // 0.3s 内把图标吸到最近的槽位（步长 = 图标间距 × DPI，相位 = 现有槽位坐标
-    // mod 步长）——清 `LVS_EX_SNAPTOGRID`、清 FFlags、关自动排列都拦不住。
-    // 摆到**精确槽位**则稳定（探针 0.8s 不动）。于是：目标坐标 × DPI 变物理后
-    // 四舍五入到槽位。cell_h(88 逻辑)×1.25 恰好 = 槽位步长 110 ⇒ 行结构天然
-    // 对齐；cell_w(84)→105 vs 95 有半格内偏差，量化后每格内仍是规则网格
-    // （腾讯桌面整理同样存在半格内偏移）。
-    let scale = app
-        .primary_monitor()
-        .ok()
-        .flatten()
-        .map(|m| m.scale_factor())
-        .unwrap_or(1.0);
-    let sx_phys = (f64::from(spacing.0) * scale).round().max(1.0);
-    let sy_phys = (f64::from(spacing.1) * scale).round().max(1.0);
-    // 槽位相位：任何现有图标坐标 mod 步长都等于相位（所有槽位同相位），取第一个即可。
-    let (phase_x, phase_y) = match di::positions(list) {
-        Ok(pos) if !pos.is_empty() => (
-            f64::from(pos[0].0.rem_euclid(sx_phys as i32)),
-            f64::from(pos[0].1.rem_euclid(sy_phys as i32)),
-        ),
-        _ => (0.0, 0.0),
-    };
-    let quantize = |logic: i64, step: f64, phase: f64| -> i32 {
-        let phys = logic as f64 * scale;
-        let slot = ((phys - phase) / step).round();
-        (phase + slot * step).round() as i32
-    };
-
     // 显示名 → 下标。桌面上显示名就是文件名（带不带扩展名取决于用户偏好），
     // 所以两种形式都登记；同名冲突时保留先出现的那个。
     let mut index_of: HashMap<String, usize> = HashMap::with_capacity(names.len());
@@ -196,19 +165,18 @@ fn apply_layout(conn: &Connection, app: &AppHandle) -> Result<(usize, usize), St
         }
     }
 
-    // 工作区原点（**逻辑**像素）—— 格子坐标是逻辑，统一到逻辑再乘 scale。
+    // 工作区原点（物理像素）—— 格子坐标是相对工作区的。
     let (work_x, work_y) = app
         .primary_monitor()
         .ok()
         .flatten()
         .map(|m| {
             let p = m.work_area().position;
-            let l = p.to_logical::<i32>(m.scale_factor());
-            (i64::from(l.x), i64::from(l.y))
+            (p.x, p.y)
         })
         .unwrap_or((0, 0));
 
-    // 桌面列表框客户区原点（**物理**屏幕坐标）—— 图标坐标是相对它的。
+    // 桌面列表框客户区原点（屏幕坐标）—— 图标坐标是相对它的。
     let (client_x, client_y) = crate::commands::grid::window_client_origin(list);
 
     let boxes: Vec<(i64, i64, i64, i64, i64)> = {
@@ -274,13 +242,10 @@ fn apply_layout(conn: &Connection, app: &AppHandle) -> Result<(usize, usize), St
                 i64::from(work_x) + bx + frame.origin_dx + col * frame.cell_w;
             let screen_y =
                 i64::from(work_y) + by + frame.origin_dy + row * frame.cell_h;
-            // 逻辑 → 物理 → 量化到 Explorer 槽位（吸附网格），见函数头注释。
-            let slot_x = quantize(screen_x, sx_phys, phase_x);
-            let slot_y = quantize(screen_y, sy_phys, phase_y);
             placements.push((
                 index,
-                slot_x - client_x,
-                slot_y - client_y,
+                (screen_x - i64::from(client_x)) as i32,
+                (screen_y - i64::from(client_y)) as i32,
             ));
         }
     }
@@ -362,11 +327,6 @@ pub fn ensure_native_layout(app: &AppHandle) {
     // 保险：万一历史版本把图标藏了（接管态残留），这里立刻还给系统 ——
     // B 方案下图标必须由 Explorer 画，否则「遥控」没有对象。
     crate::commands::grid::restore_desktop_icons(app);
-
-    // ⑤ 启动即摆位：自动排列已经关掉，图标停在关掉那一刻的密集网格位置 ——
-    //    不在这里摆一次，格子底板和图标就一直是两张皮，直到用户碰巧触发一次重排
-    //    （2026-10-11「整理失效」事故的另一半根因）。
-    apply_after_relayout(app);
 }
 
 /// 重新摆位（改了格子 / 条目之后调）。返回本轮摆位计数。
@@ -375,40 +335,6 @@ pub async fn desktop_icon_layout_apply(app: AppHandle) -> Result<IconControlStat
     let conn = connect(&app)?;
     let (placed, unmatched) = apply_layout(&conn, &app)?;
     Ok(status_of(&conn, placed, unmatched))
-}
-
-/// **Rust 端摆位入口**：任何「格子几何变了」的 Rust 命令（一键整理 / 重排 / 重置）
-/// 在改完 DB 之后调它，把原生图标按新格子重摆一次。
-///
-/// # 为什么必须有这条（2026-10-11「整理失效」事故）
-///
-/// V102 里摆位只有一条路：前端 `relayoutSoon` → `gridRelayout` →
-/// `.then(() => ipc.desktopIconLayoutApply())`。于是**启动装配关掉自动排列之后**
-/// 图标停在关掉那一刻的密集网格位置（没人摆它们），用户点「一键整理」格子底板重排了、
-/// 图标却原地不动 —— 表现就是「整理失效」。
-///
-/// 教训：**「底板画到哪」与「图标摆到哪」必须由同一段逻辑保证**，不能指望前端记得
-/// 再发一条 IPC（前端不发 = 图标不摆 = 没有任何报错）。前端那条 `.then()` 保留作
-/// 双保险，但真正的保证在这里。
-///
-/// 失败打日志（`grid` 通道）不 panic —— 摆不上图标格子底板还在，下一轮重排会再试。
-pub fn apply_after_relayout(app: &AppHandle) {
-    let Ok(conn) = connect(app) else {
-        return;
-    };
-    match apply_layout(&conn, app) {
-        Ok((placed, unmatched)) => {
-            if placed > 0 || unmatched > 0 {
-                crate::logging::write_line(
-                    "grid",
-                    &format!(
-                        "图标摆位：成功 {placed} 个 / 未匹配 {unmatched} 个（未匹配 = 格子里的条目在桌面图标视图里找不到同名项）"
-                    ),
-                );
-            }
-        }
-        Err(err) => crate::logging::write_line("grid", &format!("图标摆位失败：{err}")),
-    }
 }
 
 /// **一键把桌面还给系统**：还原图标位置 **+** 还原「自动排列 / 对齐网格」偏好。

@@ -6887,14 +6887,11 @@ pub async fn grid_auto_arrange(
     // —— B 方案 Step 4（2026-10-10 收尾）：这里**不再动系统桌面图标** ——
     //
     // V38–V39 这一段是「点整理 = 顺手把原生图标藏起来，由格子层接管呈现」。B 方案把图标的
-    // 归属交还 Explorer 之后，「藏图标」这件事不存在了。整理只剩「扫描 + 登记 + 重排」三件事。
+    // 归属交还 Explorer 之后，「藏图标」这件事不存在了。整理只剩「扫描 + 登记 + 重排」三件事，
+    // 摆位由 [`crate::commands::grid_icons::desktop_icon_layout_apply`] 负责（前端在重排后调）。
     //
     // `icons_hidden` 恒 false —— 它是前端徽标要显示的事实：**图标始终在**。
     report.icons_hidden = false;
-
-    // 整理的最后一步：把登记条目对应的原生图标**按新格子摆进去**（2026-10-11「整理失效」
-    // 事故的修复 —— 之前摆位只靠前端 relayoutSoon 那条链，一键整理根本没人摆）。
-    crate::commands::grid_icons::apply_after_relayout(&app);
     Ok(report)
 }
 
@@ -6918,7 +6915,6 @@ pub async fn grid_relayout(app: AppHandle) -> Result<(), String> {
         "重排（不扫描·增量）：挪动 {} 个 / 按内容调整 {} 个尺寸 / 挂件归位 {} 个 / 空间不足 {} 个",
         outcome.moved, outcome.resized, outcome.anchored, outcome.overflowed
     ));
-    crate::commands::grid_icons::apply_after_relayout(&app);
     Ok(())
 }
 
@@ -6936,7 +6932,6 @@ pub async fn grid_layout_reset(app: AppHandle) -> Result<(), String> {
         "重置整理（全量）：挪动 {} 个 / 按内容调整 {} 个尺寸 / 挂件归位 {} 个 / 空间不足 {} 个",
         outcome.moved, outcome.resized, outcome.anchored, outcome.overflowed
     ));
-    crate::commands::grid_icons::apply_after_relayout(&app);
     Ok(())
 }
 
