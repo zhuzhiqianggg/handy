@@ -1872,6 +1872,26 @@ export function GridOverlay(): React.JSX.Element {
       pendingRefreshRef.current = true;
       return;
     }
+    if (added.length === 0) {
+      // V102.7：变化**不在「未归类竖条」里** ⇒ 变的是格子里那个文件被外部删掉 / 移走了。
+      // 竖条前后一样，这条快通道原来会直接 return，于是失效登记一直挂在格子里（幽灵），
+      // 只能等 15 秒的轮询才对账 —— 用户在这个窗口里右键 / 打开它就"毫无反应"
+      //（后端 `SHCreateItemFromParsingName` 拿不到 0x80070002 的对象，菜单弹不出来）。
+      //
+      // 这里补一次**只对账不收录**的便宜校验（`gridDesktopSync` 只 stat 已有登记）：
+      // 真有失效登记就立刻刷一遍；正在改名时仍然让路，交给安静期后的补跑。
+      const report = await ipc.gridDesktopSync().catch(() => null);
+      if (report !== null && report.pruned > 0) {
+        if (renamingRef.current) {
+          pendingRefreshRef.current = true;
+        } else {
+          void refresh()
+            .then(() => refreshLoose())
+            .catch(() => undefined);
+        }
+      }
+      return;
+    }
     if (added.length !== 1 || renamingRef.current) {
       // 一次建了多个 / 已经在改名：不抢焦点（用户可能正打在兴头上）
       return;
@@ -1885,7 +1905,7 @@ export function GridOverlay(): React.JSX.Element {
       /* 拿不到前台不影响改名框渲染，用户点一下照样能打字 */
     }
     beginItemRename(target, target.split(/[\\/]/).pop() ?? target);
-  }, [beginItemRename, fetchLoose, holdQuiet]);
+  }, [beginItemRename, fetchLoose, holdQuiet, refresh, refreshLoose]);
 
   useEffect(() => {
     if (!isTauri()) {
@@ -4351,7 +4371,15 @@ export function GridOverlay(): React.JSX.Element {
                       setMenuItem(null);
                       void ipc
                         .shellContextMenu(item.filePath, event.shiftKey)
-                        .catch((error: Error) => showHint(error.message));
+                        .catch((error: Error) => {
+                          // V102.7 幽灵条目：文件已经被删掉 / 移走时，Shell 弹不出菜单，
+                          // 后端会把「已经不在了」原样回给前端。这里除了提示，还要**立刻
+                          // 刷新一次**把它从格子里摘掉 —— 否则用户会反复右键同一条死条目。
+                          showHint(error.message);
+                          void refresh()
+                            .then(() => refreshLoose())
+                            .catch(() => undefined);
+                        });
                       return;
                     }
                     setMenuItem({ item, x: event.clientX, y: event.clientY });

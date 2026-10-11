@@ -3768,6 +3768,26 @@ pub async fn shell_context_menu(
 ) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
+        // V102.7「幽灵条目」：文件/文件夹**已经被删掉或移走**时，Shell 拿不到它的
+        // `IShellItem`（`SHCreateItemFromParsingName` → `0x80070002`），菜单自然弹不出来。
+        // 那句失败发生在我们**投递到主线程的闭包**里 —— 前端收不到，用户在界面上看到的
+        // 就是「右键一点反应都没有」。
+        //
+        // 用户 10-11：「格子里面删除也有问题，什么玩意啊」—— 他右键的正是一个已被删除的
+        // 文件（网格里留着幽灵登记）。所以**先在调用线程探一次**：路径不在就直接回错误，
+        // 前端据此给出可读提示，并立刻刷新把这条失效登记从格子里摘掉。
+        if !std::path::Path::new(&path).exists() {
+            let name = std::path::Path::new(&path)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.clone());
+            grid_log(&format!(
+                "条目已失效（{path}）：文件不在了，菜单击不出来 —— 已让前端刷新摘掉这条登记"
+            ));
+            return Err(format!(
+                "「{name}」已经不在了（可能刚被删除或移走），已把它从格子里去掉"
+            ));
+        }
         let handle = app.clone();
         let target = path.clone();
         let want_extended = extended.unwrap_or(false);

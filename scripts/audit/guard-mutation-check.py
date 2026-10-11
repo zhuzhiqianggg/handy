@@ -853,6 +853,33 @@ MUTATIONS: dict[str, _M] = {
             "不是「名字上有了光标」，而是「整张桌面自己刷了一下、格子全跳一遍」——"
             "正是用户 10-10 说的「跟正常的桌面行为不一样」",
         ),
+        (
+            "V102.7 幽灵条目：右键前不再探路径（回执变成「右键没反应」）",
+            "src-tauri/src/commands/grid.rs",
+            "        if !std::path::Path::new(&path).exists() {\n",
+            "        if false {\n",
+            "文件已被删除时 Shell 拿不到 IShellItem（0x80070002），菜单弹不出来；而那句失败"
+            "发生在**投递到主线程的闭包**里 ⇒ 前端收不到 ⇒ 用户看到的是「右键一点反应都没有」"
+            "（10-11 原话：「格子里面删除也有问题，什么玩意啊」）",
+        ),
+        (
+            "V102.7 幽灵条目：右键失败不再刷新（死条目永远赖在格子里）",
+            "src/modules/desktop-grid/GridOverlay.tsx",
+            "                          showHint(error.message);\n"
+            "                          void refresh()\n"
+            "                            .then(() => refreshLoose())\n"
+            "                            .catch(() => undefined);",
+            "                          showHint(error.message);",
+            "提示了却不摘登记 ⇒ 用户每右键一次同一条死条目都是同一个错，格子越点越脏",
+        ),
+        (
+            "V102.7 幽灵条目：桌面变化只看竖条（格子里被外部删除的文件长时间不消失）",
+            "src/modules/desktop-grid/GridOverlay.tsx",
+            "    if (added.length === 0) {",
+            "    if (false) {",
+            "被删掉的文件在**格子里**而不在「未归类竖条」里 ⇒ 竖条前后一样 ⇒ 这条事件快通道"
+            "直接 return，失效登记只能等 15 秒轮询才对账；窗口期内用户点它就是「毫无反应」",
+        ),
     ],
 
     # V102 新增：B 方案（不接管原生桌面）这一组归 test-icon-control.mjs 管。
